@@ -169,15 +169,14 @@ D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
         
 @time MC_dose_fast!(ion, Npar, x_beam, y_beam, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2, type_AT, track_seg)
-#plot_dose_cell(cell_df_copy, layer_plot = false)
+plot_dose_cell(cell_df_copy, layer_plot = false)
 
 #~ ==========================================================================================
 #~ ================================== compute damage ========================================
 #~ ==========================================================================================
 
 MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2)
-
-#plot_damage(cell_df_copy, layer_plot = true)
+plot_damage(cell_df_copy, layer_plot = true)
 
 #~ ==========================================================================================
 #~ ================================= compute survival =======================================
@@ -192,7 +191,7 @@ compute_cell_survival_GSM2!(cell_df_copy, gsm2)
 
 nat_apo = 10^-10
 compute_times_domain!(cell_df_copy, gsm2, nat_apo)
-plt = plot_times(cell_df)
+plot_times(cell_df_copy)
 
 
 

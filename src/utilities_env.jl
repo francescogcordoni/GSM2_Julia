@@ -244,7 +244,7 @@ function setup_cell_lattice!(target_geom::String,
                                 N_sideVox::Int,
                                 N_CellsSide::Int;
                                 ParIrr::String = "false",
-                                track_seg::Bool = "true")
+                                track_seg::Bool = true)
     # --- Generate positions ---
     N_local, nodes_positions_local, N_CellsSide_local =
         generate_cells_positions_selector(target_geom, ParIrr,

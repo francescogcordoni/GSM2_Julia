@@ -9,9 +9,9 @@ Crea una figura con **due pannelli** per visualizzare la distribuzione delle dos
   - Se `layer_plot == true`  → densità **raggruppata per `energy_step`**: una curva per ciascun valore distinto di `energy_step` presente tra le celle attive.
 
 - **Pannello destro (3D scatter)**
-  - Rappresentazione 3D di `(x, y, dose_cell)` per le celle attive.
-  - I punti sono colorati in funzione di `dose_cell`.
-  - (Opzionale) filtro `x ≥ 0` per una vista “semi-sfera”.
+    - Rappresentazione 3D di `(x, y, dose_cell)` per le celle attive.
+    - I punti sono colorati in funzione di `dose_cell`.
+    - (Opzionale) filtro `x ≥ 0` per una vista “semi-sfera”.
 
 # Requisiti colonne in `cell_df`
 - Obbligatorie: `:x`, `:y`, `:dose_cell`, `:is_cell`
@@ -614,4 +614,322 @@ function plot_times(cell_df::DataFrame;
     end
 
     return plt
+end
+
+"""
+plot_initial_distributions(cell_df::DataFrame;
+                                bins::Int=50,
+                                linewidth::Int=2,
+                                size::Tuple{Int,Int}=(1000,400),
+                                titlefont=12,
+                                labelfont=10)
+
+Plot the initial distributions of **death times** and **recovery times**
+for alive cells (`is_cell == 1`). Two side-by-side density plots are produced.
+
+# Behavior
+- Extracts finite (non-missing, non-Inf) values from:
+    - `death_time` (always required)
+    - `recover_time` (optional column)
+- If a distribution contains no finite values, an empty placeholder plot with
+    the corresponding title is shown instead.
+- Returns a combined plot object produced by `Plots.plot(...)`.
+
+# Arguments
+- `cell_df::DataFrame`: Simulation state containing:
+    - `is_cell::Vector{Int}`
+    - `death_time::Vector{<:Real or Missing}`
+    - optional `recover_time::Vector{<:Real or Missing}`
+
+# Keyword Arguments
+- `bins::Int=50`: Number of bins used internally by the density estimation.
+- `linewidth::Int=2`: Line width for density curves.
+- `size=(1000,400)`: Dimensions of the output plot.
+- `titlefont`, `labelfont`: Font sizes for titles and labels.
+
+# Returns
+- A single `Plots.Plot` object containing the two subplots.
+
+# Notes
+- Uses `density()` from `Plots.jl`.  
+- `missing` and `Inf` values are automatically ignored.
+- If `recover_time` is absent, the recovery panel displays “Column `recover_time` not found”.
+"""
+function plot_initial_distributions(cell_df::DataFrame;
+                                    bins::Int=50,
+                                    linewidth::Int=2,
+                                    size::Tuple{Int,Int}=(1000, 400),
+                                    titlefont=12,
+                                    labelfont=10)
+
+    alive_mask = cell_df.is_cell .== 1
+
+    # Helper to gather finite numeric values
+    @inline function _finite_values(vec)
+        vals = vec[alive_mask]
+        return [v for v in vals if !(ismissing(v) || isinf(v))]
+    end
+
+    # --- Death times ---
+    finite_death = _finite_values(cell_df.death_time)
+    p_death =
+        if !isempty(finite_death)
+            density(
+                finite_death;
+                title="Death Time Distribution",
+                xlabel="Time (h)",
+                ylabel="Density",
+                label="Death Times",
+                linewidth=linewidth,
+                titlefont=titlefont,
+                guidefont=labelfont
+            )
+        else
+            plot(
+                title="No finite death times",
+                titlefont=titlefont
+            )
+        end
+
+    # --- Recovery times (optional) ---
+    have_recover = hasproperty(cell_df, :recover_time)
+
+    finite_recover =
+        have_recover ? _finite_values(cell_df.recover_time) : Float64[]
+
+    p_recover =
+        if !have_recover
+            plot(title="Column `recover_time` not found", titlefont=titlefont)
+        elseif isempty(finite_recover)
+            plot(title="No finite recovery times", titlefont=titlefont)
+        else
+            density(
+                finite_recover;
+                title="Recovery Time Distribution",
+                xlabel="Time (h)",
+                ylabel="Density",
+                label="Recovery Times",
+                linewidth=linewidth,
+                titlefont=titlefont,
+                guidefont=labelfont
+            )
+        end
+
+    return plot(p_death, p_recover; layout=(1,2), size=size)
+end
+
+"""
+create_snapshot(cell_df::DataFrame) -> DataFrame
+
+Return a **copy** of the subset of `cell_df` containing only the alive cells
+(`is_cell == 1`). This produces a standalone DataFrame representing a
+simulation snapshot at a given time point.
+
+# Arguments
+- `cell_df::DataFrame`: The full simulation state containing at least the
+    column `is_cell`, where `1` indicates an alive cell and `0` indicates an
+    empty lattice location.
+
+# Returns
+- `DataFrame`: A *new* DataFrame containing only the rows where `is_cell == 1`.
+    All columns are preserved. The result is a deep copy, so modifications to the
+  returned DataFrame do **not** affect the original `cell_df`.
+
+# Notes
+- If you need a **view** for performance instead of a copy, consider:
+    `@view cell_df[cell_df.is_cell .== 1, :]`
+    But views keep references to the original storage, so modifications reflect
+    back into `cell_df`.
+- This function guarantees isolation by using `copy(...)`.
+
+"""
+function create_snapshot(cell_df::DataFrame)::DataFrame
+    alive_mask = cell_df.is_cell .== 1
+
+    # If no alive cells, return an empty DataFrame with same schema
+    if !any(alive_mask)
+        return similar(cell_df, 0)
+    end
+
+    return copy(cell_df[alive_mask, :])
+end
+
+"""
+plot_cell_dynamics(ts::SimulationTimeSeries) -> Plot
+
+Plot the total number of cells over time from a `SimulationTimeSeries` object.
+
+# Arguments
+- `ts::SimulationTimeSeries`: The recorded time‑series data from a simulation.
+    Must contain:
+    - `ts.time::Vector{Float64}`
+    - `ts.total_cells::Vector{Int}`
+
+# Returns
+- A Plots.jl `Plot` object showing the total cell population dynamics.
+
+# Notes
+- This function does not display the plot; it only returns the plot object.
+    Call `display(plot_cell_dynamics(ts))` or just `plot_cell_dynamics(ts)` at the REPL.
+- If you want to save the figure, use:
+        `savefig(plot_cell_dynamics(ts), "population.png")`
+"""
+function plot_cell_dynamics(ts::SimulationTimeSeries)
+    p = plot(
+        ts.time,
+        ts.total_cells,
+        xlabel = "Time (h)",
+        ylabel = "Number of Cells",
+        title  = "Total Cell Population Dynamics",
+        label  = "Total Cells",
+        linewidth = 2,
+        legend = :best,
+        grid = true,
+        framestyle = :box,
+    )
+    return p
+end
+
+"""
+plot_phase_dynamics(ts::SimulationTimeSeries) -> Plot
+
+Plot the number of cells in each cell‑cycle phase (G1, S, G2, M) over time
+using data stored in a `SimulationTimeSeries` object.
+
+# Arguments
+- `ts::SimulationTimeSeries`: The simulation time‑series data structure, expected
+    to contain:
+    - `time::Vector{Float64}`
+    - `g1_cells::Vector{Int}`
+    - `s_cells::Vector{Int}`
+    - `g2_cells::Vector{Int}`
+    - `m_cells::Vector{Int}`
+
+# Returns
+- A Plots.jl `Plot` object showing the temporal evolution of the cell‑cycle
+    phase distribution.
+
+# Notes
+- The plot is not displayed automatically; it is returned to the caller.
+    Use `display(plot_phase_dynamics(ts))` or simply call it in the REPL.
+- To save the figure:
+        `savefig(plot_phase_dynamics(ts), "phases.png")`
+"""
+function plot_phase_dynamics(ts::SimulationTimeSeries)
+    p = plot(
+        xlabel = "Time (h)",
+        ylabel = "Number of Cells",
+        title  = "Cell Cycle Phase Distribution",
+        legend = :outerright,
+        grid   = true,
+        framestyle = :box,
+    )
+
+    plot!(p, ts.time, ts.g1_cells, label="G1", linewidth=2)
+    plot!(p, ts.time, ts.s_cells,  label="S",  linewidth=2)
+    plot!(p, ts.time, ts.g2_cells, label="G2", linewidth=2)
+    plot!(p, ts.time, ts.m_cells,  label="M",  linewidth=2)
+
+    return p
+end
+
+"""
+plot_stem_dynamics(ts::SimulationTimeSeries) -> Plot
+
+Plot the temporal evolution of stem vs. non‑stem cell populations from a
+`SimulationTimeSeries` object.
+
+# Behavior
+- If both `ts.stem_cells` and `ts.non_stem_cells` contain only zeros, the function
+    returns a simple plot stating that no stem cell data are available.
+- Otherwise, it produces a line plot of:
+    - stem cells vs time
+    - non‑stem cells vs time
+
+# Arguments
+- `ts::SimulationTimeSeries`: Time‑series data containing:
+    - `time::Vector{Float64}`
+    - `stem_cells::Vector{Int}`
+    - `non_stem_cells::Vector{Int}`
+
+# Returns
+- A Plots.jl `Plot` object suitable for display or saving with `savefig`.
+
+# Notes
+- The plot is returned but not displayed automatically.
+- To show it in the REPL or notebook:  
+        `display(plot_stem_dynamics(ts))`
+"""
+function plot_stem_dynamics(ts::SimulationTimeSeries)
+    # No stem-cell data detected
+    if all(ts.stem_cells .== 0) && all(ts.non_stem_cells .== 0)
+        return plot(
+            title = "No stem cell data available",
+            framestyle = :box,
+            grid = true
+        )
+    end
+
+    # Build the plot
+    p = plot(
+        xlabel = "Time (h)",
+        ylabel = "Number of Cells",
+        title  = "Stem vs Non-Stem Cell Dynamics",
+        legend = :best,
+        grid   = true,
+        framestyle = :box,
+    )
+
+    plot!(p, ts.time, ts.stem_cells,
+            label = "Stem Cells", linewidth = 2)
+
+    plot!(p, ts.time, ts.non_stem_cells,
+            label = "Non-Stem Cells", linewidth = 2)
+
+    return p
+end
+
+"""
+plot_simulation_results(ts::SimulationTimeSeries) -> Plot
+
+Generate a composite figure with three vertically stacked panels summarizing
+the results of a full ABM simulation. The layout includes:
+
+1. **Total cell population dynamics**  
+    (via `plot_cell_dynamics(ts)`)
+
+2. **Cell‑cycle phase distribution**  
+    (via `plot_phase_dynamics(ts)`)
+
+3. **Stem vs non‑stem population dynamics**  
+    (via `plot_stem_dynamics(ts)`)
+
+# Arguments
+- `ts::SimulationTimeSeries`: The simulation time‑series object returned by
+    `run_ab_simulation!`, containing population counts, phase counts, and
+    optionally stem/non‑stem counts.
+
+# Returns
+- A Plots.jl `Plot` object with a 3×1 layout consisting of:
+    - total cells  
+    - phase dynamics  
+    - stem vs non‑stem dynamics  
+
+# Notes
+- The plot is *returned* but not displayed automatically.
+    To display it:  
+        `display(plot_simulation_results(ts))`
+- To save the entire figure:  
+        `savefig(plot_simulation_results(ts), "simulation_summary.png")`
+"""
+function plot_simulation_results(ts::SimulationTimeSeries)
+    p1 = plot_cell_dynamics(ts)
+    p2 = plot_phase_dynamics(ts)
+    p3 = plot_stem_dynamics(ts)
+
+    return plot(
+        p1, p2, p3;
+        layout = (3, 1),
+        size   = (1000, 1200),
+    )
 end

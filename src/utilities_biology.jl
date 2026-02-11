@@ -1,3 +1,21 @@
+
+# ============================================================================
+# Constants for cell cycle phases
+# ============================================================================
+const PHASE_DURATIONS = Dict(
+    "G1" => (shape=0.5*12.0, scale=2.0),    # mean = 12
+    "S"  => (shape=0.5*8.0, scale=2.0),    # mean = 8
+    "G2" => (shape=0.5*4.0, scale=2.0),    # mean = 4
+    "M"  => (shape=0.5*1., scale=2.0)     # mean = 1
+)
+
+const PHASE_TRANSITION = Dict(
+    "G1" => "S",
+    "S"  => "G2",
+    "G2" => "M",
+    "M"  => "G1"
+)
+
 """
 generate_cells_positions_selector(target_geom::String,
                                         ParIrr::String,

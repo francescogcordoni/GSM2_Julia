@@ -854,47 +854,46 @@ function MC_loop_copy_dose_domain_layer_fast_notsc!(
     p = Progress(n_targets; dt=1, desc="Copying doses…", barlen=40)
 
     lk = ReentrantLock()
-
-Threads.@threads for t in 1:n_targets
-    i = target_idx[t]
-
-    coords = (Float64(cell_df.x[i]), Float64(cell_df.y[i]))
-    dose_data = get(xy_to_dose_data, coords, nothing)
-
-    local domain_doses_vector::Vector{Float64}
-    local scalar_dose_cell::Float64
-
-    if dose_data === nothing
-        @warn "Coordinates $coords (cell index $(cell_df.index[i])) not found among representatives. Assigning zero dose."
-        domain_doses_vector = zeros(Float64, num_domains)
-        scalar_dose_cell = 0.0
-    else
-        domain_doses_vector, scalar_dose_cell = dose_data
-    end
-
-    if length(cell_df.dose[i]) != num_domains
-        cell_df.dose[i] = zeros(Float64, num_domains)
-    end
-
-    cell_df.dose[i] .= domain_doses_vector
-    cell_df.dose_cell[i] = scalar_dose_cell
-
-    cell_idx = cell_df.index[i]
-    at_row_idx = get(at_index_to_row, cell_idx, 0)
-
-    if at_row_idx != 0
-        if length(names(at, Not(:index))) == num_domains && !isempty(domain_cols)
-            at[at_row_idx, domain_cols] .= domain_doses_vector
+    Threads.@threads for t in 1:n_targets
+        i = target_idx[t]
+    
+        coords = (Float64(cell_df.x[i]), Float64(cell_df.y[i]))
+        dose_data = get(xy_to_dose_data, coords, nothing)
+    
+        local domain_doses_vector::Vector{Float64}
+        local scalar_dose_cell::Float64
+    
+        if dose_data === nothing
+            @warn "Coordinates $coords (cell index $(cell_df.index[i])) not found among representatives. Assigning zero dose."
+            domain_doses_vector = zeros(Float64, num_domains)
+            scalar_dose_cell = 0.0
         else
-            @error "Domain column count mismatch in 'at' (row for index=$cell_idx). Skipping 'at' update."
+            domain_doses_vector, scalar_dose_cell = dose_data
+        end
+    
+        if length(cell_df.dose[i]) != num_domains
+            cell_df.dose[i] = zeros(Float64, num_domains)
+        end
+    
+        cell_df.dose[i] .= domain_doses_vector
+        cell_df.dose_cell[i] = scalar_dose_cell
+    
+        cell_idx = cell_df.index[i]
+        at_row_idx = get(at_index_to_row, cell_idx, 0)
+    
+        if at_row_idx != 0
+            if length(names(at, Not(:index))) == num_domains && !isempty(domain_cols)
+                at[at_row_idx, domain_cols] .= domain_doses_vector
+            else
+                @error "Domain column count mismatch in 'at' (row for index=$cell_idx). Skipping 'at' update."
+            end
+        end
+    
+        # progress bar update (thread-safe)
+        lock(lk) do
+            next!(p)
         end
     end
-
-    # progress bar update (thread-safe)
-    lock(lk) do
-        next!(p)
-    end
-end
 
     println("\n✔ Finished copying doses for energy_step $energy_step_to_match.")
     println("Elapsed: $(round(time() - t_start, digits=3)) s\n")

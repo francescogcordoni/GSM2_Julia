@@ -89,3 +89,26 @@ begin
         Rn::Float64
     end
 end
+mutable struct SimulationTimeSeries
+    time::Vector{Float64}
+    total_cells::Vector{Int}
+    stem_cells::Vector{Int}
+    non_stem_cells::Vector{Int}
+    g1_cells::Vector{Int}
+    s_cells::Vector{Int}
+    g2_cells::Vector{Int}
+    m_cells::Vector{Int}
+    
+    function SimulationTimeSeries(initial_capacity::Int=10000)
+        new(
+            sizehint!(Float64[], initial_capacity),
+            sizehint!(Int[], initial_capacity),
+            sizehint!(Int[], initial_capacity),
+            sizehint!(Int[], initial_capacity),
+            sizehint!(Int[], initial_capacity),
+            sizehint!(Int[], initial_capacity),
+            sizehint!(Int[], initial_capacity),
+            sizehint!(Int[], initial_capacity)
+        )
+    end
+end
