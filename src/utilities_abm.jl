@@ -530,17 +530,86 @@ according to the following intervals:
 - This is a simple, time‑proportional phase initialization often used to
     randomize the initial state of a cell population.
 """
-function assign_random_phase()::String
-    ru = rand() * 24
-    if ru <= 12
-        return "G1"
-    elseif ru <= 20
-        return "S"
-    elseif ru <= 23
-        return "G2"
+@inline function assign_random_phase()::String
+    ru = rand() * 24.0
+    return ru <= 12.0 ? "G1" : ru <= 20.0 ? "S" : ru <= 23.0 ? "G2" : "M"
+end
+
+@inline is_valid_index(idx::Int32, n::Int32)::Bool = 1 <= idx <= n
+
+@inline function is_time_due(t::Float64, eps::Float64, treat_neg::Bool)::Bool
+    (ismissing(t) || isinf(t)) && return false
+    return treat_neg ? (t <= eps) : (abs(t) <= eps)
+end
+
+function CellPopulation(df::DataFrame)
+    n = nrow(df)
+    
+    # Helper to safely convert optional columns
+    get_int8_col(name) = hasproperty(df, name) ? Vector{Int8}(df[!, name]) : nothing
+    get_int32_col(name) = hasproperty(df, name) ? Vector{Int32}(df[!, name]) : nothing
+    
+    # Count alive cells
+    n_alive = count(df.is_cell .== 1)
+    
+    pop = CellPopulation(
+        Vector{Int8}(df.is_cell),
+        Vector{Int8}(df.can_divide),
+        get_int8_col(:is_stem),
+        get_int8_col(:is_death_rad),
+        Vector{Float64}(df.death_time),
+        Vector{Float64}(df.cycle_time),
+        Vector{Float64}(df.recover_time),
+        [String7(string(s)) for s in df.cell_cycle],
+        Vector{Int16}(df.number_nei),
+        [Vector{Int32}(nei) for nei in df.nei],
+        get_int32_col(:x),
+        get_int32_col(:y),
+        Int32(n),
+        Int32(n_alive),
+        hasproperty(df, :index) ? Vector{Int32}(df.index) : Vector{Int32}(1:n)
+    )
+    
+    return pop
+end
+
+function to_dataframe(pop::CellPopulation; alive_only::Bool=false)::DataFrame
+    if alive_only
+        alive_mask = pop.is_cell .== 1
+        indices = findall(alive_mask)
+        
+        df = DataFrame(
+            index = pop.indices[indices],
+            is_cell = pop.is_cell[indices],
+            can_divide = pop.can_divide[indices],
+            death_time = pop.death_time[indices],
+            cycle_time = pop.cycle_time[indices],
+            recover_time = pop.recover_time[indices],
+            cell_cycle = String.(pop.cell_cycle[indices]),
+            number_nei = pop.number_nei[indices],
+            nei = pop.nei[indices]
+        )
     else
-        return "M"
+        df = DataFrame(
+            index = pop.indices,
+            is_cell = pop.is_cell,
+            can_divide = pop.can_divide,
+            death_time = pop.death_time,
+            cycle_time = pop.cycle_time,
+            recover_time = pop.recover_time,
+            cell_cycle = String.(pop.cell_cycle),
+            number_nei = pop.number_nei,
+            nei = pop.nei
+        )
     end
+    
+    # Add optional columns
+    !isnothing(pop.is_stem) && (df.is_stem = pop.is_stem)
+    !isnothing(pop.is_death_rad) && (df.is_death_rad = pop.is_death_rad)
+    !isnothing(pop.x) && (df.x = pop.x)
+    !isnothing(pop.y) && (df.y = pop.y)
+    
+    return df
 end
 
 """
@@ -567,36 +636,38 @@ A 3-tuple `(min_time, min_idx, min_event)` where:
     the priority order is `["death_time", "cycle_time"]` (first match wins).
 - Returns `(Inf, 0, "")` if no alive cells or no finite event times exist.
 """
-function compute_next_event(cell_df::DataFrame)::Tuple{Float64, Int64, String}
-    # Filter to alive cells only
-    alive_mask = cell_df.is_cell .== 1
-
-    if !any(alive_mask)
-        return (Inf, 0, "")
-    end
-
-    # Get indices of alive cells (original DataFrame indices)
-    alive_indices = findall(alive_mask)
-
-    # Initialize tracking variables
+function compute_next_event(pop::CellPopulation)::Tuple{Float64, Int32, String}
     min_time = Inf
-    min_idx = 0
+    min_idx = Int32(0)
     min_event = ""
-
-    # Priority order: death_time before cycle_time on equal times
-    # You can change this order if your model requires a different priority.
-    for (event_name, col_sym) in (("death_time", :death_time), ("cycle_time", :cycle_time))
-        col = getproperty(cell_df, col_sym)
-        @inbounds for i in alive_indices
-            t = col[i]
-            if !ismissing(t) && t < min_time
-                min_time = t
-                min_idx = i
-                min_event = event_name
-            end
+    
+    # Cache vectors for faster access
+    is_cell = pop.is_cell
+    death_times = pop.death_time
+    cycle_times = pop.cycle_time
+    n = pop.n_cells
+    
+    @inbounds for i in Int32(1):n
+        # Skip dead cells
+        is_cell[i] == 0 && continue
+        
+        # Check death_time
+        dt = death_times[i]
+        if !isinf(dt) && dt < min_time
+            min_time = dt
+            min_idx = i
+            min_event = "death_time"
+        end
+        
+        # Check cycle_time
+        ct = cycle_times[i]
+        if !isinf(ct) && ct < min_time
+            min_time = ct
+            min_idx = i
+            min_event = "cycle_time"
         end
     end
-
+    
     return (min_time, min_idx, min_event)
 end
 
@@ -628,34 +699,32 @@ The function updates the following columns if present (and if values are finite 
 # Returns
 - `nothing`
 """
-function update_time!(cell_df::DataFrame, elapsed_time::Float64; clamp_nonnegative::Bool=false)
-    @assert elapsed_time >= 0 "elapsed_time must be nonnegative."
-
-    # Mask and indices for alive cells
-    alive_mask = cell_df.is_cell .== 1
-    if !any(alive_mask)
-        return nothing
+function update_time!(pop::CellPopulation, elapsed::Float64)
+    @assert elapsed >= 0 "elapsed_time must be non-negative"
+    
+    # Cache vectors
+    is_cell = pop.is_cell
+    death_times = pop.death_time
+    cycle_times = pop.cycle_time
+    recover_times = pop.recover_time
+    n = pop.n_cells
+    
+    @inbounds for i in Int32(1):n
+        is_cell[i] == 0 && continue
+        
+        # Update death_time
+        dt = death_times[i]
+        !isinf(dt) && (death_times[i] = dt - elapsed)
+        
+        # Update cycle_time
+        ct = cycle_times[i]
+        !isinf(ct) && (cycle_times[i] = ct - elapsed)
+        
+        # Update recover_time
+        rt = recover_times[i]
+        !isinf(rt) && (recover_times[i] = rt - elapsed)
     end
-    alive_idx = findall(alive_mask)
-
-    # Helper to update a given column symbol if present
-    function _update_col!(sym::Symbol)
-        if hasproperty(cell_df, sym)
-            col = getproperty(cell_df, sym)
-            @inbounds for i in alive_idx
-                t = col[i]
-                if !(ismissing(t) || isinf(t))
-                    new_t = t - elapsed_time
-                    col[i] = clamp_nonnegative ? max(0.0, new_t) : new_t
-                end
-            end
-        end
-    end
-
-    _update_col!(:death_time)
-    _update_col!(:cycle_time)
-    _update_col!(:recover_time)  # optional
-
+    
     return nothing
 end
 
@@ -707,78 +776,116 @@ site. The function:
 - Calls `generate_cycle_time("G1")` to seed new G1 durations.
 
 """
-function _perform_division!(cell_df::DataFrame, parent_idx::Int64, nat_apo::Float64)
-    # Cache row count and parent neighbors
-    nrows = nrow(cell_df)
-    parent_neighbors = cell_df.nei[parent_idx]
-
-    # Find first empty neighbor (is_cell == 0)
-    daughter_idx = 0
+function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Float64)
+    n = pop.n_cells
+    parent_neighbors = pop.nei[parent_idx]
+    
+    # Find empty neighbor
+    is_cell = pop.is_cell
+    daughter_idx = Int32(0)
+    
     @inbounds for n_idx in parent_neighbors
-        if 1 <= n_idx <= nrows && cell_df.is_cell[n_idx] == 0
+        if is_valid_index(n_idx, n) && is_cell[n_idx] == 0
             daughter_idx = n_idx
             break
         end
     end
-
+    
     if daughter_idx == 0
-        # No space found - this shouldn't happen if number_nei > 0
-        @warn "Division attempted but no empty neighbor found" parent_idx cell_nnei=cell_df.number_nei[parent_idx]
-        return
+        @warn "Division attempted but no empty neighbor" parent=parent_idx
+        return nothing
     end
-
-    # --- Create daughter cell ---
-    cell_df.is_cell[daughter_idx]     = 1
-    cell_df.cell_cycle[daughter_idx]  = "G1"
-    cell_df.cycle_time[daughter_idx]  = generate_cycle_time("G1")
-    cell_df.death_time[daughter_idx]  = Inf
-    cell_df.can_divide[daughter_idx]  = 1
-
-    # --- Reset parent to G1 ---
-    cell_df.cell_cycle[parent_idx]    = "G1"
-    cell_df.cycle_time[parent_idx]    = generate_cycle_time("G1")
-    cell_df.can_divide[parent_idx]    = 1
-
-    # --- Update neighbor counts for both parent and daughter ---
-    daughter_neighbors = cell_df.nei[daughter_idx]
-
-    # Cells that neighbor either parent or daughter lose one free spot (since a spot is now occupied)
-    # Use a small Set to avoid decrementing the same neighbor twice
-    affected = Set{Int}()
-    @inbounds for i in parent_neighbors
-        push!(affected, i)
-    end
-    @inbounds for i in daughter_neighbors
-        push!(affected, i)
-    end
-
-    @inbounds for n_idx in affected
-        if 1 <= n_idx <= nrows && cell_df.is_cell[n_idx] == 1
-            cell_df.number_nei[n_idx] -= 1
-
-            # If a neighbor lost its last free space, block its division if it was allowed
-            if cell_df.number_nei[n_idx] == 0 && cell_df.can_divide[n_idx] == 1
-                cell_df.cycle_time[n_idx] = Inf
-                cell_df.can_divide[n_idx] = 0
-            end
-        end
-    end
-
-    # --- Update the cells' own neighbor counts ---
-    # Parent: one neighbor spot has been consumed by the daughter
-    cell_df.number_nei[parent_idx] -= 1
-
-    # Daughter: count of empty neighbors around the new cell
+    
+    # Create daughter cell
     @inbounds begin
-        empty_cnt = 0
-        for nb in daughter_neighbors
-            if 1 <= nb <= nrows && cell_df.is_cell[nb] == 0
-                empty_cnt += 1
+        pop.is_cell[daughter_idx] = 1
+        pop.cell_cycle[daughter_idx] = String7("G1")
+        pop.cycle_time[daughter_idx] = generate_cycle_time("G1")
+        pop.death_time[daughter_idx] = Inf
+        pop.can_divide[daughter_idx] = 1
+    end
+    
+    # Reset parent to G1
+    @inbounds begin
+        pop.cell_cycle[parent_idx] = String7("G1")
+        pop.cycle_time[parent_idx] = generate_cycle_time("G1")
+        pop.can_divide[parent_idx] = 1
+    end
+    
+    # Update neighbor counts
+    daughter_neighbors = pop.nei[daughter_idx]
+    number_nei = pop.number_nei
+    can_divide = pop.can_divide
+    cycle_times = pop.cycle_time
+    
+    # Use boolean mask for small neighbor lists
+    if length(parent_neighbors) + length(daughter_neighbors) < 20
+        updated = falses(n)
+        
+        @inbounds for n_idx in parent_neighbors
+            if is_valid_index(n_idx, n) && is_cell[n_idx] == 1 && !updated[n_idx]
+                number_nei[n_idx] -= 1
+                updated[n_idx] = true
+                
+                if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
+                    cycle_times[n_idx] = Inf
+                    can_divide[n_idx] = 0
+                end
             end
         end
-        cell_df.number_nei[daughter_idx] = empty_cnt
+        
+        @inbounds for n_idx in daughter_neighbors
+            if is_valid_index(n_idx, n) && is_cell[n_idx] == 1 && !updated[n_idx]
+                number_nei[n_idx] -= 1
+                updated[n_idx] = true
+                
+                if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
+                    cycle_times[n_idx] = Inf
+                    can_divide[n_idx] = 0
+                end
+            end
+        end
+    else
+        # Use Set for large neighbor lists
+        affected = Set{Int32}()
+        sizehint!(affected, length(parent_neighbors) + length(daughter_neighbors))
+        
+        @inbounds begin
+            for i in parent_neighbors
+                push!(affected, i)
+            end
+            for i in daughter_neighbors
+                push!(affected, i)
+            end
+        end
+        
+        @inbounds for n_idx in affected
+            if is_valid_index(n_idx, n) && is_cell[n_idx] == 1
+                number_nei[n_idx] -= 1
+                
+                if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
+                    cycle_times[n_idx] = Inf
+                    can_divide[n_idx] = 0
+                end
+            end
+        end
     end
-
+    
+    # Update cells' own neighbor counts
+    pop.number_nei[parent_idx] -= 1
+    
+    # Count empty neighbors for daughter
+    empty_count = Int16(0)
+    @inbounds for nb in daughter_neighbors
+        if is_valid_index(nb, n) && is_cell[nb] == 0
+            empty_count += 1
+        end
+    end
+    pop.number_nei[daughter_idx] = empty_count
+    
+    # Update alive count
+    pop.n_alive += 1
+    
     return nothing
 end
 
@@ -791,25 +898,25 @@ dependent state for the removed cell and its neighbors.
 # Behavior
 1. If the cell is already empty (`is_cell == 0`), the function returns immediately.
 2. For the removed cell (`removed_idx`):
-   - `is_cell = 0`
-   - `death_time = Inf`, `cycle_time = Inf`, `can_divide = 0`
-   - If present: `apo_time = Inf`, `recover_time = Inf`
-   - If `is_natural_apoptosis` and `is_death_rad` exists, set `is_death_rad = 0`
+    - `is_cell = 0`
+    - `death_time = Inf`, `cycle_time = Inf`, `can_divide = 0`
+    - If present: `apo_time = Inf`, `recover_time = Inf`
+    - If `is_natural_apoptosis` and `is_death_rad` exists, set `is_death_rad = 0`
 3. For each alive neighbor `n` in `nei[removed_idx]`:
-   - Increment `number_nei[n]` by 1 (one additional free spot now exists).
-   - If `number_nei[n]` becomes `1` and `can_divide[n] == 0`, the neighbor is
-     unblocked and reinitialized:
-       - Assign a new phase via `assign_random_phase()`
-       - Set `cell_cycle[n]` to that phase
-       - Set `cycle_time[n] = generate_cycle_time(new_phase)`
-       - Set `can_divide[n] = 1`
+    - Increment `number_nei[n]` by 1 (one additional free spot now exists).
+    - If `number_nei[n]` becomes `1` and `can_divide[n] == 0`, the neighbor is
+        unblocked and reinitialized:
+        - Assign a new phase via `assign_random_phase()`
+        - Set `cell_cycle[n]` to that phase
+        - Set `cycle_time[n] = generate_cycle_time(new_phase)`
+        - Set `can_divide[n] = 1`
 
 # Arguments
 - `cell_df::DataFrame`: Simulation table. Expected columns:
-  - `is_cell::Vector{Int}`, `nei::Vector{<:AbstractVector{Int}}`,
-  - `cell_cycle::Vector{String}`, `cycle_time`, `death_time`,
-  - `can_divide::Vector{Int}`, `number_nei::Vector{Int}`.
-  - Optional: `apo_time`, `recover_time`, `is_death_rad`.
+    - `is_cell::Vector{Int}`, `nei::Vector{<:AbstractVector{Int}}`,
+    - `cell_cycle::Vector{String}`, `cycle_time`, `death_time`,
+    - `can_divide::Vector{Int}`, `number_nei::Vector{Int}`.
+    - Optional: `apo_time`, `recover_time`, `is_death_rad`.
 - `removed_idx::Int64`: Row index of the cell to remove.
 - `is_natural_apoptosis::Bool`: If `true`, marks `is_death_rad=0` (if present).
 
@@ -820,48 +927,54 @@ dependent state for the removed cell and its neighbors.
 - Assumes `number_nei` stores the count of **empty** neighboring positions.
 - Neighbor indices are checked for bounds; out-of-range neighbors are ignored.
 - Reinitialization policy when a neighbor becomes unblocked can be adapted to
-  your model (currently random phase + gamma cycle time).
+    your model (currently random phase + gamma cycle time).
 """
-function _handle_cell_removal!(cell_df::DataFrame, removed_idx::Int64, is_natural_apoptosis::Bool)
-    # If already empty, nothing to do
-    if cell_df.is_cell[removed_idx] == 0
-        return
+function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32, 
+                                is_natural_apoptosis::Bool)
+    pop.is_cell[removed_idx] == 0 && return nothing
+    
+    # Mark as dead
+    @inbounds begin
+        pop.is_cell[removed_idx] = 0
+        pop.death_time[removed_idx] = Inf
+        pop.cycle_time[removed_idx] = Inf
+        pop.recover_time[removed_idx] = Inf
+        pop.can_divide[removed_idx] = 0
     end
-
-    # Mark cell as empty and reset timers/states
-    cell_df.is_cell[removed_idx]   = 0
-    cell_df.death_time[removed_idx] = Inf
-    cell_df.cycle_time[removed_idx] = Inf
-    cell_df.can_divide[removed_idx] = 0
-
-    if hasproperty(cell_df, :apo_time)
-        cell_df.apo_time[removed_idx] = Inf
+    
+    # Update optional fields
+    if is_natural_apoptosis && !isnothing(pop.is_death_rad)
+        pop.is_death_rad[removed_idx] = 0
     end
-    if hasproperty(cell_df, :recover_time)
-        cell_df.recover_time[removed_idx] = Inf
-    end
-    if is_natural_apoptosis && hasproperty(cell_df, :is_death_rad)
-        cell_df.is_death_rad[removed_idx] = 0
-    end
-
-    # Update neighbors: gain one free spot each (if they are alive)
-    nrows = nrow(cell_df)
-    neighbor_indices = cell_df.nei[removed_idx]
-
-    @inbounds for n_idx in neighbor_indices
-        if 1 <= n_idx <= nrows && cell_df.is_cell[n_idx] == 1
-            cell_df.number_nei[n_idx] += 1
-
-            # If neighbor was blocked and now has space, unblock and re-seed cycle
-            if cell_df.number_nei[n_idx] == 1 && cell_df.can_divide[n_idx] == 0
+    
+    # Update alive count
+    pop.n_alive -= 1
+    
+    # Update neighbors
+    n = pop.n_cells
+    neighbors = pop.nei[removed_idx]
+    
+    # Cache vectors
+    is_cell = pop.is_cell
+    number_nei = pop.number_nei
+    can_divide = pop.can_divide
+    cell_cycle = pop.cell_cycle
+    cycle_times = pop.cycle_time
+    
+    @inbounds for n_idx in neighbors
+        if is_valid_index(n_idx, n) && is_cell[n_idx] == 1
+            number_nei[n_idx] += 1
+            
+            # Unblock if this creates first free space
+            if number_nei[n_idx] == 1 && can_divide[n_idx] == 0
                 new_phase = assign_random_phase()
-                cell_df.cell_cycle[n_idx]  = new_phase
-                cell_df.cycle_time[n_idx]  = generate_cycle_time(new_phase)
-                cell_df.can_divide[n_idx]  = 1
+                cell_cycle[n_idx] = String7(new_phase)
+                cycle_times[n_idx] = generate_cycle_time(new_phase)
+                can_divide[n_idx] = 1
             end
         end
     end
-
+    
     return nothing
 end
 
@@ -915,53 +1028,48 @@ according to an ABM (agent-based model) cell-cycle and death logic. Mutates `cel
 - If multiple event types can fire at equal time, ensure upstream selection (e.g., `compute_next_event`)
     uses your desired tie-breaking rules.
 """
-function update_ABM!(cell_df::DataFrame, next_time::Float64, event::String, 
-                        idx::Int64, nat_apo::Float64)
-    # 1) Update all time values
-    update_time!(cell_df, next_time)
-
-    # 2) Handle the specific event
+function update_ABM!(pop::CellPopulation, next_time::Float64, event::String, 
+                    idx::Int32, nat_apo::Float64)
+    # Update times
+    update_time!(pop, next_time)
+    
+    # Handle event
     if event == "death_time"
-        _handle_cell_removal!(cell_df, idx, false)
-
+        _handle_cell_removal!(pop, idx, false)
+        
     elseif event == "cycle_time"
-        current_phase = cell_df.cell_cycle[idx]
-        num_empty_neighbors = cell_df.number_nei[idx]
-        has_space = num_empty_neighbors > 0
-
-        if current_phase == "M"
-            if has_space
-                _perform_division!(cell_df, idx, nat_apo)
+        @inbounds begin
+            current_phase = String(pop.cell_cycle[idx])
+            has_space = pop.number_nei[idx] > 0
+            
+            if current_phase == "M"
+                if has_space
+                    _perform_division!(pop, idx, nat_apo)
+                else
+                    pop.cell_cycle[idx] = String7("G1")
+                    pop.cycle_time[idx] = Inf
+                    pop.can_divide[idx] = 0
+                end
             else
-                # Blocked from dividing
-                cell_df.cell_cycle[idx] = "G1"  # alternatively "M_blocked" if your model requires it
-                cell_df.cycle_time[idx] = Inf
-                cell_df.can_divide[idx] = 0
-            end
-
-        else
-            # Transition to next phase (G1->S->G2->M) via global map
-            next_phase = PHASE_TRANSITION[current_phase]
-            cell_df.cell_cycle[idx] = next_phase
-
-            if has_space
-                cell_df.cycle_time[idx] = generate_cycle_time(next_phase)
-                cell_df.can_divide[idx] = 1
-            else
-                # Blocked from progressing
-                cell_df.cycle_time[idx] = Inf
-                cell_df.can_divide[idx] = 0
+                next_phase = PHASE_TRANSITION[current_phase]
+                pop.cell_cycle[idx] = String7(next_phase)
+                
+                if has_space
+                    pop.cycle_time[idx] = generate_cycle_time(next_phase)
+                    pop.can_divide[idx] = 1
+                else
+                    pop.cycle_time[idx] = Inf
+                    pop.can_divide[idx] = 0
+                end
             end
         end
-
     else
-        # Unrecognized event string — keep state updated by time step, but warn
-        @warn "update_ABM!: Unhandled event" event idx
+        @warn "Unhandled event" event idx
     end
-
-    # 3) Clean up any zero times or cascading effects
-    check_time!(cell_df, nat_apo)
-
+    
+    # Clean up zero times
+    check_time!(pop, nat_apo)
+    
     return nothing
 end
 
@@ -1005,54 +1113,33 @@ A time `t` is considered **due** if:
 - Removal may change neighbor-related fields; ensure your invariants (e.g., `number_nei ≥ 0`)
     are maintained elsewhere or add debug assertions if needed.
 """
-function check_time!(cell_df::DataFrame, nat_apo::Float64;
-                        eps::Float64=0.0, treat_negatives_as_due::Bool=false)
-
-    # Precompute masks and column presence
-    alive_mask = cell_df.is_cell .== 1
-    if !any(alive_mask)
-        return nothing
-    end
-    alive_indices = findall(alive_mask)
-
-    has_recover = hasproperty(cell_df, :recover_time)
-
-    # Local predicate for "due"
-    @inline is_due(t::Float64) = begin
-        if ismissing(t) || isinf(t)
-            return false
-        end
-        if treat_negatives_as_due
-            return t <= eps
-        else
-            return abs(t) <= eps  # exact 0 if eps==0
-        end
-    end
-
-    @inbounds for i in alive_indices
-        # 1) Handle death_time
-        dt = cell_df.death_time[i]
-        if !(ismissing(dt) || isinf(dt)) && is_due(dt)
-            _handle_cell_removal!(cell_df, i, false)
-            # Once removed, skip other timers for this row
+function check_time!(pop::CellPopulation, nat_apo::Float64; eps::Float64=0.0)
+    # Cache vectors
+    is_cell = pop.is_cell
+    death_times = pop.death_time
+    cycle_times = pop.cycle_time
+    recover_times = pop.recover_time
+    n = pop.n_cells
+    
+    @inbounds for i in Int32(1):n
+        is_cell[i] == 0 && continue
+        
+        # Handle death_time
+        dt = death_times[i]
+        if !isinf(dt) && abs(dt) <= eps
+            _handle_cell_removal!(pop, i, false)
             continue
         end
-
-        # 2) Handle recover_time (optional)
-        if has_recover
-            rt = cell_df.recover_time[i]
-            if !(ismissing(rt) || isinf(rt)) && is_due(rt)
-                cell_df.recover_time[i] = Inf
-            end
-        end
-
-        # 3) Handle cycle_time
-        ct = cell_df.cycle_time[i]
-        if !(ismissing(ct) || isinf(ct)) && is_due(ct)
-            cell_df.cycle_time[i] = Inf
-        end
+        
+        # Handle recover_time
+        rt = recover_times[i]
+        !isinf(rt) && abs(rt) <= eps && (recover_times[i] = Inf)
+        
+        # Handle cycle_time
+        ct = cycle_times[i]
+        !isinf(ct) && abs(ct) <= eps && (cycle_times[i] = Inf)
     end
-
+    
     return nothing
 end
 
@@ -1097,54 +1184,56 @@ Append a snapshot of the current simulation state at time `t` to the
 - If you change `phases`, ensure `ts` has corresponding fields and adjust the code
     below (or switch to a dictionary of phase series).
 """
-function record_timepoint!(ts::SimulationTimeSeries, t::Float64, cell_df::DataFrame;
-                            phases::Vector{String}=["G1","S","G2","M"],
-                            validate_lengths::Bool=false)
-    alive_mask = cell_df.is_cell .== 1
 
-    # 1) time and total
+function record_timepoint!(ts::SimulationTimeSeries, t::Float64, pop::CellPopulation)
     push!(ts.time, t)
-    push!(ts.total_cells, sum(alive_mask))
-
-    # 2) stem/non-stem (if available)
-    if hasproperty(cell_df, :is_stem)
-        is_stem = cell_df.is_stem
-        push!(ts.stem_cells,     sum(alive_mask .& (is_stem .== 1)))
-        push!(ts.non_stem_cells, sum(alive_mask .& (is_stem .== 0)))
+    push!(ts.total_cells, pop.n_alive)  # Use cached count!
+    
+    # Count by phase (still need to iterate, but fast)
+    g1_count = Int32(0)
+    s_count = Int32(0)
+    g2_count = Int32(0)
+    m_count = Int32(0)
+    
+    @inbounds for i in Int32(1):pop.n_cells
+        if pop.is_cell[i] == 1
+            phase = pop.cell_cycle[i]
+            if phase == "G1"
+                g1_count += 1
+            elseif phase == "S"
+                s_count += 1
+            elseif phase == "G2"
+                g2_count += 1
+            elseif phase == "M"
+                m_count += 1
+            end
+        end
+    end
+    
+    push!(ts.g1_cells, g1_count)
+    push!(ts.s_cells, s_count)
+    push!(ts.g2_cells, g2_count)
+    push!(ts.m_cells, m_count)
+    
+    # Stem cells (if present)
+    if !isnothing(pop.is_stem)
+        stem_count = Int32(0)
+        non_stem_count = Int32(0)
+        @inbounds for i in Int32(1):pop.n_cells
+            if pop.is_cell[i] == 1
+                if pop.is_stem[i] == 1
+                    stem_count += 1
+                else
+                    non_stem_count += 1
+                end
+            end
+        end
+        push!(ts.stem_cells, stem_count)
+        push!(ts.non_stem_cells, non_stem_count)
     else
-        push!(ts.stem_cells, 0)
-        push!(ts.non_stem_cells, 0)
+        push!(ts.stem_cells, Int32(0))
+        push!(ts.non_stem_cells, Int32(0))
     end
-
-    # 3) phase counts among alive cells
-    # Default wiring assumes fields named g1_cells, s_cells, g2_cells, m_cells.
-    # If you change `phases`, also adapt this mapping (or generalize to a Dict).
-    cell_phase = cell_df.cell_cycle
-    counts = Dict{String, Int}()  # collect first; then push to the right series
-    for ph in phases
-        counts[ph] = sum(alive_mask .& (cell_phase .== ph))
-    end
-
-    # Push in the canonical order expected by SimulationTimeSeries
-    # (You can generalize this block if your ts uses a Dict of vectors keyed by phase)
-    push!(ts.g1_cells, get(counts, "G1", 0))
-    push!(ts.s_cells,  get(counts, "S",  0))
-    push!(ts.g2_cells, get(counts, "G2", 0))
-    push!(ts.m_cells,  get(counts, "M",  0))
-
-    # 4) Optional consistency check (quick)
-    if validate_lengths
-        n = length(ts.time)
-        @assert length(ts.total_cells)   == n
-        @assert length(ts.stem_cells)    == n
-        @assert length(ts.non_stem_cells)== n
-        @assert length(ts.g1_cells)      == n
-        @assert length(ts.s_cells)       == n
-        @assert length(ts.g2_cells)      == n
-        @assert length(ts.m_cells)       == n
-    end
-
-    return nothing
 end
 
 """
@@ -1185,80 +1274,16 @@ A `NamedTuple` with fields:
 - If no alive cells are present, all counts are 0 and the surviving fraction is 0.0.
 - If `recover_time` is absent, recovery stats are reported as 0.0 and counts derive only from `cycle_time`.
 """
-function print_initial_stats(cell_df::DataFrame; io::IO=stdout, prefix::AbstractString="")
-    tag = isempty(prefix) ? "" : prefix * " "
-    alive_mask = cell_df.is_cell .== 1
-    total_active = sum(alive_mask)
-
-    # Graceful handling when no alive cells
-    if total_active == 0
-        println(io, "\n$(tag)" * "="^70)
-        println(io, "$(tag)INITIAL SIMULATION STATE")
-        println(io, "$(tag)" * "="^70)
-        println(io, "$(tag)Total active cells: 0")
-        println(io, "$(tag)  - Cells that will die: 0")
-        println(io, "$(tag)  - Cells scheduled for repair: 0")
-        println(io, "$(tag)  - Unaffected cells: 0")
-        println(io, "$(tag)Surviving fraction: 0.0")
-        println(io, "\n$(tag)Time Statistics:")
-        println(io, "$(tag)  - Max death time: 0.0h")
-        println(io, "$(tag)  - Max recovery time: 0.0h")
-        println(io, "$(tag)  - Median recovery time: 0.0h")
-        println(io, "$(tag)" * "="^70 * "\n")
-        return (max_death=0.0, max_recover=0.0, median_recover=0.0, surviving_fraction=0.0)
-    end
-
-    # Helper to collect finite, non-missing values from a vector restricted by mask
-    @inline function _finite_vals(vec)
-        vals = vec[alive_mask]
-        return [v for v in vals if !(ismissing(v) || isinf(v))]
-    end
-
-    # --- Death times (finite-only) ---
-    finite_death_times = _finite_vals(cell_df.death_time)
-    max_death = isempty(finite_death_times) ? 0.0 : maximum(finite_death_times)
-
-    # --- Recovery times (optional column) ---
-    have_recover = hasproperty(cell_df, :recover_time)
-    finite_recover_times = have_recover ? _finite_vals(cell_df.recover_time) : Float64[]
-    max_recover = isempty(finite_recover_times) ? 0.0 : maximum(finite_recover_times)
-    median_recover =
-        isempty(finite_recover_times) ? 0.0 :
-        (let s = sort(finite_recover_times); n = length(s)
-            n % 2 == 1 ? s[(n + 1) >>> 1] : (s[n >>> 1] + s[(n >>> 1) + 1]) / 2
-            end)
-
-    # --- Counts ---
-    n_dying       = length(finite_death_times)
-    finite_cycle  = _finite_vals(cell_df.cycle_time)
-    n_recovering  = (have_recover ? length(finite_recover_times) : 0) + length(finite_cycle)
-    # Clamp to avoid negatives if overlap assumptions change
-    n_unaffected  = max(0, total_active - n_dying - n_recovering)
-    surviving_fraction = (n_recovering + n_unaffected) / total_active
-
-    # --- Print nicely ---
-    println(io, "\n$(tag)" * "="^70)
-    println(io, "$(tag)INITIAL SIMULATION STATE")
-    println(io, "$(tag)" * "="^70)
-    println(io, "$(tag)Total active cells: $total_active")
-    println(io, "$(tag)  - Cells that will die: $n_dying")
-    println(io, "$(tag)  - Cells scheduled for repair: $n_recovering")
-    println(io, "$(tag)  - Unaffected cells: $n_unaffected")
-    println(io, "$(tag)Surviving fraction: $(round(surviving_fraction, digits=4))")
-    println(io, "\n$(tag)Time Statistics:")
-    println(io, "$(tag)  - Max death time: $(round(max_death, digits=2))h")
-    println(io, "$(tag)  - Max recovery time: $(round(max_recover, digits=2))h")
-    println(io, "$(tag)  - Median recovery time: $(round(median_recover, digits=2))h")
-    println(io, "$(tag)" * "="^70 * "\n")
-
-    return (max_death=max_death,
-            max_recover=max_recover,
-            median_recover=median_recover,
-            surviving_fraction=surviving_fraction)
+function print_initial_stats(pop::CellPopulation)
+    println("\n", "="^70)
+    println("INITIAL STATE")
+    println("="^70)
+    println("Active cells: $(pop.n_alive)")
+    println("="^70, "\n")
 end
 
 """
-run_ab_simulation!(cell_df::DataFrame, nat_apo::Float64;
+run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64;
                         terminal_time::Float64=48.0,
                         snapshot_times::Vector{Int}=[1, 6, 12, 24],
                         print_interval::Float64=1.0,
@@ -1305,117 +1330,93 @@ dictionary of snapshots.
 - Assumes `compute_next_event`, `update_ABM!`, `record_timepoint!`, and `create_snapshot`
     are defined and consistent with your model.
 """
-function run_ab_simulation!(cell_df::DataFrame, nat_apo::Float64;
+function run_simulation_abm!(pop::CellPopulation, nat_apo::Float64;
                             terminal_time::Float64=48.0,
                             snapshot_times::Vector{Int}=[1, 6, 12, 24],
                             print_interval::Float64=1.0,
-                            max_events::Int=typemax(Int),
-                            eps_time::Float64=1e-9,
-                            verbose::Bool=true,
-                            snapshots_at_start::Bool=true)
-
-    # --- Initial reporting ---
-    if verbose
-        print_initial_stats(cell_df)
-    end
-
-    # --- Initialize outputs ---
+                            verbose::Bool=true)
+    
+    verbose && print_initial_stats(pop)
+    
+    # Initialize outputs
     ts = SimulationTimeSeries()
-    snapshots = Dict{Int, DataFrame}()
-
-    # Optional t=0 snapshot
-    if snapshots_at_start
-        if verbose
-            println("Creating snapshot for t = 0h")
-        end
-        snapshots[0] = create_snapshot(cell_df)
-    end
-
-    # Record initial state at t=0
-    t = 0.0
-    record_timepoint!(ts, t, cell_df)
-
-    # --- Progress tracking ---
-    event_count = 0
-    # Use a threshold approach to avoid Float/Int modulo issues
-    next_print_time = (print_interval > 0) ? print_interval : Inf
-    # Snapshot times as a Set for O(1) checks
-    snap_set = Set(snapshot_times)
-
+    snapshots = Dict{Int, CellPopulation}()
+    
+    # Initial snapshot
     if verbose
-        println("\n", "="^70)
-        println("STARTING SIMULATION")
-        println("="^70)
+        println("Creating snapshot for t = 0h")
     end
-
-    # --- Main loop ---
-    while t + eps_time < terminal_time
-        if event_count >= max_events
-            if verbose
-                println("\nReached max_events=$(max_events). Stopping at t = $(round(t, digits=2))h")
-            end
-            break
-        end
-
+    snapshots[0] = create_snapshot(pop)
+    
+    # Record initial state
+    t = 0.0
+    record_timepoint!(ts, t, pop)
+    
+    # Setup
+    event_count = Int32(0)
+    next_print_time = print_interval
+    snap_set = Set(snapshot_times)
+    
+    verbose && println("\n", "="^70, "\nSTARTING SIMULATION\n", "="^70)
+    
+    # Main loop
+    while t < terminal_time
         # Find next event
-        next_time, idx, event = compute_next_event(cell_df)
-
-        # No more events
-        if isinf(next_time)
-            if verbose
-                println("\nNo more events to process. Simulation ending at t = $(round(t, digits=2))h")
-            end
-            break
-        end
-
-        # Cap final step if it would overshoot terminal_time
-        step = next_time
-        if t + step > terminal_time + eps_time
-            # Nothing to process if step would overshoot significantly
-            # Move time to terminal and finish without processing further events
-            t = terminal_time
-            record_timepoint!(ts, t, cell_df)
-            break
-        end
-
-        # Advance time and process
-        t += step
+        next_time, idx, event = compute_next_event(pop)
+        
+        isinf(next_time) && break
+        
+        t + next_time > terminal_time && break
+        
+        t += next_time
         event_count += 1
-
-        # Progress printing (threshold-based)
-        if verbose && t + eps_time >= next_print_time
-            n_cells = sum(cell_df.is_cell .== 1)
-            println("t = $(round(t, digits=2))h | Event: $event | Cells: $n_cells | Events processed: $event_count")
-            # Schedule next print
+        
+        # Progress
+        if verbose && t >= next_print_time
+            println("t=$(round(t, digits=2))h | $event | Cells=$(pop.n_alive) | Events=$event_count")
             next_print_time += print_interval
         end
-
-        # Snapshot at integer hours matched in snapshot_times (avoid float precision issues)
-        if verbose || !verbose
-            current_hour = round(Int, floor(t + eps_time))
-            if current_hour in snap_set && !haskey(snapshots, current_hour)
-                if verbose
-                    println("  └─ Creating snapshot for t = $(current_hour)h")
-                end
-                snapshots[current_hour] = create_snapshot(cell_df)
-            end
+        
+        # Snapshots
+        current_hour = round(Int, floor(t))
+        if current_hour in snap_set && !haskey(snapshots, current_hour)
+            verbose && println("  └─ Snapshot at t=$(current_hour)h")
+            snapshots[current_hour] = create_snapshot(pop)
         end
-
-        # Process the event and record data
-        update_ABM!(cell_df, step, event, idx, nat_apo)
-        record_timepoint!(ts, t, cell_df)
+        
+        # Process
+        update_ABM!(pop, next_time, event, idx, nat_apo)
+        record_timepoint!(ts, t, pop)
     end
-
-    # --- Final summary ---
+    
+    # Summary
     if verbose
-        println("="^70)
-        println("SIMULATION COMPLETE")
-        println("="^70)
+        println("="^70, "\nSIMULATION COMPLETE\n", "="^70)
         println("Final time: $(round(t, digits=2))h")
-        println("Total events processed: $event_count")
-        println("Final cell count: $(sum(cell_df.is_cell .== 1))")
+        println("Events: $event_count")
+        println("Final cells: $(pop.n_alive)")
         println("="^70, "\n")
     end
-
+    
     return (ts, snapshots)
+end
+
+function run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64; 
+                            return_dataframes::Bool=true, kwargs...)
+    # Convert to SoA
+    pop = CellPopulation(cell_df)
+    
+    # Run simulation
+    ts, snapshots_soa = run_simulation_abm!(pop, nat_apo; kwargs...)
+    
+    # Convert snapshots back to DataFrames if requested
+    if return_dataframes
+        snapshots_df = Dict{Int, DataFrame}()
+        for (time, snap_pop) in snapshots_soa
+            snapshots_df[time] = to_dataframe(snap_pop, alive_only=true)
+        end
+        return (ts, snapshots_df)
+    else
+        return (ts, snapshots_soa)
+    end
 end

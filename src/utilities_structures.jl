@@ -112,3 +112,35 @@ mutable struct SimulationTimeSeries
         )
     end
 end
+
+mutable struct CellPopulation
+    # Boolean states (use Int8: 1 byte vs 8 bytes for Int64)
+    is_cell::Vector{Int8}
+    can_divide::Vector{Int8}
+    is_stem::Union{Vector{Int8}, Nothing}
+    is_death_rad::Union{Vector{Int8}, Nothing}
+    
+    # Timing information (Float64)
+    death_time::Vector{Float64}
+    cycle_time::Vector{Float64}
+    recover_time::Vector{Float64}
+    
+    # Cell cycle phase (String7: inline string up to 7 bytes)
+    # Fits "G1", "S", "G2", "M" perfectly with no heap allocation
+    cell_cycle::Vector{String7}
+    
+    # Spatial information
+    number_nei::Vector{Int16}  # Typically small (< 256)
+    nei::Vector{Vector{Int32}}  # Neighbor indices
+    
+    # Optional spatial coordinates (if needed)
+    x::Union{Vector{Int32}, Nothing}
+    y::Union{Vector{Int32}, Nothing}
+    
+    # Metadata
+    n_cells::Int32  # Current number of cell slots
+    n_alive::Int32  # Number of alive cells (cached for performance)
+    
+    # Original indices (if conversion from DataFrame needed)
+    indices::Vector{Int32}
+end

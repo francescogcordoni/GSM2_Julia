@@ -498,9 +498,3 @@ function GetRadialLinearDose(r::Float64, ion::AT, type::String; verbose::Bool = 
         error("GetRadialLinearDose: unknown model type ‘$type’. Expected \"KC\" or \"LEM\".")
     end
 end
-
-
-
-
-
-

@@ -743,15 +743,31 @@ simulation snapshot at a given time point.
 - This function guarantees isolation by using `copy(...)`.
 
 """
-function create_snapshot(cell_df::DataFrame)::DataFrame
-    alive_mask = cell_df.is_cell .== 1
-
-    # If no alive cells, return an empty DataFrame with same schema
-    if !any(alive_mask)
-        return similar(cell_df, 0)
-    end
-
-    return copy(cell_df[alive_mask, :])
+function create_snapshot(pop::CellPopulation)::CellPopulation
+    # Find alive cells
+    alive_indices = findall(pop.is_cell .== 1)
+    n_alive = length(alive_indices)
+    
+    # Create new population with only alive cells
+    snapshot = CellPopulation(
+        pop.is_cell[alive_indices],
+        pop.can_divide[alive_indices],
+        isnothing(pop.is_stem) ? nothing : pop.is_stem[alive_indices],
+        isnothing(pop.is_death_rad) ? nothing : pop.is_death_rad[alive_indices],
+        pop.death_time[alive_indices],
+        pop.cycle_time[alive_indices],
+        pop.recover_time[alive_indices],
+        pop.cell_cycle[alive_indices],
+        pop.number_nei[alive_indices],
+        [copy(pop.nei[i]) for i in alive_indices],
+        isnothing(pop.x) ? nothing : pop.x[alive_indices],
+        isnothing(pop.y) ? nothing : pop.y[alive_indices],
+        Int32(n_alive),
+        Int32(n_alive),
+        pop.indices[alive_indices]
+    )
+    
+    return snapshot
 end
 
 """
@@ -820,7 +836,7 @@ function plot_phase_dynamics(ts::SimulationTimeSeries)
         xlabel = "Time (h)",
         ylabel = "Number of Cells",
         title  = "Cell Cycle Phase Distribution",
-        legend = :outerright,
+        legend = :best,
         grid   = true,
         framestyle = :box,
     )

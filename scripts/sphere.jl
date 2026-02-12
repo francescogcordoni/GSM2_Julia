@@ -14,6 +14,7 @@ using StatsBase
 using Optim
 using LsqFit
 using ProgressMeter
+using InlineStrings
 
 nthreads()
 
@@ -34,6 +35,7 @@ include(joinpath(@__DIR__, "..", "src", "utilities_dose_computation.jl"))
 include(joinpath(@__DIR__, "..", "src", "utilities_AT_computation.jl"))
 include(joinpath(@__DIR__, "..", "src", "utilities_plot.jl"))
 include(joinpath(@__DIR__, "..", "src", "utilities_abm.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_plot_abm.jl"))
 
 #&Stopping power
 sp = load_stopping_power()
@@ -105,7 +107,7 @@ target_geom = "circle"        # Options: "square", "circle"
 calc_type   = "full"          # Options: "full" -> all layers, "fast" -> only first layer
 
 #& Tumor or target radius (µm)
-tumor_radius = 200.0
+tumor_radius = 300.0
 
 #& Compute beam parameters based on geometry and calculation mode
 #! check description on inputs
@@ -153,7 +155,7 @@ setup_irrad_conditions!(
 #~ ===================================== set O2 =============================================
 #~ ==========================================================================================
 
-set_oxygen!(cell_df; plot_oxygen=false)
+set_oxygen!(cell_df; plot_oxygen = false)
 O2_mean = mean(cell_df.O[cell_df.is_cell.==1])
 
 #~ ==========================================================================================
@@ -167,7 +169,7 @@ Npar = round(Int, F * (pi * (R_beam)^2 * 10^(-8)))
 zF = irrad.dose / Npar
 D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
-        
+
 @time MC_dose_fast!(ion, Npar, x_beam, y_beam, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2, type_AT, track_seg)
 plot_dose_cell(cell_df_copy, layer_plot = false)
 
@@ -185,6 +187,8 @@ plot_damage(cell_df_copy, layer_plot = true)
 compute_cell_survival_GSM2!(cell_df_copy, gsm2)
 #plot_survival_probability_cell(cell_df_copy, layer_plot = true)
 
+mean(cell_df_copy[cell_df_copy.is_cell .== 1, :sp])
+
 #~ ==========================================================================================
 #~ =================================== compute ABM ==========================================
 #~ ==========================================================================================
@@ -192,8 +196,45 @@ compute_cell_survival_GSM2!(cell_df_copy, gsm2)
 nat_apo = 10^-10
 compute_times_domain!(cell_df_copy, gsm2, nat_apo)
 plot_times(cell_df_copy)
+cell_df_ = deepcopy(cell_df_copy) 
+
+plot_initial_distributions(cell_df_)
+# Run simulation
+
+ts, snapshots = run_simulation_abm!(cell_df_, nat_apo)
+plot_simulation_results(ts)
+
+# Advanced analysis
+display(plot_analysis_dashboard(ts))
+
+# Growth rate analysis
+display(plot_growth_rate(ts))
+
+# Phase proportions
+display(plot_phase_proportions(ts))
+
+# Snapshot comparison
+display(plot_snapshot_comparison(snapshots, times=[0, 6, 12, 24]))
+
+# Spatial visualization (if coordinates available)
+display(plot_spatial_distribution(snapshots[24]))
+
+# Statistical summary
+print_simulation_summary(ts)
+
+# Export data
+#export_timeseries_csv(ts, "simulation_results.csv")
+
+# Create animation (if spatial data)
+create_spatial_animation(snapshots, output_file="cell_dynamics.gif")
 
 
+# Access snapshots
+snapshot_6h = snapshots[6]  # Cells at 6 hours
+snapshot_24h = snapshots[24]  # Cells at 24 hours
+
+# Access time series data
+final_cell_count = ts.total_cells[end]
 
 
 
