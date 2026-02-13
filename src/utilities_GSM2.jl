@@ -153,11 +153,12 @@ function MC_loop_damage!(
     ion::Ion,
     cell_df::DataFrame,
     irrad_cond::Vector{AT},
-    gsm2::GSM2;
+    gsm2_cycle::Vector{GSM2};
     verbose::Bool = false,
     show_progress::Bool = true
 ) where {AT}
 
+    gsm2 = gsm2_cycle[1]
     vprintln(args...) = (verbose ? println("[DEBUG] ", args...) : nothing)
 
     println("\n-----------------------------------------------------------")
@@ -334,7 +335,7 @@ end
 
 
 """
-    calculate_kappa(ion_name, LET, O; OER_bool=true)
+calculate_kappa(ion_name, LET, O; OER_bool=true)
 
 Compute the yield of damage per unit Gy using:
 - ion species (p1..p5 parameters)
@@ -370,7 +371,7 @@ function calculate_kappa(ion_name::String, LET::Float64, O::Float64; OER_bool::B
 end
 
 """
-    compute_cell_survival_GSM2!(cell_df, gsm2; NFrac::Int = 1)
+compute_cell_survival_GSM2!(cell_df, gsm2; NFrac::Int = 1)
 
 Compute per‑cell survival probabilities using the GSM2 model and update
 the corresponding fields of `cell_df` **in place**.
@@ -411,7 +412,7 @@ The final survival probability accounts for a specified number of fractions
 # Returns
 - Nothing (`nothing`)
 """
-function compute_cell_survival_GSM2!(cell_df::DataFrame, gsm2::GSM2; NFrac::Int64 = 1)
+function compute_cell_survival_GSM2!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}; NFrac::Int64 = 1)
 
     cell_df.sp .= 1.
     cell_df.apo_time .= Inf
@@ -423,6 +424,18 @@ function compute_cell_survival_GSM2!(cell_df::DataFrame, gsm2::GSM2; NFrac::Int6
 
     for i in cell_df.index[cell_df.is_cell .== 1]
         # survival using GSM2
+        if cell_df.cell_cycle[i] == "G1"
+            gsm2 = gsm2_cycle[1]
+        elseif cell_df.cell_cycle[i] == "S"
+            gsm2 = gsm2_cycle[2]
+        elseif cell_df.cell_cycle[i] == "G2"
+            gsm2 = gsm2_cycle[3]
+        elseif cell_df.cell_cycle[i] == "M"
+            gsm2 = gsm2_cycle[3]
+        else
+            println("Cell cycle not found")
+            gsm2 = gsm2_cycle[4]    
+        end
         SP_cell = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
 
         # apply number of fractions (default NFrac = 1)

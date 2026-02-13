@@ -51,7 +51,7 @@ where `:nei[i]` is expected to be a vector of neighbor indices.
 # Returns
 - `nothing` (modifies `cell_df` in place)
 """
-function compute_times_domain!(cell_df::DataFrame, gsm2::GSM2, nat_apo::Float64;
+function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat_apo::Float64;
                                 terminal_time::Float64 = Inf,
                                 verbose::Bool = false, print_every::Int = 0, summary::Bool = true)
 
@@ -112,6 +112,19 @@ function compute_times_domain!(cell_df::DataFrame, gsm2::GSM2, nat_apo::Float64;
     Threads.@threads for k in eachindex(active_cells)
         i = active_cells[k]
         tid = Threads.threadid()
+
+        if cell_df.cell_cycle[i] == "G1"
+            gsm2 = gsm2_cycle[1]
+        elseif cell_df.cell_cycle[i] == "S"
+            gsm2 = gsm2_cycle[2]
+        elseif cell_df.cell_cycle[i] == "G2"
+            gsm2 = gsm2_cycle[3]
+        elseif cell_df.cell_cycle[i] == "M"
+            gsm2 = gsm2_cycle[3]
+        else
+            println("Cell cycle not found")
+            gsm2 = gsm2_cycle[4]    
+        end
         
         # SAFETY CHECK: assicurati che tid sia valido
         if tid > max_threads

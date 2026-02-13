@@ -54,6 +54,35 @@ r  = 4.30    # repair rate [1/h]
 rd = 0.80    # domain radius [µm]
 Rn = 7.2     # nucleus radius [µm]
 
+#G1 -> 12h
+a_G1 = 0.012872261720543399
+b_G1 = 0.04029756109753225
+r_G1 = 2.780479661191086
+
+#S -> 8h
+a_S = 0.00589118894714544
+b_S = 0.05794352736120672
+r_S = 5.84009601901114
+
+#G2 - M -> 3h + 1h
+a_G2 = 0.024306291709970018
+b_G2 = 5.704688326522623e-5
+r_G2 = 1.7720064637774506
+
+#mixed
+a = 0.01481379648786136
+b = 0.012663276476522422
+r = 2.5656972960759896
+rd = 0.8;
+Rn = 7.2;    
+
+gsm2_cycle = Array{GSM2}(undef, 4)
+gsm2_cycle[1] = GSM2(r_G1, a_G1, b_G1, rd, Rn); #! G1
+gsm2_cycle[2] = GSM2(r_S, a_S, b_S, rd, Rn); #! S
+gsm2_cycle[3] = GSM2(r_G2, a_G2, b_G2, rd, Rn); #! G2 - M
+gsm2_cycle[4] = GSM2(r, a, b, rd, Rn); #! mixed
+
+
 #& Construct the GSM2 object
 setup_GSM2!(r, a, b, rd, Rn)
 
@@ -170,21 +199,21 @@ zF = irrad.dose / Npar
 D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
 
-@time MC_dose_fast!(ion, Npar, x_beam, y_beam, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2, type_AT, track_seg)
+@time MC_dose_fast!(ion, Npar, x_beam, y_beam, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
 plot_dose_cell(cell_df_copy, layer_plot = false)
 
 #~ ==========================================================================================
 #~ ================================== compute damage ========================================
 #~ ==========================================================================================
 
-MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2)
+MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
 plot_damage(cell_df_copy, layer_plot = true)
 
 #~ ==========================================================================================
 #~ ================================= compute survival =======================================
 #~ ==========================================================================================
 # Compute cell survival
-compute_cell_survival_GSM2!(cell_df_copy, gsm2)
+compute_cell_survival_GSM2!(cell_df_copy, gsm2_cycle)
 #plot_survival_probability_cell(cell_df_copy, layer_plot = true)
 
 mean(cell_df_copy[cell_df_copy.is_cell .== 1, :sp])
@@ -194,7 +223,7 @@ mean(cell_df_copy[cell_df_copy.is_cell .== 1, :sp])
 #~ ==========================================================================================
 
 nat_apo = 10^-10
-compute_times_domain!(cell_df_copy, gsm2, nat_apo)
+compute_times_domain!(cell_df_copy, gsm2_cycle, nat_apo)
 plot_times(cell_df_copy)
 cell_df_ = deepcopy(cell_df_copy) 
 

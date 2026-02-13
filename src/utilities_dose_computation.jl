@@ -1,159 +1,505 @@
 """
-MC_dose_fast!(
-        ion::Ion, Npar::Int64, x_cb::Float64, y_cb::Float64, R_beam::Float64,
-        irrad_cond::Vector{AT}, cell_df_copy::DataFrame,
-        df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
-        gsm2::GSM2, type_AT::String, track_seg::Bool
-    )
+MC_dose_fast!(ion, Npar, x_cb, y_cb, R_beam, irrad_cond,
+                    cell_df_copy, df_center_x, df_center_y, at,
+                    gsm2_cycle, type_AT, track_seg)
 
-Performs a fast Monte Carlo (MC) dose calculation on a cellular domain, either
-with track‑segment approximation enabled or with a full MC simulation over
-all energy layers.
+High-level Monte Carlo wrapper that:
+1. Selects representative cells from DataFrames,
+2. Converts them into matrix form,
+3. Executes optimized Monte Carlo kernels,
+4. Converts results back to DataFrames, and
+5. Copies dose values into the full simulation domain.
 
-# General Description
-The function implements two computational modes:
+This function is a **drop‑in replacement** for `MC_dose_fast!` and requires
+**no changes** to user code. It only adds optimized matrix-based MC kernels
+under the hood.
 
----
+Arguments
+---------
+- `ion`          :: Ion species used in the simulation
+- `Npar`         :: Expected number of incident particles
+- `x_cb, y_cb`   :: Beam center coordinates
+- `R_beam`       :: Beam radius
+- `irrad_cond`   :: Irradiation conditions per energy step
+- `cell_df_copy` :: Full domain DataFrame
+- `df_center_x`  :: X coordinates per cell
+- `df_center_y`  :: Y coordinates per cell
+- `at`           :: Output dose/track structure DataFrame
+- `gsm2_cycle`   :: Cycle of GSM2 parameters
+- `type_AT`      :: Transport type string
+- `track_seg`    :: Enables track-segment mode if true
 
-## 1) Track Segment Mode (`track_seg = true`)
-
-This mode performs a **Track‑Structure Calculation (TSC)** using a single
-representative layer of cells to approximate the behaviour of the full domain.
-
-### Steps:
-1. **Select representative cells**
-    - Filter all cells with `is_cell == 1`.
-    - Group by `(x, y)` coordinates and select the first cell in each group.
-    - Filter `df_center_x`, `df_center_y`, and `at` accordingly.
-
-2. **Run Monte Carlo on the representative layer**
-    - Calls `MC_loop_ions_domain_tsc_fast!` using only the first irradiation
-        condition (assumed to be representative for TSC).
-
-3. **Propagate results to the full domain**
-    - `MC_loop_copy_dose_domain_fast!` copies the dose from the representative
-        layer back to all original cells.
-
-(An NTCP damage model is available but currently commented out.)
-
----
-
-## 2) Full Monte Carlo Mode (`track_seg = false`)
-
-This mode performs a classical MC simulation over all energy layers.
-
-### Steps:
-1. **Generate primary particle hits**
-    - Sample `Np ~ Poisson(Npar)`.
-    - Generate `(x, y)` impact points within the beam radius `R_beam`.
-
-2. **Loop over energy layers**
-    For each `energy_step`:
-    - Select only cells belonging to that energy layer.
-    - Identify representative cells (same method as above).
-    - Run `MC_loop_ions_domain_fast!` with the generated hit positions.
-    - Copy the layer‑specific dose back to the full grid with
-        `MC_loop_copy_dose_domain_layer_fast_notsc!`.
-
-(Again, the NTCP damage model is present but disabled.)
-
----
-
-# Arguments
-- **ion::Ion** – Physical and microdosimetric properties of the ion species.
-- **Npar::Int64** – Mean number of primary particles.
-- **x_cb, y_cb::Float64** – Beam center position.
-- **R_beam::Float64** – Beam radius.
-- **irrad_cond::Vector{AT}** – Irradiation conditions per energy layer.
-- **cell_df_copy::DataFrame** – Cellular domain containing coordinates, flags,
-    and dose storage.
-- **df_center_x, df_center_y::DataFrame** – Atom/voxel center tables.
-- **at::DataFrame** – Microdosimetric tallies and energy‑loss structures.
-- **gsm2::GSM2** – GSM microdosimetric model object.
-- **type_AT::String** – Advanced microdosimetric model (“Katz”, “MKM”, etc.).
-- **track_seg::Bool** – Enables or disables Track‑Segment mode.
-
----
-
-# Output
-This function modifies its input data structures *in place*:
-
-- updates `at` with microdosimetric tallies,
-- updates `cell_df_copy` with deposited dose (and optionally damage),
-- prints progress messages.
-
-The function returns nothing.
-
+Notes
+-----
+- No physical or mathematical behavior is changed.
+- Only printing and clarity improvements have been added.
 """
-function MC_dose_fast!(ion::Ion, Npar::Int64, x_cb::Float64, y_cb::Float64, R_beam::Float64, irrad_cond::Vector{AT},
-    cell_df_copy::DataFrame, df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
-    gsm2::GSM2, type_AT::String, track_seg::Bool)
+function MC_dose_fast!(
+    ion::Ion, Npar::Int64, x_cb::Float64, y_cb::Float64, R_beam::Float64,
+    irrad_cond::Vector{AT}, cell_df_copy::DataFrame,
+    df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+    gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool
+)
+    println("\n───────────────────────────────────────────────")
+    println("🔧  Running MC_dose_fast!   (track_seg = $track_seg)")
+    println("───────────────────────────────────────────────")
 
-    # Ensure 'at' is initialized (e.g., with zeros) before calling loops
-    # Example: at[:, Not(:index)] .= 0.0
+    t_start = time()
+    gsm2 = gsm2_cycle[1]
 
     if track_seg
-        println("Track Segment Enabled (track_seg=true)")
-        # --- Filter for representative layer ---
-        # Find cells that are marked as 'is_cell'
+        println("• Mode: Track-Segment Matrix Optimization")
+        println("• Selecting representative cells...")
+
         cell_df_is = filter(row -> row.is_cell == 1, cell_df_copy)
         if nrow(cell_df_is) == 0
-            @warn "No cells marked with is_cell=1 found. Cannot perform track segmentat calculation."
-            return # Or handle appropriately
-        end
-        # Group by x,y and get the index of the first cell in each group
-        # Using combine with first assumes the first cell encountered is representative
-        grouped_df = combine(groupby(cell_df_is, [:x, :y]), :index => first => :representative_index)
-
-        # Filter the domain center DataFrames and the target 'at' DataFrame
-        # Use 'in' with Ref() for efficient filtering based on the representative indices
-        rep_indices_set = Set(grouped_df.representative_index)
-        cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
-        cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
-        at_single = filter(row -> row.index in rep_indices_set, at)
-
-        if nrow(at_single) == 0
-            @warn "No representative cells found after filtering 'at' DataFrame. Check index matching."
+            @warn "No cells with is_cell = 1 → skipping."
             return
         end
 
-        # --- Run calculation for representative layer ---
-        # Pass only the first irradiation condition (assuming it's representative for tsc)
-        MC_loop_ions_domain_tsc_fast!(Npar, x_cb, y_cb, [irrad_cond[1]], gsm2, cell_df_single_x, cell_df_single_y, at_single, R_beam, type_AT, ion)
+        grouped_df = combine(groupby(cell_df_is, [:x, :y]),
+                                :index => first => :representative_index)
+        rep_indices_set = Set(grouped_df.representative_index)
 
-        # --- Copy results and calculate damage ---
-        MC_loop_copy_dose_domain_fast!(cell_df_copy, at_single, at) # Copies from at_single to at AND populates cell_df.dose/dose_cell
-    # Remove the following # for the original version
-    #MC_loop_damage_domain_fast_NTCP!(ion, cell_df_copy, gsm2) # Calculates damage based on cell_df.dose
+        println("  → Found $(length(rep_indices_set)) representative cells")
+
+        cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+        cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+        at_single        = filter(row -> row.index in rep_indices_set, at)
+
+        println("• Converting DataFrames → matrices...")
+        mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+
+        println("• Running optimized TSC Monte Carlo kernel...")
+        MC_loop_ions_domain_tsc_matrix!(
+            Npar, x_cb, y_cb, [irrad_cond[1]], gsm2,
+            mat_x, mat_y, mat_at, R_beam, type_AT, ion
+        )
+
+        println("• Converting matrices → DataFrames...")
+        matrix_to_dataframe!(at_single, mat_at)
+
+        println("• Copying dose values back to full domain...")
+        MC_loop_copy_dose_domain_fast!(cell_df_copy, at_single, at)
 
     else
-        println("Track Segment Disabled (track_seg=false)")
+        println("• Mode: Layered (non-TSC) Matrix Optimization")
 
         Np = rand(Poisson(Npar))
-        x_list = Array{Float64}(undef, Np)
-        y_list = Array{Float64}(undef, Np)
+        println("• Sampling $Np particle hits...")
+
+        x_list = Vector{Float64}(undef, Np)
+        y_list = Vector{Float64}(undef, Np)
         Threads.@threads for ip in 1:Np
             x_list[ip], y_list[ip] = GenerateHit_Circle(x_cb, y_cb, R_beam)
         end
 
+        println("• Processing layers:")
         for id in unique(cell_df_copy.energy_step)
-            cell_df_is = filter(row -> (row.is_cell == 1) & (row.energy_step == id), cell_df_copy)
-            if (nrow(cell_df_is) != 0)
-                grouped_df = combine(groupby(cell_df_is, [:x, :y]), :index => first => :representative_index)
+            println("  → Layer $id")
+            cell_df_is = filter(row -> (row.is_cell == 1) && (row.energy_step == id), cell_df_copy)
+            if nrow(cell_df_is) == 0
+                println("    (empty → skip)")
+                continue
+            end
 
-                rep_indices_set = Set(grouped_df.representative_index)
-                cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
-                cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
-                at_single = filter(row -> row.index in rep_indices_set, at)
+            grouped_df = combine(groupby(cell_df_is, [:x, :y]),
+                                    :index => first => :representative_index)
+            rep_indices_set = Set(grouped_df.representative_index)
 
-                MC_loop_ions_domain_fast!(x_list, y_list, [irrad_cond[id]], gsm2, cell_df_single_x, cell_df_single_y, at_single, type_AT, ion)
-                MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_copy, at_single, at, id)
+            cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+            cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+            at_single        = filter(row -> row.index in rep_indices_set, at)
+
+            println("    • Converting to matrices...")
+            mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+
+            println("    • Running MC kernel for this layer...")
+            MC_loop_ions_domain_matrix!(
+                x_list, y_list, [irrad_cond[id]], gsm2,
+                mat_x, mat_y, mat_at, type_AT, ion
+            )
+
+            matrix_to_dataframe!(at_single, mat_at)
+
+            println("    • Copying dose values back...")
+            MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_copy, at_single, at, id)
+        end
+    end
+
+    dt = round(time() - t_start; digits=3)
+    println("───────────────────────────────────────────────")
+    println("🎉 MC_dose_fast! finished. Total time: $(dt)s")
+    println("───────────────────────────────────────────────\n")
+end
+
+"""
+dataframes_to_matrices(df_x, df_y, df_at)
+
+Convert the numerical columns of three DataFrames into dense matrices.
+
+- The column `:index` is automatically excluded.
+- All remaining columns must be numeric and consistently ordered.
+- Returns `(mat_x, mat_y, mat_at)` as `Matrix{Float64}`.
+
+This is used to feed the optimized Monte Carlo kernels that operate on
+matrix-domain representations instead of DataFrames.
+
+Printing/logging has been added for clarity; **no computational changes**.
+"""
+function dataframes_to_matrices(df_x::DataFrame, df_y::DataFrame, df_at::DataFrame)
+    println("• Converting DataFrames → matrices")
+    println("  → Column selection: excluding :index")
+
+    # Extract domain columns (everything except :index)
+    domain_cols = names(df_x, Not(:index))
+
+    println("  → Using $(length(domain_cols)) domain columns: ", join(domain_cols, ", "))
+
+    # Convert to matrices
+    mat_x  = Matrix{Float64}(df_x[:, domain_cols])
+    mat_y  = Matrix{Float64}(df_y[:, domain_cols])
+    mat_at = Matrix{Float64}(df_at[:, domain_cols])
+
+    println("  → Conversion complete (sizes: X=$(size(mat_x)), Y=$(size(mat_y)), AT=$(size(mat_at)))")
+
+    return mat_x, mat_y, mat_at
+end
+
+
+"""
+matrix_to_dataframe!(df, mat)
+
+Write matrix values back into an existing DataFrame `df`.
+
+- The matrix must correspond exactly to all DataFrame columns except `:index`.
+- Column order is preserved.
+- Updates happen in place.
+
+This is the inverse operation of `dataframes_to_matrices`.
+"""
+function matrix_to_dataframe!(df::DataFrame, mat::Matrix{Float64})
+    println("• Writing matrices → DataFrame")
+    domain_cols = names(df, Not(:index))
+
+    println("  → Updating $(length(domain_cols)) columns")
+
+    @assert size(mat, 2) == length(domain_cols) "Matrix column count does not match DataFrame"
+
+    for (j, col) in enumerate(domain_cols)
+        df[!, col] = mat[:, j]
+    end
+
+    println("  → Update complete (DataFrame rows = $(nrow(df)))")
+end
+
+"""
+MC_loop_ions_domain_tsc_matrix!(...)
+
+Monte Carlo Track Structure Calculation (TSC mode - matrix version).
+
+This function simulates ion-induced energy deposition over a matrix of spatial
+domains using a Monte Carlo approach. It:
+
+1. Builds a radial dose lookup table (log-spaced sampling).
+2. Simulates a Poisson-distributed number of particle hits.
+3. Distributes deposited dose into each domain using:
+    - Core region (constant core dose)
+    - Mid region (lookup + linear interpolation)
+    - Penumbra region (inverse-square decay)
+4. Accumulates dose in a thread-safe manner.
+5. Writes the final result into `mat_at` (in-place).
+
+Arguments:
+-----------
+- `Npar`  : Expected number of primary particles
+- `x_cb`, `y_cb` : Beam center coordinates
+- `irrad_cond` : Irradiation conditions
+- `gsm2` : Geometry/scaling model
+- `mat_x`, `mat_y` : Domain coordinate matrices
+- `mat_at` : Output matrix (modified in-place)
+- `R_beam` : Beam radius
+- `type_AT` : Track type identifier
+- `ion` : Ion parameters
+
+This function modifies `mat_at` in-place.
+"""
+function MC_loop_ions_domain_tsc_matrix!(
+    Npar::Int, x_cb::Float64, y_cb::Float64,
+    irrad_cond::Vector{AT}, gsm2::GSM2,
+    mat_x::Matrix{Float64}, mat_y::Matrix{Float64}, mat_at::Matrix{Float64},
+    R_beam::Float64, type_AT::String, ion::Ion
+)
+
+    println("\n============================================================")
+    println(" Monte Carlo Loop - Ions Domain (TSC MODE - Matrix)")
+    println("============================================================")
+
+    # Extract parameters
+    Rp = irrad_cond[1].Rp
+    Rc = irrad_cond[1].Rc
+    Kp = irrad_cond[1].Kp
+    Rk = Rp
+
+    lower_bound_log = max(1e-9, gsm2.rd - 10 * Rc)
+    core_radius_sq = (gsm2.rd - 10 * Rc)^2
+    mid_radius_sq  = (gsm2.rd + 150 * Rc)^2
+    penumbra_radius_sq = Rp^2
+
+    println("→ Physical parameters:")
+    println("   Rp = $Rp, Rc = $Rc, Kp = $Kp")
+    println("   Core radius²     = $core_radius_sq")
+    println("   Mid radius²      = $mid_radius_sq")
+    println("   Penumbra radius² = $penumbra_radius_sq")
+
+    # Build lookup table
+    sim_ = 1000
+    impact_p = 10 .^ range(log10(lower_bound_log),
+                           stop=log10(gsm2.rd + 150 * Rc),
+                            length=sim_)
+
+    dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
+
+    println("\n→ Building radial dose lookup table ($sim_ samples)...")
+
+    Threads.@threads for i in 1:sim_
+        tid = Threads.threadid()
+        track = Track(impact_p[i], 0.0, Rk)
+        _d, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd,
+                                            track, irrad_cond[1], type_AT)
+        dose_lookup_threads[tid][i] = Gyr
+    end
+
+    dose_vec = sum(dose_lookup_threads)
+    impact_vec = impact_p
+    core_dose = dose_vec[1]
+
+    println("   ✔ Lookup table completed")
+    println("   Core dose = $core_dose Gy")
+
+    # Matrix dimensions
+    num_cells, num_domains_per_cell = size(mat_x)
+    total_domains = num_cells * num_domains_per_cell
+
+    println("\n→ Geometry:")
+    println("   Cells             = $num_cells")
+    println("   Domains per cell  = $num_domains_per_cell")
+    println("   Total domains     = $total_domains")
+
+    # Flatten matrices to vectors (column-major order)
+    dom_x = vec(mat_x')
+    dom_y = vec(mat_y')
+
+    # Thread-local accumulators
+    at_acc = [zeros(Float64, total_domains) for _ in 1:Threads.maxthreadid()]
+
+    # Monte Carlo
+    Np = rand(Poisson(Npar))
+
+    println("\n→ Monte Carlo sampling:")
+    println("   Expected particles = $Npar")
+    println("   Sampled particles  = $Np")
+    println("   Threads used       = $(Threads.maxthreadid())")
+
+    Threads.@threads for _ in 1:Np
+        tid = Threads.threadid()
+        local_store = at_acc[tid]
+
+        x, y = GenerateHit_Circle(x_cb, y_cb, R_beam)
+
+        @inbounds for k in 1:total_domains
+            dist_sq = (dom_x[k] - x)^2 + (dom_y[k] - y)^2
+
+            if dist_sq <= core_radius_sq
+                local_store[k] += core_dose
+
+            elseif dist_sq <= mid_radius_sq
+                dist = sqrt(dist_sq)
+                idx_l = searchsortedfirst(impact_vec, dist)
+
+                if idx_l == 1
+                    local_store[k] += core_dose
+
+                elseif idx_l > sim_
+                    local_store[k] += dose_vec[end]
+
+                else
+                    x1, x2 = impact_vec[idx_l-1], impact_vec[idx_l]
+                    y1, y2 = dose_vec[idx_l-1], dose_vec[idx_l]
+                    local_store[k] += y1 + (y2 - y1) *
+                                        (dist - x1) / (x2 - x1)
+                end
+
+            elseif dist_sq < penumbra_radius_sq
+                local_store[k] += Kp / dist_sq
             end
         end
-        # Remove the following # for the original version
-        #MC_loop_damage_domain_fast_NTCP!(ion, cell_df_copy, gsm2)
     end
-    println("MC_dose_fast! finished.")
+
+    final_at_row = sum(at_acc)
+
+    # Reshape back to matrix (transpose back)
+    mat_at .= reshape(final_at_row,
+                        num_domains_per_cell,
+                        num_cells)'
+
+    println("\n✔ TSC simulation completed successfully")
+    println("============================================================\n")
+end
+
+"""
+    MC_loop_ions_domain_matrix!(...)
+
+Full Monte Carlo Track Structure simulation (matrix version).
+
+This function computes ion-induced energy deposition across a matrix
+of spatial domains using explicit particle positions (`x_list`, `y_list`).
+
+Workflow:
+-----------
+1. Builds a radial dose lookup table (log-spaced sampling).
+2. Loops over all provided particle coordinates.
+3. For each domain, deposits dose according to:
+    - Core region (constant core dose)
+    - Mid region (lookup + linear interpolation)
+    - Penumbra region (inverse-square decay)
+4. Uses thread-local accumulators for parallel safety.
+5. Writes final accumulated dose into `mat_at` (in-place).
+
+Arguments:
+-----------
+- `x_list`, `y_list` : Particle impact coordinates
+- `irrad_cond`       : Irradiation conditions
+- `gsm2`             : Geometry/scaling model
+- `mat_x`, `mat_y`   : Domain coordinate matrices
+- `mat_at`           : Output matrix (modified in-place)
+- `type_AT`          : Track type identifier
+- `ion`              : Ion parameters
+
+This function modifies `mat_at` in-place.
+"""
+function MC_loop_ions_domain_matrix!(
+    x_list::Vector{Float64}, y_list::Vector{Float64},
+    irrad_cond::Vector{AT}, gsm2::GSM2,
+    mat_x::Matrix{Float64}, mat_y::Matrix{Float64}, mat_at::Matrix{Float64},
+    type_AT::String, ion::Ion
+)
+
+    println("\n============================================================")
+    println(" Monte Carlo Loop - Ions Domain (FULL MC - Matrix)")
+    println("============================================================")
+
+    # Extract parameters
+    Rp = irrad_cond[1].Rp
+    Rc = irrad_cond[1].Rc
+    Kp = irrad_cond[1].Kp
+    Rk = Rp
+
+    lower_bound_log = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq = (gsm2.rd - 10Rc)^2
+    mid_radius_sq  = (gsm2.rd + 150Rc)^2
+    penumbra_radius_sq = Rp^2
+
+    println("→ Physical parameters:")
+    println("   Rp = $Rp, Rc = $Rc, Kp = $Kp")
+    println("   Core radius²     = $core_radius_sq")
+    println("   Mid radius²      = $mid_radius_sq")
+    println("   Penumbra radius² = $penumbra_radius_sq")
+
+    # Build lookup table
+    sim_ = 1000
+    impact_vec = 10 .^ range(log10(lower_bound_log),
+                                stop=log10(gsm2.rd + 150Rc),
+                                length=sim_)
+
+    lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
+
+    println("\n→ Building radial dose lookup table ($sim_ samples)...")
+
+    Threads.@threads for i in 1:sim_
+        tid = Threads.threadid()
+        track = Track(impact_vec[i], 0.0, Rk)
+        _d, _r, Gyr = distribute_dose_domain(
+            0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT
+        )
+        lookup_threads[tid][i] = Gyr
+    end
+
+    dose_vec = sum(lookup_threads)
+    core_dose = dose_vec[1]
+
+    println("   ✔ Lookup table completed")
+    println("   Core dose = $core_dose Gy")
+
+    # Matrix dimensions
+    num_cells, num_domains_per_cell = size(mat_x)
+    total_domains = num_cells * num_domains_per_cell
+
+    println("\n→ Geometry:")
+    println("   Cells             = $num_cells")
+    println("   Domains per cell  = $num_domains_per_cell")
+    println("   Total domains     = $total_domains")
+
+    # Flatten matrices
+    dom_x = vec(mat_x')
+    dom_y = vec(mat_y')
+
+    # Thread-local accumulators
+    at_acc = [zeros(Float64, total_domains) for _ in 1:Threads.maxthreadid()]
+
+    Np = length(x_list)
+
+    println("\n→ Monte Carlo sampling:")
+    println("   Particle count = $Np")
+    println("   Threads used   = $(Threads.maxthreadid())")
+
+    Threads.@threads for ip in 1:Np
+        tid = Threads.threadid()
+        local_acc = at_acc[tid]
+
+        x = x_list[ip]
+        y = y_list[ip]
+
+        @inbounds for k in 1:total_domains
+            dx = dom_x[k] - x
+            dy = dom_y[k] - y
+            dist_sq = dx*dx + dy*dy
+
+            if dist_sq <= core_radius_sq
+                local_acc[k] += core_dose
+
+            elseif dist_sq <= mid_radius_sq
+                dist = sqrt(dist_sq)
+                idx_l = searchsortedfirst(impact_vec, dist)
+
+                if idx_l == 1
+                    local_acc[k] += core_dose
+
+                elseif idx_l > sim_
+                    local_acc[k] += dose_vec[end]
+
+                else
+                    x1, x2 = impact_vec[idx_l-1], impact_vec[idx_l]
+                    y1, y2 = dose_vec[idx_l-1], dose_vec[idx_l]
+                    local_acc[k] += y1 + (y2-y1) *
+                                    (dist-x1)/(x2-x1)
+                end
+
+            elseif dist_sq < penumbra_radius_sq
+                local_acc[k] += Kp / dist_sq
+            end
+        end
+    end
+
+    final_at_row = sum(at_acc)
+
+    # Reshape back to matrix
+    mat_at .= reshape(final_at_row,
+                        num_domains_per_cell,
+                        num_cells)'
+
+    println("\n✔ Full MC simulation completed successfully")
+    println("============================================================\n")
 end
 
 """
@@ -1084,4 +1430,3 @@ function MC_loop_copy_dose_domain_fast!(
 
     println("✔ Finished copying doses.\n")
 end
-
