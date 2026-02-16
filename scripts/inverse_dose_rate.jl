@@ -213,6 +213,10 @@ cell_df_copy.cell_cyle .= "G1"
 
 cell_df_original = deepcopy(cell_df_copy)
 
+cell_df_copy.cell_cyle .= "G1"
+
+cell_df_original = deepcopy(cell_df_copy)
+
 surv_prob = Array{Float64, 1}()
 #~ ==========================================================================================
 #~ compute istantenous irradiation 5Gy
@@ -228,12 +232,14 @@ compute_times_domain!(cell_df_istant, gsm2_cycle, nat_apo)
 cell_df_istant_ = cell_df_istant[cell_df_istant.is_cell .== 1, :]
 push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/size(cell_df_istant_, 1))
 
-times_split = [0.5, 1.0, 2.0, 6.0, 12.0, 24.0, 48.0, 72.0, 96.0, 120.]
+times_split = [0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 20., 22., 24.0, 48.0, 72.0, 96.0, 120.]
 for t in times_split 
+    println(t)
     cell_ = deepcopy(cell_df_original)
     X_prev = cell_.dam_X_total
     compute_times_domain!(cell_, gsm2_cycle, nat_apo, terminal_time = t)
     cell_.is_cell[isfinite.(cell_.death_time)] .= 0
+    run_simulation_abm!(cell_, nat_apo, terminal_time = t)
 
     cell_irrad = deepcopy(cell_)
     MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_irrad, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
@@ -244,9 +250,11 @@ for t in times_split
     cell_.dam_Y_dom .+= cell_irrad.dam_Y_dom
     X_post = cell_.dam_X_total
     compute_times_domain!(cell_, gsm2_cycle, nat_apo)
-    ts, snapshots = run_simulation_abm!(cell_, nat_apo, terminal_time = t)
     cell_df_split_ = cell_[cell_.is_cell .== 1, :]
     push!(surv_prob, size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)/size(cell_df_split_, 1))
 end
+pushfirst!(times_split, 0.0)
+Plots.plot(times_split, surv_prob, yscale = :log10)
+
 
 

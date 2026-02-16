@@ -1415,12 +1415,13 @@ function run_simulation_abm!(pop::CellPopulation, nat_apo::Float64;
 end
 
 function run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64; 
+                            terminal_time::Float64=48.0, 
                             return_dataframes::Bool=true, kwargs...)
     # Convert to SoA
     pop = CellPopulation(cell_df)
     
     # Run simulation
-    ts, snapshots_soa = run_simulation_abm!(pop, nat_apo; kwargs...)
+    ts, snapshots_soa = run_simulation_abm!(pop, nat_apo, terminal_time = terminal_time, kwargs...)
     
     # Convert snapshots back to DataFrames if requested
     if return_dataframes
