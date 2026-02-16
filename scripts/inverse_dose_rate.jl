@@ -209,11 +209,7 @@ plot_dose_cell(cell_df_copy, layer_plot = true)
 MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
 plot_damage(cell_df_copy, layer_plot = true)
 
-cell_df_copy.cell_cyle .= "G1"
-
-cell_df_original = deepcopy(cell_df_copy)
-
-cell_df_copy.cell_cyle .= "G1"
+cell_df_copy.cell_cycle .= "G1"
 
 cell_df_original = deepcopy(cell_df_copy)
 
@@ -248,7 +244,7 @@ for t in times_split
     
     cell_.dam_X_dom .+= cell_irrad.dam_X_dom
     cell_.dam_Y_dom .+= cell_irrad.dam_Y_dom
-    X_post = cell_.dam_X_total
+    X_post = cell_.dam_X_total + cell_irrad.dam_X_total
     compute_times_domain!(cell_, gsm2_cycle, nat_apo)
     cell_df_split_ = cell_[cell_.is_cell .== 1, :]
     push!(surv_prob, size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)/size(cell_df_split_, 1))
@@ -256,5 +252,36 @@ end
 pushfirst!(times_split, 0.0)
 Plots.plot(times_split, surv_prob, yscale = :log10)
 
+Plots.plot(X_prev)
+Plots.plot!(X_new)
+Plots.plot!(X_post)
 
 
+
+
+
+
+df_sub = filter(:is_cell => ==(1), cell_)
+
+# Optionally drop missing labels
+df_sub = dropmissing(df_sub, :cell_cycle)
+
+# Count per category and convert to proportions
+counts = countmap(df_sub.cell_cycle)          # Dict{String, Int}
+cats   = collect(keys(counts))
+vals   = collect(values(counts))
+props  = vals ./ sum(vals)
+
+# Bar plot of proportions
+default(fontfamily = "sans")
+bar(
+    cats, props;
+    legend = false,
+    xlabel = "cell_cycle",
+    ylabel = "Proportion (within is_cell == 1)",
+    title  = "Cell cycle proportions among is_cell == 1",
+    bar_width = 0.8,
+    color = "#D55E00",   # Francesco's preferred rust orange 😉
+    framestyle = :box,
+    yticks = 0:0.1:1.0,
+)

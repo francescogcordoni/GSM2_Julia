@@ -1416,12 +1416,19 @@ end
 
 function run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64; 
                             terminal_time::Float64=48.0, 
-                            return_dataframes::Bool=true, kwargs...)
+                            return_dataframes::Bool=true, 
+                            update_input::Bool=true,  # NEW PARAMETER
+                            kwargs...)
     # Convert to SoA
     pop = CellPopulation(cell_df)
     
     # Run simulation
-    ts, snapshots_soa = run_simulation_abm!(pop, nat_apo, terminal_time = terminal_time, kwargs...)
+    ts, snapshots_soa = run_simulation_abm!(pop, nat_apo; terminal_time=terminal_time, kwargs...)
+    
+    # UPDATE: Write back to original DataFrame
+    if update_input
+        update_dataframe!(cell_df, pop)
+    end
     
     # Convert snapshots back to DataFrames if requested
     if return_dataframes
@@ -1434,3 +1441,46 @@ function run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64;
         return (ts, snapshots_soa)
     end
 end
+
+"""
+Update DataFrame with current state from CellPopulation structure.
+Modifies df in-place.
+"""
+function update_dataframe!(df::DataFrame, pop::CellPopulation)
+    n = nrow(df)
+    
+    if n != pop.n_cells
+        error("DataFrame has $n rows but CellPopulation has $(pop.n_cells) cells")
+    end
+    
+    # Update all fields
+    df.is_cell .= pop.is_cell
+    df.can_divide .= pop.can_divide
+    df.death_time .= pop.death_time
+    df.cycle_time .= pop.cycle_time
+    df.recover_time .= pop.recover_time
+    df.cell_cycle .= String.(pop.cell_cycle)
+    df.number_nei .= pop.number_nei
+    df.nei .= pop.nei
+    
+    # Update optional fields if they exist
+    if hasproperty(df, :is_stem) && !isnothing(pop.is_stem)
+        df.is_stem .= pop.is_stem
+    end
+    
+    if hasproperty(df, :is_death_rad) && !isnothing(pop.is_death_rad)
+        df.is_death_rad .= pop.is_death_rad
+    end
+    
+    if hasproperty(df, :x) && !isnothing(pop.x)
+        df.x .= pop.x
+    end
+    
+    if hasproperty(df, :y) && !isnothing(pop.y)
+        df.y .= pop.y
+    end
+    
+    return nothing
+end
+
+# Modified version that updates the original DataFrame
