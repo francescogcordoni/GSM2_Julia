@@ -6,7 +6,7 @@ This framework simulates the biological effects of ion radiation on cell populat
 
 ## Key Features
 
-*   **GSM2 Kinetic Model**: Simulates DNA damage formation and repair using the generalized stochastic microdosimetric model. It tracks two types of lesions ($X$ and $Y$) and handles repair ($r$), misrepair ($a$), and lethal interaction ($b$) rates.
+*   **GSM2 radiobiological model**: Simulates DNA damage formation and repair using the generalized stochastic microdosimetric model. It tracks two types of lesions ($X$ and $Y$) and handles repair ($r$), misrepair ($a$), and lethal interaction ($b$) rates.
 *   **Microdosimetry & Track Structure**: 
     *   Supports various ion types (e.g., Protons, Carbon) and energies.
     *   Calculates energy deposition in subcellular domains using Monte Carlo simulations.

@@ -411,13 +411,14 @@ function setup_cell_population!(
     compute_possible_division_df!(cell_df_local)
     @eval Main cell_df = $cell_df_local
     
+    N_local_cell = length(cell_df_local.index[cell_df_local.is_cell .== 1])
     # ============================================================
     # Summary
     # ============================================================
     println("=========== Cell Population Setup COMPLETE ===========")
     println(" Geometry:            $target_geom")
     println(" Partial irradiation: $ParIrr")
-    println(" Total cells:         $N_local")
+    println(" Total cells:         $N_local_cell")
     println(" Domains per cell:    $num_cols_local")
     println(" DataFrames created:  df_center_x, df_center_y, at")
     println("=======================================================")
