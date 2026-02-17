@@ -114,7 +114,7 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
         i = active_cells[k]
         tid = Threads.threadid()
 
-        if cell_df.cell_cycle[i] == "G1"
+        if (cell_df.cell_cycle[i] == "G1") || (cell_df.cell_cycle[i] == "G0")
             gsm2 = gsm2_cycle[1]
         elseif cell_df.cell_cycle[i] == "S"
             gsm2 = gsm2_cycle[2]
@@ -173,7 +173,7 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
             cell_df.dam_Y_dom[i] .*= 0
 
             if (cell_df.cell_cycle[i] == "M") && (cell_df.number_nei[i] > 0)
-                division_time = rand(Gamma(0.5, 2.))
+                division_time = rand(Gamma(2*1., 0.5))
                 cell_df.death_time[i] = min(death_time, division_time)
             else
                 cell_df.death_time[i] = death_time
@@ -200,7 +200,7 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
 
             if has_neighbors
                 if cell_df.cell_cycle[i] == "M"
-                    cycle_time = rand(Gamma(0.5, 2.))
+                    cycle_time = rand(Gamma(2*1., 0.5))
                     if isfinite(recover_time_sample) && (cycle_time < recover_time_sample)
                         cell_df.recover_time[i] = Inf
                         cell_df.cycle_time[i]   = Inf
@@ -209,15 +209,15 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
                         cell_df.cycle_time[i] = cycle_time
                     end
                 elseif cell_df.cell_cycle[i] == "G2"
-                    cycle_time = rand(Gamma(0.5*3, 2.))
+                    cycle_time = rand(Gamma(2*3, 0.5))
                     cell_df.cycle_time[i]   = max(cycle_time, recover_time_sample)
                     cell_df.recover_time[i] = recover_time_sample
                 elseif cell_df.cell_cycle[i] == "S"
-                    cycle_time = rand(Gamma(0.5*8, 2.))
+                    cycle_time = rand(Gamma(2*8, 0.5))
                     cell_df.cycle_time[i]   = max(cycle_time, recover_time_sample)
                     cell_df.recover_time[i] = recover_time_sample
                 elseif cell_df.cell_cycle[i] == "G1"
-                    cycle_time = rand(Gamma(0.5*12, 2.))
+                    cycle_time = rand(Gamma(2*12, 0.5))
                     cell_df.cycle_time[i]   = max(cycle_time, recover_time_sample)
                     cell_df.recover_time[i] = recover_time_sample
                 end
@@ -261,13 +261,17 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
         end
     end
 
-    # --------------------------------
-    # Serial merge of neighbor updates
-    # --------------------------------
+    affected = Set{Int}()
     for updates in neighbor_updates
         for nei_idx in updates
-            cell_df.number_nei[nei_idx] += 1
+            push!(affected, nei_idx)  # neighbors of dead cells
+            # also add the dead cell's neighbors' neighbors? No - dead cell is is_cell=0, 
+            # so only its neighbors' number_nei changes
         end
+    end
+
+    for i in affected
+        cell_df.number_nei[i] = length(cell_df.nei[i]) - sum(cell_df.is_cell[cell_df.nei[i]])
     end
 
     # --------------------------------
@@ -744,7 +748,7 @@ function update_time!(pop::CellPopulation, elapsed::Float64)
         rt = recover_times[i]
         if !isinf(rt)
             new_rt = rt - elapsed
-            recover_times[i] = new_rt <= 0.0 ? 0.0 : new_rt  # ← CLAMP TO 0
+            recover_times[i] = new_rt <= 0.0 ? Inf : new_rt  # ← set to Inf instead of 0
         end
     end
     
@@ -819,13 +823,13 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
         return nothing
     end
     
-    # Create daughter cell
+    # Create daughter cell FIRST (is_cell must be set before recounting)
     @inbounds begin
         pop.is_cell[daughter_idx] = 1
         pop.cell_cycle[daughter_idx] = String7("G1")
         pop.cycle_time[daughter_idx] = generate_cycle_time("G1")
         pop.death_time[daughter_idx] = Inf
-        pop.recover_time[daughter_idx] = Inf  # ← FIX: Add this
+        pop.recover_time[daughter_idx] = Inf
         pop.can_divide[daughter_idx] = 1
     end
     
@@ -833,81 +837,43 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
     @inbounds begin
         pop.cell_cycle[parent_idx] = String7("G1")
         pop.cycle_time[parent_idx] = generate_cycle_time("G1")
-        pop.death_time[parent_idx] = Inf  # ← FIX: Add this
-        pop.recover_time[parent_idx] = Inf  # ← FIX: Add this
+        pop.death_time[parent_idx] = Inf
+        pop.recover_time[parent_idx] = Inf
         pop.can_divide[parent_idx] = 1
     end
     
-    # Update neighbor counts
     daughter_neighbors = pop.nei[daughter_idx]
     number_nei = pop.number_nei
     can_divide = pop.can_divide
     cycle_times = pop.cycle_time
     
-    # Use boolean mask for small neighbor lists
-    if length(parent_neighbors) + length(daughter_neighbors) < 20
-        updated = falses(n)
-        
-        @inbounds for n_idx in parent_neighbors
-            if is_valid_index(n_idx, n) && is_cell[n_idx] == 1 && !updated[n_idx]
-                number_nei[n_idx] -= 1
-                updated[n_idx] = true
-                
-                if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
-                    cycle_times[n_idx] = Inf
-                    can_divide[n_idx] = 0
-                end
-            end
-        end
-        
-        @inbounds for n_idx in daughter_neighbors
-            if is_valid_index(n_idx, n) && is_cell[n_idx] == 1 && !updated[n_idx]
-                number_nei[n_idx] -= 1
-                updated[n_idx] = true
-                
-                if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
-                    cycle_times[n_idx] = Inf
-                    can_divide[n_idx] = 0
-                end
-            end
-        end
-    else
-        # Use Set for large neighbor lists
-        affected = Set{Int32}()
-        sizehint!(affected, length(parent_neighbors) + length(daughter_neighbors))
-        
-        @inbounds begin
-            for i in parent_neighbors
-                push!(affected, i)
-            end
-            for i in daughter_neighbors
-                push!(affected, i)
-            end
-        end
-        
-        @inbounds for n_idx in affected
-            if is_valid_index(n_idx, n) && is_cell[n_idx] == 1
-                number_nei[n_idx] -= 1
-                
-                if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
-                    cycle_times[n_idx] = Inf
-                    can_divide[n_idx] = 0
-                end
+    # Recount parent and daughter from scratch
+    pop.number_nei[parent_idx] = recount_empty_neighbors(pop, parent_idx)
+    pop.number_nei[daughter_idx] = recount_empty_neighbors(pop, daughter_idx)
+    
+    # Recount all alive neighbors of parent
+    @inbounds for n_idx in parent_neighbors
+        if is_valid_index(n_idx, n) && is_cell[n_idx] == 1 && 
+           n_idx != parent_idx && n_idx != daughter_idx
+            number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
+            if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
+                cycle_times[n_idx] = Inf
+                can_divide[n_idx] = 0
             end
         end
     end
     
-    # Update cells' own neighbor counts
-    pop.number_nei[parent_idx] -= 1
-    
-    # Count empty neighbors for daughter
-    empty_count = Int16(0)
-    @inbounds for nb in daughter_neighbors
-        if is_valid_index(nb, n) && is_cell[nb] == 0
-            empty_count += 1
+    # Recount all alive neighbors of daughter
+    @inbounds for n_idx in daughter_neighbors
+        if is_valid_index(n_idx, n) && is_cell[n_idx] == 1 && 
+           n_idx != parent_idx && n_idx != daughter_idx
+            number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
+            if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
+                cycle_times[n_idx] = Inf
+                can_divide[n_idx] = 0
+            end
         end
     end
-    pop.number_nei[daughter_idx] = empty_count
     
     # Update alive count
     pop.n_alive += 1
@@ -916,7 +882,7 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
 end
 
 """
-    _handle_cell_removal!(cell_df::DataFrame, removed_idx::Int64, is_natural_apoptosis::Bool)
+_handle_cell_removal!(cell_df::DataFrame, removed_idx::Int64, is_natural_apoptosis::Bool)
 
 Remove a cell from the lattice/graph by marking its slot empty and updating
 dependent state for the removed cell and its neighbors.
@@ -966,6 +932,7 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
         pop.cycle_time[removed_idx] = Inf
         pop.recover_time[removed_idx] = Inf
         pop.can_divide[removed_idx] = 0
+        pop.number_nei[removed_idx] = Int16(0)
     end
     
     # Update optional fields
@@ -980,7 +947,6 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
     n = pop.n_cells
     neighbors = pop.nei[removed_idx]
     
-    # Cache vectors
     is_cell = pop.is_cell
     number_nei = pop.number_nei
     can_divide = pop.can_divide
@@ -989,21 +955,59 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
     
     @inbounds for n_idx in neighbors
         if is_valid_index(n_idx, n) && is_cell[n_idx] == 1
-            number_nei[n_idx] += 1
-            
-            # Unblock if this creates first free space
-            if number_nei[n_idx] == 1 && can_divide[n_idx] == 0
+            # Recount from scratch - never increment
+            number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
+
+            if number_nei[n_idx] > 0 && can_divide[n_idx] == 0
                 new_phase = assign_random_phase()
                 cell_cycle[n_idx] = String7(new_phase)
                 cycle_times[n_idx] = generate_cycle_time(new_phase)
-                pop.death_time[n_idx] = Inf  # ← FIX: Add this
-                pop.recover_time[n_idx] = Inf  # ← FIX: Add this
+                pop.death_time[n_idx] = Inf
+                pop.recover_time[n_idx] = Inf
                 can_divide[n_idx] = 1
             end
         end
     end
     
     return nothing
+end
+
+"""
+Recount empty neighbors for a cell from scratch.
+This is the ground truth - count all neighbors with is_cell == 0.
+"""
+function recount_empty_neighbors(pop::CellPopulation, cell_idx::Int32)::Int16
+    n = pop.n_cells
+    empty_count = Int16(0)
+    
+    @inbounds for nb in pop.nei[cell_idx]
+        if is_valid_index(nb, n) && pop.is_cell[nb] == 0
+            empty_count += 1
+        end
+    end
+    
+    return empty_count
+end
+
+"""
+Recount ALL cells' number_nei from scratch.
+Call this to fix any accumulated errors.
+"""
+function recalculate_number_nei!(df::DataFrame)
+    for i in 1:nrow(df)
+        df.number_nei[i] = length(df.nei[i]) - sum(df.is_cell[j] for j in df.nei[i])
+    end
+end
+
+function recount_empty_neighbors(pop::CellPopulation, cell_idx::Int32)::Int16
+    n = pop.n_cells
+    occupied = Int16(0)
+    @inbounds for nb in pop.nei[cell_idx]
+        if is_valid_index(nb, n)
+            occupied += pop.is_cell[nb]
+        end
+    end
+    return Int16(length(pop.nei[cell_idx])) - occupied
 end
 
 """
@@ -1058,10 +1062,28 @@ according to an ABM (agent-based model) cell-cycle and death logic. Mutates `cel
 """
 function update_ABM!(pop::CellPopulation, next_time::Float64, event::String, 
                     idx::Int32, nat_apo::Float64)
-    # Update times
+    
     update_time!(pop, next_time)
     
-    # Handle event
+    # DEBUG: check for cells with death_time=0 that are still alive
+    for i in Int32(1):pop.n_cells
+        if pop.is_cell[i] == 1 && !isinf(pop.death_time[i]) && pop.death_time[i] == 0.0 && i != idx
+            println("  !! Cell $i has death_time=0 and is still alive after update_time! (event=$event at $idx)")
+        end
+    end
+    
+    # Remove any cells whose death_time hit 0 (other than the main event cell)
+    @inbounds for i in Int32(1):pop.n_cells
+        pop.is_cell[i] == 0 && continue
+        i == idx && continue  # handled below
+        
+        dt = pop.death_time[i]
+        if !isinf(dt) && dt == 0.0
+            _handle_cell_removal!(pop, i, false)
+        end
+    end
+    
+    # Handle main event
     if event == "death_time"
         _handle_cell_removal!(pop, idx, false)
         
@@ -1097,16 +1119,10 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
                 end
             end
         end
-    else
-        @warn "Unhandled event" event idx
     end
-    
-    # Clean up zero times
-    check_time!(pop, nat_apo)
     
     return nothing
 end
-
 """
 check_time!(cell_df::DataFrame, nat_apo::Float64;
                 eps::Float64=0.0, treat_negatives_as_due::Bool=false)
@@ -1394,11 +1410,9 @@ function run_simulation_abm!(pop::CellPopulation, nat_apo::Float64;
     
     # Main loop
     while t < terminal_time
-        # Find next event
         next_time, idx, event = compute_next_event(pop)
         
         isinf(next_time) && break
-        
         t + next_time > terminal_time && break
         
         t += next_time
@@ -1417,7 +1431,7 @@ function run_simulation_abm!(pop::CellPopulation, nat_apo::Float64;
             snapshots[current_hour] = create_snapshot(pop)
         end
         
-        # Process
+        # Process event
         update_ABM!(pop, next_time, event, idx, nat_apo)
         record_timepoint!(ts, t, pop)
     end

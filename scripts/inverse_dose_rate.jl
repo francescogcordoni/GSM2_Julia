@@ -199,6 +199,18 @@ zF = irrad.dose / Npar
 D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
 
+cell_df_copy.is_cell = ifelse.(
+    (cell_df_copy.x.^2 .+ cell_df_copy.y.^2 .+ cell_df_copy.z.^2 .<= 300^2) .&
+    ((cell_df_copy.x .÷ 30 .+ cell_df_copy.y .÷ 30 .+ cell_df_copy.z .÷ 30) .% 2 .== 0),
+    1,
+    0
+)
+for i in 1:nrow(cell_df_copy)
+    cell_df_copy.number_nei[i] = length(cell_df_copy.nei[i]) - sum(cell_df_copy.is_cell[cell_df_copy.nei[i]])
+end
+
+cell_df_original = deepcopy(cell_df_copy)
+
 @time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
 plot_dose_cell(cell_df_copy, layer_plot = true)
 
@@ -210,6 +222,8 @@ MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
 plot_damage(cell_df_copy, layer_plot = true)
 
 cell_df_copy.cell_cycle .= "G1"
+cell_df_copy.can_divide .= 0
+
 
 cell_df_original = deepcopy(cell_df_copy)
 Ntot = size(cell_df_original[cell_df_original.is_cell .== 1, :], 1)
@@ -231,10 +245,10 @@ mean(cell_df_istant[cell_df_istant.is_cell .== 1, :sp])
 nat_apo = 10^-10
 compute_times_domain!(cell_df_istant, gsm2_cycle, nat_apo)
 cell_df_istant_ = cell_df_istant[cell_df_istant.is_cell .== 1, :]
-push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/size(cell_df_istant_, 1))
+push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/Ntot)
 
 times_split = [0.05, 0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0, 72.0, 96.0]
-#for t in times_split 
+for t in times_split 
     println(t)
     cell_ = deepcopy(cell_df_original)
     X_prev = cell_.dam_X_total
@@ -277,7 +291,7 @@ df_sub = dropmissing(df_sub, :cell_cycle)
 counts = countmap(df_sub.cell_cycle)          # Dict{String, Int}
 cats   = collect(keys(counts))
 vals   = collect(values(counts))
-props  = vals ./ sum(vals)
+props  = vals 
 
 # Bar plot of proportions
 default(fontfamily = "sans")
