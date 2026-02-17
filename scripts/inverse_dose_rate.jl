@@ -122,7 +122,7 @@ N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
 
 E        = 50.0         # Ion kinetic energy (MeV/u)
 particle = "1H"    
-dose = 2.5
+dose = 1.5
 setup_IonIrrad!(dose, E, particle)
 
 #~ ==========================================================================================
@@ -212,6 +212,7 @@ plot_damage(cell_df_copy, layer_plot = true)
 cell_df_copy.cell_cycle .= "G1"
 
 cell_df_original = deepcopy(cell_df_copy)
+Ntot = size(cell_df_original[cell_df_original.is_cell .== 1, :], 1)
 
 surv_prob = Array{Float64, 1}()
 #~ ==========================================================================================
@@ -219,8 +220,12 @@ surv_prob = Array{Float64, 1}()
 #~ ==========================================================================================
 
 cell_df_istant = deepcopy(cell_df_copy)
-cell_df_istant.dam_X_dom .= 2*cell_df_istant.dam_X_dom
-cell_df_istant.dam_Y_dom .= 2*cell_df_istant.dam_Y_dom
+cell_irrad = deepcopy(cell_df_istant)
+MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_irrad, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
+MC_loop_damage!(ion, cell_irrad, irrad_cond, gsm2_cycle)
+    
+cell_df_istant.dam_X_dom .+= cell_irrad.dam_X_dom
+cell_df_istant.dam_Y_dom .+= cell_irrad.dam_Y_dom
 compute_cell_survival_GSM2!(cell_df_istant, gsm2_cycle)
 mean(cell_df_istant[cell_df_istant.is_cell .== 1, :sp])
 nat_apo = 10^-10
@@ -228,8 +233,8 @@ compute_times_domain!(cell_df_istant, gsm2_cycle, nat_apo)
 cell_df_istant_ = cell_df_istant[cell_df_istant.is_cell .== 1, :]
 push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/size(cell_df_istant_, 1))
 
-times_split = [0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 20., 22., 24.0, 48.0, 72.0, 96.0, 120.]
-for t in times_split 
+times_split = [0.05, 0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0, 72.0, 96.0]
+#for t in times_split 
     println(t)
     cell_ = deepcopy(cell_df_original)
     X_prev = cell_.dam_X_total
@@ -247,10 +252,12 @@ for t in times_split
     X_post = cell_.dam_X_total + cell_irrad.dam_X_total
     compute_times_domain!(cell_, gsm2_cycle, nat_apo)
     cell_df_split_ = cell_[cell_.is_cell .== 1, :]
-    push!(surv_prob, size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)/size(cell_df_split_, 1))
+    push!(surv_prob, size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)/Ntot)
 end
 pushfirst!(times_split, 0.0)
-Plots.plot(times_split, surv_prob, yscale = :log10)
+Plots.plot(times_split, surv_prob)
+
+
 
 Plots.plot(X_prev)
 Plots.plot!(X_new)

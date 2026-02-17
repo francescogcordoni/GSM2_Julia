@@ -1,5 +1,5 @@
 """
-    compute_times_domain!(cell_df::DataFrame, gsm2::GSM2, nat_apo::Float64;
+compute_times_domain!(cell_df::DataFrame, gsm2::GSM2, nat_apo::Float64;
                             terminal_time::Float64 = Inf,
                             verbose::Bool = false,
                             print_every::Int = 0,
@@ -109,7 +109,8 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
     # --------------------------------
     # Parallel loop on active set
     # --------------------------------
-    Threads.@threads for k in eachindex(active_cells)
+    #Threads.@threads 
+    for k in eachindex(active_cells)
         i = active_cells[k]
         tid = Threads.threadid()
 
@@ -727,15 +728,24 @@ function update_time!(pop::CellPopulation, elapsed::Float64)
         
         # Update death_time
         dt = death_times[i]
-        !isinf(dt) && (death_times[i] = dt - elapsed)
+        if !isinf(dt)
+            new_dt = dt - elapsed
+            death_times[i] = new_dt <= 0.0 ? 0.0 : new_dt
+        end
         
         # Update cycle_time
         ct = cycle_times[i]
-        !isinf(ct) && (cycle_times[i] = ct - elapsed)
+        if !isinf(ct)
+            new_ct = ct - elapsed
+            cycle_times[i] = new_ct <= 0.0 ? 0.0 : new_ct
+        end
         
         # Update recover_time
         rt = recover_times[i]
-        !isinf(rt) && (recover_times[i] = rt - elapsed)
+        if !isinf(rt)
+            new_rt = rt - elapsed
+            recover_times[i] = new_rt <= 0.0 ? 0.0 : new_rt  # ← CLAMP TO 0
+        end
     end
     
     return nothing
@@ -815,6 +825,7 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
         pop.cell_cycle[daughter_idx] = String7("G1")
         pop.cycle_time[daughter_idx] = generate_cycle_time("G1")
         pop.death_time[daughter_idx] = Inf
+        pop.recover_time[daughter_idx] = Inf  # ← FIX: Add this
         pop.can_divide[daughter_idx] = 1
     end
     
@@ -822,6 +833,8 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
     @inbounds begin
         pop.cell_cycle[parent_idx] = String7("G1")
         pop.cycle_time[parent_idx] = generate_cycle_time("G1")
+        pop.death_time[parent_idx] = Inf  # ← FIX: Add this
+        pop.recover_time[parent_idx] = Inf  # ← FIX: Add this
         pop.can_divide[parent_idx] = 1
     end
     
@@ -983,6 +996,8 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
                 new_phase = assign_random_phase()
                 cell_cycle[n_idx] = String7(new_phase)
                 cycle_times[n_idx] = generate_cycle_time(new_phase)
+                pop.death_time[n_idx] = Inf  # ← FIX: Add this
+                pop.recover_time[n_idx] = Inf  # ← FIX: Add this
                 can_divide[n_idx] = 1
             end
         end
@@ -1054,24 +1069,30 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
         @inbounds begin
             current_phase = String(pop.cell_cycle[idx])
             has_space = pop.number_nei[idx] > 0
-            
+
             if current_phase == "M"
                 if has_space
                     _perform_division!(pop, idx, nat_apo)
                 else
                     pop.cell_cycle[idx] = String7("G1")
                     pop.cycle_time[idx] = Inf
+                    pop.death_time[idx] = Inf 
+                    pop.recover_time[idx] = Inf  
                     pop.can_divide[idx] = 0
                 end
             else
                 next_phase = PHASE_TRANSITION[current_phase]
                 pop.cell_cycle[idx] = String7(next_phase)
-                
+
                 if has_space
                     pop.cycle_time[idx] = generate_cycle_time(next_phase)
+                    pop.death_time[idx] = Inf  
+                    pop.recover_time[idx] = Inf 
                     pop.can_divide[idx] = 1
                 else
                     pop.cycle_time[idx] = Inf
+                    pop.death_time[idx] = Inf 
+                    pop.recover_time[idx] = Inf 
                     pop.can_divide[idx] = 0
                 end
             end
@@ -1150,8 +1171,7 @@ function check_time!(pop::CellPopulation, nat_apo::Float64; eps::Float64=0.0)
         
         # Handle cycle_time
         ct = cycle_times[i]
-        !isinf(ct) && abs(ct) <= eps && (cycle_times[i] = Inf)
-    end
+        !isinf(ct) && abs(ct) <= eps && (cycle_times[i] = Inf)    end
     
     return nothing
 end

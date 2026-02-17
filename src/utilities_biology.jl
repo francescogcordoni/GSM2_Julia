@@ -795,10 +795,12 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
             ru = rand() * 24
             if ru <= 1
                 cell_cycle = "M"
-            elseif ru <= 20
+            elseif ru <= 4
+                cell_cycle = "G2"
+            elseif ru <= 12
                 cell_cycle = "S"
             elseif ru <= 24
-                cell_cycle = "G2"
+                cell_cycle = "G1"
             else
                 println("Error")
                 cell_cycle = "I" # Fallback
