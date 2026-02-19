@@ -2,11 +2,13 @@
 # ============================================================================
 # Constants for cell cycle phases
 # ============================================================================
+# Assuming you have something like this somewhere in your code
 const PHASE_DURATIONS = Dict(
-    "G1" => (shape=0.5*12.0, scale=2.0),    # mean = 12
-    "S"  => (shape=0.5*8.0, scale=2.0),    # mean = 8
-    "G2" => (shape=0.5*4.0, scale=2.0),    # mean = 4
-    "M"  => (shape=0.5*1., scale=2.0)     # mean = 1
+    "G1" => (shape=0.5*12, scale=2.0),
+    "S"  => (shape=0.5*8,  scale=2.0),
+    "G2" => (shape=0.5*3,  scale=2.0),
+    "M"  => (shape=0.5,    scale=2.0),
+    "G0" => (shape=Inf,    scale=Inf)  # G0 has no intrinsic duration
 )
 
 const PHASE_TRANSITION = Dict(
@@ -862,8 +864,7 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
     cell_df.dam_X_dom = [zeros(Int64, len_dom_vec) for _ in 1:N]
     cell_df.dam_Y_dom = [zeros(Int64, len_dom_vec) for _ in 1:N]
 
-    cell_df.sp = fill(SP_, N) # using 'sp' as column name to match 'SP' in struct but lowercase in df usually? 
-    # Run_tidy uses cell_df.sp later.
+    cell_df.sp = fill(SP_, N)
 
     cell_df.dose = [zeros(Float64, domain) for _ in 1:N]
     cell_df.dose_cell = zeros(Float64, N)
@@ -876,6 +877,37 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
     cell_df.recover_time = zeros(Float64, N)
     cell_df.cycle_time = zeros(Float64, N)
     cell_df.is_death_rad = zeros(Int64, N)
+    
+    # ============================================================================
+    # NEW: Count empty neighbors and initialize G0 for contact-inhibited cells
+    # ============================================================================
+    for i in 1:N
+        if cell_df.is_cell[i] == 1
+            # Count empty neighbors
+            empty_count = 0
+            for nei_idx in cell_df.nei[i]
+                if 1 <= nei_idx <= N && cell_df.is_cell[nei_idx] == 0
+                    empty_count += 1
+                end
+            end
+            cell_df.number_nei[i] = empty_count
+            
+            # If no empty neighbors → contact inhibited → G0
+            if empty_count == 0
+                cell_df.cell_cycle[i] = "G0"
+                cell_df.cycle_time[i] = Inf
+                cell_df.can_divide[i] = 0
+            else
+                # Has space to divide
+                cell_df.can_divide[i] = 1
+                # Initialize cycle_time based on assigned phase
+                cell_df.cycle_time[i] = generate_cycle_time(cell_df.cell_cycle[i])
+            end
+        end
+    end
+    
+    g0_count = sum((cell_df.is_cell .== 1) .& (cell_df.cell_cycle .== "G0"))
+    println("Initialized $g0_count cells to G0 (contact-inhibited)")
 end
 
 """
@@ -1134,5 +1166,27 @@ function set_oxygen!(
         display(plot(p1, p2; layout = (1, 2), size = (1400, 600)))
     end
 
+    return nothing
+end
+
+"""
+Initialize cells to G0 if they have no space to divide (number_nei == 0)
+Call this after setting up initial population, before compute_times_domain!
+"""
+function initialize_G0_phase!(cell_df::DataFrame)
+    blocked_count = 0
+    
+    for i in 1:nrow(cell_df)
+        if cell_df.is_cell[i] == 1 && cell_df.number_nei[i] == 0
+            # Cell is alive but has no empty neighbors → G0
+            cell_df.cell_cycle[i] = "G0"
+            cell_df.cycle_time[i] = Inf
+            cell_df.can_divide[i] = 0
+            blocked_count += 1
+        end
+    end
+    
+    println("Initialized $blocked_count cells to G0 (contact-inhibited)")
+    
     return nothing
 end

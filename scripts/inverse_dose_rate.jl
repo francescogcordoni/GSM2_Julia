@@ -186,7 +186,7 @@ setup_irrad_conditions!(
 
 set_oxygen!(cell_df; plot_oxygen = false)
 O2_mean = mean(cell_df.O[cell_df.is_cell.==1])
-
+cell_df.O .= 21.
 #~ ==========================================================================================
 #~ ================================== compute dose ==========================================
 #~ ==========================================================================================
@@ -223,10 +223,13 @@ plot_damage(cell_df_copy, layer_plot = true)
 
 cell_df_copy.cell_cycle .= "G1"
 cell_df_copy.can_divide .= 0
-
+#vscodedisplay(cell_df_copy[cell_df_copy.is_cell .== 1, :])
 
 cell_df_original = deepcopy(cell_df_copy)
 Ntot = size(cell_df_original[cell_df_original.is_cell .== 1, :], 1)
+
+print_phase_distribution(cell_df_original)
+plot_phase_proportions_alive(cell_df_original)
 
 surv_prob = Array{Float64, 1}()
 #~ ==========================================================================================
@@ -255,6 +258,11 @@ for t in times_split
     compute_times_domain!(cell_, gsm2_cycle, nat_apo, terminal_time = t)
     cell_.is_cell[isfinite.(cell_.death_time)] .= 0
     run_simulation_abm!(cell_, nat_apo, terminal_time = t)
+
+    cell_df_split_ = cell_[cell_.is_cell .== 1, :]
+    Nalive = size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)
+
+    plot_phase_proportions_alive(cell_)
 
     cell_irrad = deepcopy(cell_)
     MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_irrad, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)

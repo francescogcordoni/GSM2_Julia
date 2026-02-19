@@ -949,3 +949,412 @@ function plot_simulation_results(ts::SimulationTimeSeries)
         size   = (1000, 1200),
     )
 end
+
+"""
+Plot cell cycle phase proportions among alive cells only (is_cell == 1)
+Can be used with DataFrame or SimulationTimeSeries
+"""
+function plot_phase_proportions_alive(cell_df::DataFrame; title_text::String="Cell Cycle Distribution (Alive Cells)")
+    # Filter to alive cells only
+    alive_mask = cell_df.is_cell .== 1
+    alive_phases = cell_df.cell_cycle[alive_mask]
+    
+    if isempty(alive_phases)
+        return plot(title="No alive cells", grid=false, showaxis=false)
+    end
+    
+    # Count phases
+    phase_counts = Dict(
+        "G0" => count(==(String("G0")), alive_phases),
+        "G1" => count(==(String("G1")), alive_phases),
+        "S"  => count(==(String("S")), alive_phases),
+        "G2" => count(==(String("G2")), alive_phases),
+        "M"  => count(==(String("M")), alive_phases)
+    )
+    
+    total = sum(values(phase_counts))
+    phase_percents = Dict(k => 100.0 * v / total for (k, v) in phase_counts)
+    
+    # Create bar plot
+    phases = ["G0", "G1", "S", "G2", "M"]
+    percents = [phase_percents[p] for p in phases]
+    
+    p = bar(phases, percents,
+            xlabel="Cell Cycle Phase",
+            ylabel="Percentage (%)",
+            title="$title_text\n(n=$(total) alive cells)",
+            legend=false,
+            color=[:gray :green :orange :purple :red],
+            alpha=0.7,
+            ylims=(0, 100))
+    
+    # Add percentage labels on bars
+    for (i, (phase, pct)) in enumerate(zip(phases, percents))
+        if pct > 2  # Only show label if bar is tall enough
+            annotate!(i, pct + 2, text("$(round(pct, digits=1))%", 8))
+        end
+    end
+    
+    return p
+end
+
+"""
+Plot cell cycle proportions over time from SimulationTimeSeries (alive cells only)
+"""
+function plot_phase_proportions_timeseries(ts::SimulationTimeSeries; 
+                                            title_text::String="Cell Cycle Distribution Over Time")
+    # Calculate proportions (already only counts alive cells)
+    total = ts.g0_cells .+ ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells
+    
+    # Handle division by zero
+    g0_prop = ifelse.(total .> 0, 100 .* ts.g0_cells ./ total, 0.0)
+    g1_prop = ifelse.(total .> 0, 100 .* ts.g1_cells ./ total, 0.0)
+    s_prop = ifelse.(total .> 0, 100 .* ts.s_cells ./ total, 0.0)
+    g2_prop = ifelse.(total .> 0, 100 .* ts.g2_cells ./ total, 0.0)
+    m_prop = ifelse.(total .> 0, 100 .* ts.m_cells ./ total, 0.0)
+    
+    p = plot(xlabel="Time (h)",
+                ylabel="Percentage (%)",
+                title=title_text,
+                legend=:best,
+                ylims=(0, 100))
+    
+    plot!(p, ts.time, g0_prop, label="G0", linewidth=2, color=:gray)
+    plot!(p, ts.time, g1_prop, label="G1", linewidth=2, color=:green)
+    plot!(p, ts.time, s_prop, label="S", linewidth=2, color=:orange)
+    plot!(p, ts.time, g2_prop, label="G2", linewidth=2, color=:purple)
+    plot!(p, ts.time, m_prop, label="M", linewidth=2, color=:red)
+    
+    return p
+end
+
+"""
+Plot side-by-side comparison of initial vs final phase distribution
+"""
+function plot_phase_comparison_before_after(cell_df_initial::DataFrame, 
+                                              cell_df_final::DataFrame)
+    p1 = plot_phase_proportions_alive(cell_df_initial, title_text="Initial Distribution")
+    p2 = plot_phase_proportions_alive(cell_df_final, title_text="Final Distribution")
+    
+    return plot(p1, p2, layout=(1, 2), size=(1000, 400))
+end
+
+"""
+Print phase distribution statistics for alive cells
+"""
+function print_phase_distribution(cell_df::DataFrame; label::String="Current")
+    alive_mask = cell_df.is_cell .== 1
+    alive_phases = cell_df.cell_cycle[alive_mask]
+    
+    if isempty(alive_phases)
+        println("[$label] No alive cells")
+        return
+    end
+    
+    phase_counts = Dict(
+        "G0" => count(==(String("G0")), alive_phases),
+        "G1" => count(==(String("G1")), alive_phases),
+        "S"  => count(==(String("S")), alive_phases),
+        "G2" => count(==(String("G2")), alive_phases),
+        "M"  => count(==(String("M")), alive_phases)
+    )
+    
+    total = sum(values(phase_counts))
+    
+    println("\n[$label] Phase Distribution (n=$total alive cells):")
+    for phase in ["G0", "G1", "S", "G2", "M"]
+        count = phase_counts[phase]
+        pct = 100.0 * count / total
+        println("  $phase: $count ($(round(pct, digits=1))%)")
+    end
+    
+    # Cycling vs quiescent
+    cycling = phase_counts["G1"] + phase_counts["S"] + phase_counts["G2"] + phase_counts["M"]
+    quiescent = phase_counts["G0"]
+    println("  Cycling: $cycling ($(round(100.0*cycling/total, digits=1))%)")
+    println("  Quiescent: $quiescent ($(round(100.0*quiescent/total, digits=1))%)")
+end
+
+"""
+Plot cell cycle distribution and 3D spatial distribution colored by phase.
+Similar structure to plot_dose_cell but for cell cycle analysis.
+
+Arguments:
+- cell_df: DataFrame with columns :x, :y, :z, :cell_cycle, :is_cell
+- phase_plot: if true, shows distribution for each phase separately
+- half_sphere: if true, only plots cells with x >= 0 (hemisphere cut)
+"""
+function plot_cell_cycle_distribution(cell_df; phase_plot::Bool = false, half_sphere::Bool = true)
+
+    # ============================================================
+    # 0. Extract active cells and check DataFrame integrity
+    # ============================================================
+    required_cols = [:x, :y, :z, :cell_cycle, :is_cell]
+    if !all(c -> c in propertynames(cell_df), required_cols)
+        error("cell_df must contain columns: ", join(string.(required_cols), ", "))
+    end
+
+    df_active = cell_df[cell_df.is_cell .== 1, :]
+
+    if isempty(df_active)
+        @warn "No active cells found (is_cell == 1)."
+        return nothing
+    end
+
+    # ============================================================
+    # PANEL 1 → Cell Cycle Distribution (Bar Chart)
+    # ============================================================
+
+    phases = ["G0", "G1", "S", "G2", "M"]
+    phase_colors = Dict(
+        "G0" => :black,
+        "G1" => :green,
+        "S"  => :orange,
+        "G2" => :purple,
+        "M"  => :red
+    )
+
+    if !phase_plot
+        # Standard bar chart with counts
+        phase_counts = Dict(p => count(==(String(p)), df_active.cell_cycle) for p in phases)
+        total = sum(values(phase_counts))
+        
+        counts = [phase_counts[p] for p in phases]
+        colors = [phase_colors[p] for p in phases]
+        
+        p1 = bar(
+            phases,
+            counts,
+            title = "Cell Cycle Distribution\n(n=$total active cells)",
+            xlabel = "Cell Cycle Phase",
+            ylabel = "Number of Cells",
+            legend = false,
+            color = colors,
+            alpha = 0.7,
+            bar_width = 0.6
+        )
+        
+        # Add percentage labels on bars
+        for (i, (phase, count)) in enumerate(zip(phases, counts))
+            pct = 100.0 * count / total
+            if count > 0
+                annotate!(p1, [(i, count + total*0.02, 
+                            text("$(round(pct, digits=1))%", 8, :center))])
+            end
+        end
+        
+    else
+        # Percentage version
+        phase_counts = Dict(p => count(==(String(p)), df_active.cell_cycle) for p in phases)
+        total = sum(values(phase_counts))
+        
+        percents = [100.0 * phase_counts[p] / total for p in phases]
+        colors = [phase_colors[p] for p in phases]
+        
+        p1 = bar(
+            phases,
+            percents,
+            title = "Cell Cycle Distribution (%)\n(n=$total active cells)",
+            xlabel = "Cell Cycle Phase",
+            ylabel = "Percentage (%)",
+            legend = false,
+            color = colors,
+            alpha = 0.7,
+            bar_width = 0.6,
+            ylims = (0, 100)
+        )
+        
+        # Add value labels
+        for (i, (phase, pct)) in enumerate(zip(phases, percents))
+            if pct > 2
+                annotate!(p1, [(i, pct + 2, 
+                            text("$(round(pct, digits=1))%", 8, :center))])
+            end
+        end
+    end
+
+    # ============================================================
+    # PANEL 2 → 3D scatter colored by cell cycle phase
+    # ============================================================
+
+    # Optional hemisphere cut
+    df3 = half_sphere ? df_active[df_active.x .>= 0, :] : df_active
+
+    if isempty(df3)
+        @warn "No cells in selected region for 3D plot."
+        return p1
+    end
+
+    # Map phases to numeric values for coloring
+    phase_to_num = Dict("G0" => 0, "G1" => 1, "S" => 2, "G2" => 3, "M" => 4)
+    color_values = [get(phase_to_num, String(p), -1) for p in df3.cell_cycle]
+    
+    # Create custom colormap matching phase colors
+    custom_colors = [
+        RGB(0., 0., 0.),      # G0 - black
+        RGB(0.0, 0.8, 0.0),   # G1 - green
+        RGB(1.0, 0.65, 0.0),  # S - orange
+        RGB(0.6, 0.0, 0.8),   # G2 - purple
+        RGB(1.0, 0.0, 0.0)    # M - red
+    ]
+    
+    p2 = scatter(
+        df3.x,
+        df3.y,
+        df3.z;
+        markersize = 4,
+        markerstrokewidth = 0.1,
+        marker_z = color_values,
+        colorbar = false,
+        xlabel = "x (µm)",
+        ylabel = "y (µm)",
+        zlabel = "z (µm)",
+        title = "3D Cell Cycle Distribution" * (half_sphere ? " (x ≥ 0)" : ""),
+        legend = :topright,
+        aspect_ratio = :equal,
+        seriescolor = cgrad(custom_colors, 5, categorical=true),
+        label = "",  # ← FIX: Disable default label for main scatter
+        size = (900, 700),
+        camera = (320, 30),
+        clims = (-0.5, 4.5)
+    )
+    
+    # Add manual legend for phases
+    for (i, phase) in enumerate(phases)
+        count_phase = count(==(String(phase)), df3.cell_cycle)
+        scatter!(p2, Float64[], Float64[], Float64[],  # ← FIX: Use Float64[] instead of []
+                markersize=6, 
+                color=phase_colors[phase],
+                label="$phase (n=$count_phase)")
+    end
+
+    # ============================================================
+    # Combine both panels into one figure
+    # ============================================================
+    return plot(p1, p2, layout=(1, 2), size=(1400, 600))
+end
+
+"""
+Plot cell cycle distribution over multiple snapshots in time
+"""
+function plot_cell_cycle_snapshots(snapshots::Dict; 
+                                    times::Union{Nothing, Vector{Int}}=nothing,
+                                    half_sphere::Bool=true)
+    
+    plot_times = isnothing(times) ? sort(collect(keys(snapshots))) : times
+    
+    if length(plot_times) < 1
+        @warn "No snapshots to plot"
+        return nothing
+    end
+    
+    plots = []
+    
+    for t in plot_times
+        if !haskey(snapshots, t)
+            @warn "Snapshot at t=$t not found"
+            continue
+        end
+        
+        snapshot = snapshots[t]
+        
+        # Handle both DataFrame and CellPopulation
+        if isa(snapshot, CellPopulation)
+            cell_df = to_dataframe(snapshot, alive_only=true)
+        else
+            cell_df = snapshot
+        end
+        
+        p = plot_cell_cycle_distribution(cell_df, 
+                                            phase_plot=false, 
+                                            half_sphere=half_sphere)
+        
+        # Update title to include time
+        plot!(p[1], title="Cell Cycle at t=$(t)h\n(n=$(nrow(cell_df)) cells)")
+        plot!(p[2], title="3D Distribution t=$(t)h" * (half_sphere ? " (x ≥ 0)" : ""))
+        
+        push!(plots, p)
+    end
+    
+    if isempty(plots)
+        return plot(title="No valid plots created")
+    end
+    
+    # Stack vertically
+    return plot(plots..., layout=(length(plots), 1), size=(1400, 600*length(plots)))
+end
+
+"""
+Create animation of cell cycle distribution in 3D over time
+"""
+function animate_cell_cycle_3d(snapshots::Dict; 
+                                output_file::String="cell_cycle_3d.gif",
+                                fps::Int=2,
+                                half_sphere::Bool=true)
+    
+    times = sort(collect(keys(snapshots)))
+    
+    if length(times) < 2
+        @warn "Need at least 2 snapshots for animation"
+        return nothing
+    end
+    
+    phase_colors = Dict(
+        "G0" => :gray, "G1" => :green, "S" => :orange, 
+        "G2" => :purple, "M" => :red
+    )
+    
+    phase_to_num = Dict("G0" => 0, "G1" => 1, "S" => 2, "G2" => 3, "M" => 4)
+    custom_colors = [
+        RGB(0.5, 0.5, 0.5), RGB(0.0, 0.8, 0.0), RGB(1.0, 0.65, 0.0),
+        RGB(0.6, 0.0, 0.8), RGB(1.0, 0.0, 0.0)
+    ]
+    
+    anim = @animate for t in times
+        snapshot = snapshots[t]
+        
+        # Handle both types
+        if isa(snapshot, CellPopulation)
+            cell_df = to_dataframe(snapshot, alive_only=true)
+        else
+            cell_df = snapshot[snapshot.is_cell .== 1, :]
+        end
+        
+        df3 = half_sphere ? cell_df[cell_df.x .>= 0, :] : cell_df
+        
+        color_values = [get(phase_to_num, String(p), -1) for p in df3.cell_cycle]
+        
+        p = scatter(
+            df3.x, df3.y, df3.z;
+            markersize = 4,
+            markerstrokewidth = 0.1,
+            marker_z = color_values,
+            colorbar = false,
+            xlabel = "x (µm)",
+            ylabel = "y (µm)",
+            zlabel = "z (µm)",
+            title = "Cell Cycle Distribution at t=$(t)h (n=$(nrow(df3)))",
+            legend = :topright,
+            aspect_ratio = :equal,
+            seriescolor = cgrad(custom_colors, 5, categorical=true),
+            size = (900, 700),
+            camera = (320, 30),
+            clims = (-0.5, 4.5)
+        )
+        
+        # Add legend
+        phases = ["G0", "G1", "S", "G2", "M"]
+        for phase in phases
+            count_phase = count(==(String(phase)), df3.cell_cycle)
+            scatter!(p, [], [], [], 
+                    markersize=6, 
+                    color=phase_colors[phase],
+                    label="$phase (n=$count_phase)")
+        end
+    end
+    
+    gif(anim, output_file, fps=fps)
+    println("Animation saved to: $output_file")
+    
+    return anim
+end

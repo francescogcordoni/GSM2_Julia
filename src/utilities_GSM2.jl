@@ -432,9 +432,11 @@ function compute_cell_survival_GSM2!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2
             gsm2 = gsm2_cycle[3]
         elseif cell_df.cell_cycle[i] == "M"
             gsm2 = gsm2_cycle[3]
+        elseif cell_df.cell_cycle[i] == "G0"  
+            gsm2 = gsm2_cycle[1]  
         else
-            println("Cell cycle not found")
-            gsm2 = gsm2_cycle[4]    
+            println("Cell cycle not found: cell $i has phase '$(cell_df.cell_cycle[i])'")
+            gsm2 = gsm2_cycle[4]
         end
         SP_cell = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
 

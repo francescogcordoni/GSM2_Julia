@@ -114,7 +114,7 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
         i = active_cells[k]
         tid = Threads.threadid()
 
-        if (cell_df.cell_cycle[i] == "G1") || (cell_df.cell_cycle[i] == "G0")
+        if cell_df.cell_cycle[i] == "G1"
             gsm2 = gsm2_cycle[1]
         elseif cell_df.cell_cycle[i] == "S"
             gsm2 = gsm2_cycle[2]
@@ -122,9 +122,11 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
             gsm2 = gsm2_cycle[3]
         elseif cell_df.cell_cycle[i] == "M"
             gsm2 = gsm2_cycle[3]
+        elseif cell_df.cell_cycle[i] == "G0"  
+            gsm2 = gsm2_cycle[1]  
         else
-            println("Cell cycle not found")
-            gsm2 = gsm2_cycle[4]    
+            println("Cell cycle not found: cell $i has phase '$(cell_df.cell_cycle[i])'")
+            gsm2 = gsm2_cycle[4]
         end
         
         # SAFETY CHECK: assicurati che tid sia valido
@@ -221,6 +223,9 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat
                     cell_df.cycle_time[i]   = max(cycle_time, recover_time_sample)
                     cell_df.recover_time[i] = recover_time_sample
                 end
+            else
+            # NO NEIGHBORS: Cell recovers but can't cycle
+                cell_df.cycle_time[i] = Inf
             end
 
             Threads.atomic_add!(survived, 1)
@@ -551,6 +556,7 @@ according to the following intervals:
 @inline function assign_random_phase()::String
     ru = rand() * 24.0
     return ru <= 12.0 ? "G1" : ru <= 20.0 ? "S" : ru <= 23.0 ? "G2" : "M"
+    # G0 is NEVER randomly assigned
 end
 
 @inline is_valid_index(idx::Int32, n::Int32)::Bool = 1 <= idx <= n
@@ -730,25 +736,25 @@ function update_time!(pop::CellPopulation, elapsed::Float64)
     @inbounds for i in Int32(1):n
         is_cell[i] == 0 && continue
         
-        # Update death_time
+        # Update death_time (clamp at 0)
         dt = death_times[i]
         if !isinf(dt)
             new_dt = dt - elapsed
             death_times[i] = new_dt <= 0.0 ? 0.0 : new_dt
         end
-        
-        # Update cycle_time
+
+        # Update cycle_time (clamp at 0)
         ct = cycle_times[i]
         if !isinf(ct)
             new_ct = ct - elapsed
             cycle_times[i] = new_ct <= 0.0 ? 0.0 : new_ct
         end
-        
-        # Update recover_time
+
+        # Update recover_time (clamp at 0)
         rt = recover_times[i]
         if !isinf(rt)
             new_rt = rt - elapsed
-            recover_times[i] = new_rt <= 0.0 ? Inf : new_rt  # ← set to Inf instead of 0
+            recover_times[i] = new_rt <= 0.0 ? 0.0 : new_rt
         end
     end
     
@@ -947,11 +953,13 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
     n = pop.n_cells
     neighbors = pop.nei[removed_idx]
     
+    # Cache vectors
     is_cell = pop.is_cell
     number_nei = pop.number_nei
     can_divide = pop.can_divide
     cell_cycle = pop.cell_cycle
     cycle_times = pop.cycle_time
+    recover_times = pop.recover_time  # ← ADD THIS LINE
     
     @inbounds for n_idx in neighbors
         if is_valid_index(n_idx, n) && is_cell[n_idx] == 1
@@ -959,11 +967,19 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
             number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
 
             if number_nei[n_idx] > 0 && can_divide[n_idx] == 0
-                new_phase = assign_random_phase()
-                cell_cycle[n_idx] = String7(new_phase)
-                cycle_times[n_idx] = generate_cycle_time(new_phase)
+                # Unblock cell: reset to G1
+                cell_cycle[n_idx] = String7("G1")
+
+                # If cell is recovering, set cycle_time considering recovery
+                if !isinf(recover_times[n_idx])
+                    new_cycle_time = generate_cycle_time("G1")
+                    cycle_times[n_idx] = max(new_cycle_time, recover_times[n_idx])
+                else
+                    cycle_times[n_idx] = generate_cycle_time("G1")
+                end
+
                 pop.death_time[n_idx] = Inf
-                pop.recover_time[n_idx] = Inf
+                # Don't reset recover_time - cell is still recovering
                 can_divide[n_idx] = 1
             end
         end
@@ -1086,7 +1102,6 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
     # Handle main event
     if event == "death_time"
         _handle_cell_removal!(pop, idx, false)
-        
     elseif event == "cycle_time"
         @inbounds begin
             current_phase = String(pop.cell_cycle[idx])
@@ -1096,10 +1111,11 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
                 if has_space
                     _perform_division!(pop, idx, nat_apo)
                 else
-                    pop.cell_cycle[idx] = String7("G1")
+                    # Blocked in M → enter G0
+                    pop.cell_cycle[idx] = String7("G0")  # ← Changed from "G1"
                     pop.cycle_time[idx] = Inf
-                    pop.death_time[idx] = Inf 
-                    pop.recover_time[idx] = Inf  
+                    pop.death_time[idx] = Inf
+                    pop.recover_time[idx] = Inf
                     pop.can_divide[idx] = 0
                 end
             else
@@ -1108,13 +1124,15 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
 
                 if has_space
                     pop.cycle_time[idx] = generate_cycle_time(next_phase)
-                    pop.death_time[idx] = Inf  
-                    pop.recover_time[idx] = Inf 
+                    pop.death_time[idx] = Inf
+                    pop.recover_time[idx] = Inf
                     pop.can_divide[idx] = 1
                 else
+                    # Blocked → enter G0
+                    pop.cell_cycle[idx] = String7("G0")  # ← Changed from next_phase
                     pop.cycle_time[idx] = Inf
-                    pop.death_time[idx] = Inf 
-                    pop.recover_time[idx] = Inf 
+                    pop.death_time[idx] = Inf
+                    pop.recover_time[idx] = Inf
                     pop.can_divide[idx] = 0
                 end
             end
@@ -1236,9 +1254,10 @@ Append a snapshot of the current simulation state at time `t` to the
 
 function record_timepoint!(ts::SimulationTimeSeries, t::Float64, pop::CellPopulation)
     push!(ts.time, t)
-    push!(ts.total_cells, pop.n_alive)  # Use cached count!
+    push!(ts.total_cells, pop.n_alive)
     
-    # Count by phase (still need to iterate, but fast)
+    # Count by phase
+    g0_count = Int32(0)  # ← Add this
     g1_count = Int32(0)
     s_count = Int32(0)
     g2_count = Int32(0)
@@ -1247,7 +1266,9 @@ function record_timepoint!(ts::SimulationTimeSeries, t::Float64, pop::CellPopula
     @inbounds for i in Int32(1):pop.n_cells
         if pop.is_cell[i] == 1
             phase = pop.cell_cycle[i]
-            if phase == "G1"
+            if phase == "G0"
+                g0_count += 1
+            elseif phase == "G1"
                 g1_count += 1
             elseif phase == "S"
                 s_count += 1
@@ -1259,6 +1280,7 @@ function record_timepoint!(ts::SimulationTimeSeries, t::Float64, pop::CellPopula
         end
     end
     
+    push!(ts.g0_cells, g0_count)  # ← Add this
     push!(ts.g1_cells, g1_count)
     push!(ts.s_cells, s_count)
     push!(ts.g2_cells, g2_count)

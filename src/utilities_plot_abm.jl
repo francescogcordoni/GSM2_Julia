@@ -1,16 +1,4 @@
 """
-Plotting Functions for Structure of Arrays Cell Simulation
-Fully compatible with both DataFrame and SoA versions
-"""
-
-using Plots
-using Statistics
-
-# ============================================================================
-# Core Plotting Functions
-# ============================================================================
-
-"""
 Plot total cell count over time
 """
 function plot_cell_dynamics(ts::SimulationTimeSeries)
@@ -35,6 +23,7 @@ function plot_phase_dynamics(ts::SimulationTimeSeries)
                 legend=:best,
                 size=(800, 400))
     
+    plot!(p, ts.time, ts.g0_cells, label="G0", linewidth=2, color=:black)
     plot!(p, ts.time, ts.g1_cells, label="G1", linewidth=2, color=:green)
     plot!(p, ts.time, ts.s_cells, label="S", linewidth=2, color=:orange)
     plot!(p, ts.time, ts.g2_cells, label="G2", linewidth=2, color=:purple)
@@ -85,8 +74,8 @@ Plot stacked area chart of cell phases over time
 """
 function plot_phase_stacked(ts::SimulationTimeSeries)
     p = areaplot(ts.time, 
-                [ts.g1_cells ts.s_cells ts.g2_cells ts.m_cells],
-                labels=["G1" "S" "G2" "M"],
+                [ts.g0_cells ts.g1_cells ts.s_cells ts.g2_cells ts.m_cells],
+                labels=["G0" "G1" "S" "G2" "M"],
                 xlabel="Time (h)",
                 ylabel="Number of Cells",
                 title="Cell Phase Distribution (Stacked)",
@@ -100,9 +89,10 @@ Plot phase proportions (percentages) over time
 """
 function plot_phase_proportions(ts::SimulationTimeSeries)
     # Calculate proportions
-    total = ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells
+    total = ts.g0_cells .+ ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells
     
     # Handle division by zero
+    g0_prop = ifelse.(total .> 0, 100 .* ts.g0_cells ./ total, 0.0)
     g1_prop = ifelse.(total .> 0, 100 .* ts.g1_cells ./ total, 0.0)
     s_prop = ifelse.(total .> 0, 100 .* ts.s_cells ./ total, 0.0)
     g2_prop = ifelse.(total .> 0, 100 .* ts.g2_cells ./ total, 0.0)
@@ -113,10 +103,30 @@ function plot_phase_proportions(ts::SimulationTimeSeries)
                 title="Cell Phase Distribution (%)",
                 legend=:best)
     
+    plot!(p, ts.time, g0_prop, label="G0", linewidth=2, color=:black)
     plot!(p, ts.time, g1_prop, label="G1", linewidth=2, color=:green)
     plot!(p, ts.time, s_prop, label="S", linewidth=2, color=:orange)
     plot!(p, ts.time, g2_prop, label="G2", linewidth=2, color=:purple)
     plot!(p, ts.time, m_prop, label="M", linewidth=2, color=:red)
+    
+    return p
+end
+
+"""
+Plot cycling vs quiescent cells over time
+"""
+function plot_cycling_vs_quiescent(ts::SimulationTimeSeries)
+    cycling = ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells
+    quiescent = ts.g0_cells
+    
+    p = plot(xlabel="Time (h)",
+                ylabel="Number of Cells",
+                title="Cycling vs Quiescent Cells",
+                legend=:best,
+                linewidth=2)
+    
+    plot!(p, ts.time, cycling, label="Cycling (G1/S/G2/M)", color=:blue)
+    plot!(p, ts.time, quiescent, label="Quiescent (G0)", color=:black)
     
     return p
 end
@@ -174,14 +184,15 @@ function plot_phase_duration_distribution(ts::SimulationTimeSeries)
                 bar_width=0.6)
     
     # Calculate average cells in each phase
+    avg_g0 = mean(ts.g0_cells)
     avg_g1 = mean(ts.g1_cells)
     avg_s = mean(ts.s_cells)
     avg_g2 = mean(ts.g2_cells)
     avg_m = mean(ts.m_cells)
     
-    bar!(["G1", "S", "G2", "M"], 
-            [avg_g1, avg_s, avg_g2, avg_m],
-            color=[:green :orange :purple :red],
+    bar!(["G0", "G1", "S", "G2", "M"], 
+            [avg_g0, avg_g1, avg_s, avg_g2, avg_m],
+            color=[:black :green :orange :purple :red],
             alpha=0.7)
     
     return p
@@ -241,10 +252,11 @@ function plot_analysis_dashboard(ts::SimulationTimeSeries)
     p2 = plot_phase_dynamics(ts)
     p3 = plot_phase_proportions(ts)
     p4 = plot_growth_rate(ts)
+    p5 = plot_cycling_vs_quiescent(ts)
     
-    return plot(p1, p2, p3, p4, 
-                layout=(2, 2), 
-                size=(1400, 1000),
+    return plot(p1, p2, p3, p4, p5,
+                layout=(3, 2), 
+                size=(1400, 1200),
                 plot_title="Simulation Analysis Dashboard")
 end
 
@@ -291,19 +303,20 @@ function plot_snapshot_comparison(snapshots::Dict;
         # Create plot based on metric
         if metric == :cell_cycle
             phases = data.cell_cycle
-            phase_counts = Dict("G1"=>0, "S"=>0, "G2"=>0, "M"=>0)
+            phase_counts = Dict("G0"=>0, "G1"=>0, "S"=>0, "G2"=>0, "M"=>0)
             for phase in phases
                 if haskey(phase_counts, string(phase))
                     phase_counts[string(phase)] += 1
                 end
             end
             
-            p = bar(collect(keys(phase_counts)), 
-                    collect(values(phase_counts)),
+            p = bar(["G0", "G1", "S", "G2", "M"], 
+                    [phase_counts["G0"], phase_counts["G1"], 
+                        phase_counts["S"], phase_counts["G2"], phase_counts["M"]],
                     title="t = $(t)h (n=$(nrow(data)))",
                     ylabel="Count",
                     legend=false,
-                    color=[:green :orange :purple :red],
+                    color=[:black :green :orange :purple :red],
                     alpha=0.7)
             
         elseif metric == :can_divide && hasproperty(data, :can_divide)
@@ -370,13 +383,14 @@ function plot_spatial_distribution(snapshot;
     # Create scatter plot colored by specified attribute
     if color_by == :cell_cycle && hasproperty(data, :cell_cycle)
         phase_colors = Dict(
+            "G0" => :black,
             "G1" => :green,
             "S" => :orange,
             "G2" => :purple,
             "M" => :red
         )
         
-        colors = [get(phase_colors, string(phase), :gray) for phase in data.cell_cycle]
+        colors = [get(phase_colors, string(phase), :black) for phase in data.cell_cycle]
         
         p = scatter(data.x, data.y,
                     color=colors,
@@ -389,6 +403,7 @@ function plot_spatial_distribution(snapshot;
                     aspect_ratio=:equal)
         
         # Add legend manually
+        scatter!([], [], color=:black, label="G0", markersize=6)
         scatter!([], [], color=:green, label="G1", markersize=6)
         scatter!([], [], color=:orange, label="S", markersize=6)
         scatter!([], [], color=:purple, label="G2", markersize=6)
@@ -486,12 +501,23 @@ function print_simulation_summary(ts::SimulationTimeSeries)
     
     # Phase distribution (average)
     println("\nAverage Phase Distribution:")
-    total_phase_cells = mean(ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells)
+    total_phase_cells = mean(ts.g0_cells .+ ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells)
     if total_phase_cells > 0
+        println("  G0: $(round(100*mean(ts.g0_cells)/total_phase_cells, digits=1))%")
         println("  G1: $(round(100*mean(ts.g1_cells)/total_phase_cells, digits=1))%")
         println("  S:  $(round(100*mean(ts.s_cells)/total_phase_cells, digits=1))%")
         println("  G2: $(round(100*mean(ts.g2_cells)/total_phase_cells, digits=1))%")
         println("  M:  $(round(100*mean(ts.m_cells)/total_phase_cells, digits=1))%")
+    end
+    
+    # Cycling vs Quiescent
+    println("\nCycling vs Quiescent:")
+    avg_cycling = mean(ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells)
+    avg_quiescent = mean(ts.g0_cells)
+    total_avg = avg_cycling + avg_quiescent
+    if total_avg > 0
+        println("  Cycling (G1/S/G2/M): $(round(100*avg_cycling/total_avg, digits=1))%")
+        println("  Quiescent (G0):      $(round(100*avg_quiescent/total_avg, digits=1))%")
     end
     
     # Stem cell statistics (if available)
@@ -513,6 +539,7 @@ function export_timeseries_csv(ts::SimulationTimeSeries, filename::String)
     df = DataFrame(
         time = ts.time,
         total_cells = ts.total_cells,
+        g0_cells = ts.g0_cells,
         g1_cells = ts.g1_cells,
         s_cells = ts.s_cells,
         g2_cells = ts.g2_cells,

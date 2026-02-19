@@ -91,25 +91,17 @@ begin
 end
 mutable struct SimulationTimeSeries
     time::Vector{Float64}
-    total_cells::Vector{Int}
-    stem_cells::Vector{Int}
-    non_stem_cells::Vector{Int}
-    g1_cells::Vector{Int}
-    s_cells::Vector{Int}
-    g2_cells::Vector{Int}
-    m_cells::Vector{Int}
+    total_cells::Vector{Int32}
+    g0_cells::Vector{Int32}  # ← Add this
+    g1_cells::Vector{Int32}
+    s_cells::Vector{Int32}
+    g2_cells::Vector{Int32}
+    m_cells::Vector{Int32}
+    stem_cells::Vector{Int32}
+    non_stem_cells::Vector{Int32}
     
-    function SimulationTimeSeries(initial_capacity::Int=10000)
-        new(
-            sizehint!(Float64[], initial_capacity),
-            sizehint!(Int[], initial_capacity),
-            sizehint!(Int[], initial_capacity),
-            sizehint!(Int[], initial_capacity),
-            sizehint!(Int[], initial_capacity),
-            sizehint!(Int[], initial_capacity),
-            sizehint!(Int[], initial_capacity),
-            sizehint!(Int[], initial_capacity)
-        )
+    function SimulationTimeSeries()
+        new(Float64[], Int32[], Int32[], Int32[], Int32[], Int32[], Int32[], Int32[], Int32[])
     end
 end
 
