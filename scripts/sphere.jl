@@ -136,7 +136,7 @@ target_geom = "circle"        # Options: "square", "circle"
 calc_type   = "full"          # Options: "full" -> all layers, "fast" -> only first layer
 
 #& Tumor or target radius (µm)
-tumor_radius = 300.0
+tumor_radius = 250.0
 
 #& Compute beam parameters based on geometry and calculation mode
 #! check description on inputs
@@ -154,6 +154,7 @@ R_beam, x_beam, y_beam = calculate_beam_properties(
 #~ ==========================================================================================
 
 #& Compute the amorphous track structure radii and dose normalization
+type_AT = "KC"
 Rc, Rp, Kp = ATRadius(ion, irrad, type_AT);
 
 #& In this model, Rk is taken equal to the penumbra radius Rp

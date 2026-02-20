@@ -1032,7 +1032,7 @@ end
 Plot side-by-side comparison of initial vs final phase distribution
 """
 function plot_phase_comparison_before_after(cell_df_initial::DataFrame, 
-                                              cell_df_final::DataFrame)
+                                                cell_df_final::DataFrame)
     p1 = plot_phase_proportions_alive(cell_df_initial, title_text="Initial Distribution")
     p2 = plot_phase_proportions_alive(cell_df_final, title_text="Final Distribution")
     

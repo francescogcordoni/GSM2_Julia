@@ -511,3 +511,73 @@ function domain_GSM2(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2)
     return p_cell
 end
 
+"""
+    survival_ci(surv::AbstractVector{<:Real}; alpha=0.05) -> (p_hat, lower, upper)
+
+Compute a **binomial proportion confidence interval** for survival using the
+**Wilson score interval** at significance level `alpha` (default 0.05 ⇒ 95% CI).
+
+# Arguments
+- `surv::AbstractVector{<:Real}`: Vector of **per-trial survival probabilities** in `[0,1]`.
+  Each element `surv[i]` is treated as the success probability of a Bernoulli trial.
+  The function **simulates** one Bernoulli outcome for each entry via `rand() < surv[i]`,
+  then computes the Wilson interval from the simulated success/failure counts.
+
+- `alpha::Real=0.05`: Significance level for the two-sided interval.
+
+# Returns
+- `(p_hat, lower, upper)`: A tuple containing
+  - `p_hat`: the sample proportion of simulated survivals (successes),
+  - `lower`, `upper`: the Wilson score **lower** and **upper** confidence limits.
+
+# Details
+This routine first converts the input probabilities into a vector of **0/1 outcomes**
+by a single Bernoulli draw per element, i.e. it estimates counts
+`n_s = sum(surv01)` and `n_f = n - n_s`, with `n = length(surv)`.
+It then applies the **Wilson score interval**:
+
+    center   = (n_s + 0.5*z^2) / (n + z^2)
+    halfwidth = (z/(n + z^2)) * sqrt( (n_s*n_f)/n + z^2/4 )
+
+with `z = quantile(Normal(), 1 - alpha/2)`. The interval is `center ± halfwidth`.
+
+# Notes
+- **Stochastic:** Results vary across calls because outcomes are simulated.
+    For reproducibility, set a seed with `using Random; Random.seed!(...)` before calling.
+- If you already have **observed 0/1 outcomes** (not probabilities), pass that
+    vector directly to avoid extra Monte Carlo noise.
+- If you have **aggregated counts** (`n_s`, `n`), consider a specialized method
+    that computes Wilson CI directly from counts instead of simulating.
+
+# Example
+```julia
+using Random
+Random.seed!(123)
+
+surv = [0.7, 0.9, 0.5, 0.8, 0.6]  # per-trial survival probabilities
+p̂, lo, hi = survival_ci(surv; alpha=0.05)
+
+@show p̂, lo, hi
+```
+"""
+
+function survival_ci(surv::AbstractVector{<:Real}; alpha=0.05)
+    surv01 = rand.(Ref(Random.default_rng()), Bernoulli.(surv)) .|> Int
+
+    n   = length(surv01)
+    n_s = sum(surv01)
+    n_f = n - n_s
+
+    p_hat = n_s / n
+    z = quantile(Normal(), 1 - alpha/2)
+
+    denom    = n + z^2
+    center   = (n_s + 0.5*z^2) / denom
+    halfwidth = (z/denom) * sqrt((n_s*n_f)/n + (z^2)/4)
+
+    lower = center - halfwidth
+    upper = center + halfwidth
+
+    return p_hat, lower, upper
+end
+
