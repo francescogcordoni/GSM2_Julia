@@ -199,8 +199,8 @@ zF = irrad.dose / Npar
 D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
 
-@time MC_dose_fast!(ion, Npar, x_beam, y_beam, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
-plot_dose_cell(cell_df_copy, layer_plot = false)
+@time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
+plot_dose_cell(cell_df_copy, layer_plot = true)
 
 #~ ==========================================================================================
 #~ ================================== compute damage ========================================
@@ -228,10 +228,20 @@ plot_times(cell_df_copy)
 cell_df_ = deepcopy(cell_df_copy) 
 
 plot_initial_distributions(cell_df_)
-# Run simulation
+print_phase_distribution(cell_df_, label="After Initialization")
+plot_phase_proportions_alive(cell_df_)
+
+# Basic plot with bar chart and 3D hemisphere
+plot_cell_cycle_distribution(cell_df_)
 
 ts, snapshots = run_simulation_abm!(cell_df_, nat_apo)
 plot_simulation_results(ts)
+
+print_phase_distribution(cell_df, label="After Irradiation")
+
+# After simulation
+print_phase_distribution(cell_df, label="After 48h Simulation")
+plot_phase_comparison_before_after(cell_df_copy, cell_df_)
 
 # Advanced analysis
 display(plot_analysis_dashboard(ts))
@@ -246,7 +256,7 @@ display(plot_phase_proportions(ts))
 display(plot_snapshot_comparison(snapshots, times=[0, 6, 12, 24]))
 
 # Spatial visualization (if coordinates available)
-display(plot_spatial_distribution(snapshots[24]))
+display(plot_spatial_distribution(snapshots[12]))
 
 # Statistical summary
 print_simulation_summary(ts)
