@@ -1,5 +1,5 @@
 """
-MC_dose_fast!(ion, Npar, x_cb, y_cb, R_beam, irrad_cond,
+MC_dose_CPU!(ion, Npar, x_cb, y_cb, R_beam, irrad_cond,
                     cell_df_copy, df_center_x, df_center_y, at,
                     gsm2_cycle, type_AT, track_seg)
 
@@ -10,7 +10,7 @@ High-level Monte Carlo wrapper that:
 4. Converts results back to DataFrames, and
 5. Copies dose values into the full simulation domain.
 
-This function is a **drop‑in replacement** for `MC_dose_fast!` and requires
+This function is a **drop‑in replacement** for `MC_dose_CPU!` and requires
 **no changes** to user code. It only adds optimized matrix-based MC kernels
 under the hood.
 
@@ -34,7 +34,7 @@ Notes
 - No physical or mathematical behavior is changed.
 - Only printing and clarity improvements have been added.
 """
-function MC_dose_fast!(
+function MC_dose_CPU!(
     ion::Ion, Npar::Int64, R_beam::Float64,
     irrad_cond::Vector{AT}, cell_df_copy::DataFrame,
     df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,

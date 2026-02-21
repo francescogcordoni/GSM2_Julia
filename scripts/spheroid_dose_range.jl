@@ -461,7 +461,7 @@ p1 = scatter(
     clims = (0.5, 2.5),                 # clamp exactly two categories
     colorbar = false,
     xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
-    title = "3D Cell Distribution (20% resitant - 80% sensitive)",
+    title = "20% resitant - 80% sensitive",
     legend = false, aspect_ratio = :equal,
     size = (900, 700), camera = (320, 30)
 )
@@ -474,7 +474,7 @@ p2 = scatter(
     clims = (0.5, 2.5),                 # clamp exactly two categories
     colorbar = false,
     xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
-    title = "3D Cell Distribution (50% resitant - 50% sensitive)",
+    title = "50% resitant - 50% sensitive",
     legend = false, aspect_ratio = :equal,
     size = (900, 700), camera = (320, 30)
 )
@@ -487,7 +487,7 @@ p3 = scatter(
     clims = (0.5, 2.5),                 # clamp exactly two categories
     colorbar = false,
     xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
-    title = "3D Cell Distribution (80% resitant - 20% sensitive)",
+    title = "80% resitant - 20% sensitive",
     legend = false, aspect_ratio = :equal,
     size = (900, 700), camera = (320, 30)
 )
@@ -504,5 +504,5 @@ fig = plot(p1, p2, p3, plt;
             size=(1200, 800),
             left_margin=8mm, right_margin=5mm,
             top_margin=5mm,  bottom_margin=5mm)
-
 display(fig)
+savefig(fig, "output.pdf")

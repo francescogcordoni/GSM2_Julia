@@ -136,7 +136,7 @@ target_geom = "circle"        # Options: "square", "circle"
 calc_type   = "full"          # Options: "full" -> all layers, "fast" -> only first layer
 
 #& Tumor or target radius (µm)
-tumor_radius = 250.0
+tumor_radius = 850.0
 
 #& Compute beam parameters based on geometry and calculation mode
 #! check description on inputs
