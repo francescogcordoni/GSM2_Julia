@@ -73,7 +73,6 @@ rsconnect/
 # R package: bookdown caching files
 /*_files/
 
-
 # Exclude .Rmd output
 *.html
 **/figure-html/
@@ -102,6 +101,11 @@ rsconnect/
 *.csv
 *.CSV
 *.Csv
+
+# pdf data
+*.pdf
+*.PDF
+*.Pdf
 
 # sas data
 *.sas7bdat

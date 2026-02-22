@@ -1,8 +1,49 @@
+#! ============================================================================
+#! utilities_biology.jl
+#!
+#! FUNCTIONS
+#! ---------
+#~ Cell Position Generation
+#?   generate_cells_positions_selector(target_geom, ParIrr, X_box, R_cell, N_sideVox, N_CellsSide_default)
+#       Dispatcher: picks the right lattice generator based on geometry and irradiation mode.
+#?   generate_cells_positions_squaredlattice_3D_new_1layervoxel(X_box, R_cell, N_sideVox)
+#       3D square lattice restricted to 1 voxel layer in z (partial irradiation).
+#?   generate_cells_positions_squaredlattice_3D_new(X_box, R_cell)
+#       Full 3D square lattice, boundary-exclusive.
+#?   generate_cells_positions_squaredlattice_3D(X_box, R_cell)
+#       Full 3D square lattice, boundary-inclusive (N_CellsSide+1 points per axis).
+#
+#~ Cell Population & Initialization
+#?   populate_cells_wrapper(ParIrr, N, nodes_positions, R_cell, gsm2, cell_df, domain,
+#                          tumor_radius, full_cycle, target_geom, type, N_sideVox,
+#                          N_CellsSide, X_box, X_voxel)
+#       Dispatcher: routes to partial or full irradiation cell population.
+#?   create_cells_3D_voxel_1layervoxel_df!(N, nodes_positions, R_cell, SP_, gsm2, cell_df,
+#                                         domain, tumor_radius, full_cycle, geometry, type,
+#                                         N_sideVox, N_CellsSide, X_box, X_voxel)
+#       Mutates cell_df in-place for partial irradiation (1 voxel layer in z).
+#?   create_cells_3D_voxel_df!(N, nodes_positions, R_cell, SP_, gsm2, cell_df, domain,
+#                              tumor_radius, full_cycle, geometry, type, X_box, X_voxel)
+#       Mutates cell_df in-place for full irradiation (entire 3D volume).
+#   initialize_G0_phase!(cell_df)
+#       Sets contact-inhibited cells (number_nei == 0) to G0. Call before compute_times_domain!
+#
+#~ Neighbors
+#?   compute_neighbors_3d(N, M, L)
+#       Returns 26-connected Moore neighborhood adjacency list for an N×M×L lattice.
+#
+#~ Oxygen
+#?   set_oxygen!(cell_df; rim_ox, core_ox, max_dist_ref, plot_oxygen)
+#       Assigns radial oxygen gradient (rim→core) to all cells; optionally plots distribution.
+#
+#~ Constants
+#?   PHASE_DURATIONS   — Gamma (shape, scale) parameters per cell cycle phase
+#?   PHASE_TRANSITION  — Dict mapping each phase to its successor (G1→S→G2→M→G1)
 
-# ============================================================================
-# Constants for cell cycle phases
-# ============================================================================
-# Assuming you have something like this somewhere in your code
+#! ============================================================================
+#! Constants for cell cycle phases
+#! ============================================================================
+
 const PHASE_DURATIONS = Dict(
     "G1" => (shape=0.5*12, scale=2.0),
     "S"  => (shape=0.5*8,  scale=2.0),

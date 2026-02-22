@@ -15,6 +15,8 @@ using Optim
 using LsqFit
 using ProgressMeter
 using InlineStrings
+using CUDA
+using Statistics: mean
 
 nthreads()
 
@@ -25,17 +27,7 @@ nthreads()
 #~ ============================================================
 #~ Load functions
 #~ ============================================================
-include(joinpath(@__DIR__, "..", "src", "utilities_structures.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_general.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_radiation.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_GSM2.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_biology.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_env.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_dose_computation.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_AT_computation.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_plot.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_abm.jl"))
-include(joinpath(@__DIR__, "..", "src", "utilities_plot_abm.jl"))
+include(joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
 
 #&Stopping power
 sp = load_stopping_power()
@@ -201,7 +193,7 @@ D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
 
 @time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
-plot_dose_cell(cell_df_copy, layer_plot = true)
+plot_dose_cell(cell_df_copy, layer_plot = false)
 
 #~ ==========================================================================================
 #~ ================================== compute damage ========================================

@@ -1354,54 +1354,78 @@ function print_initial_stats(pop::CellPopulation)
 end
 
 """
-run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64;
-                        terminal_time::Float64=48.0,
-                        snapshot_times::Vector{Int}=[1, 6, 12, 24],
-                        print_interval::Float64=1.0,
-                        max_events::Int=typemax(Int),
-                        eps_time::Float64=1e-9,
-                        verbose::Bool=true,
-                        snapshots_at_start::Bool=true)
+    run_simulation_abm!(pop::CellPopulation;
+                        nat_apo::Float64 = 10^-10,
+                        terminal_time::Float64 = 48.0,
+                        snapshot_times::Vector{Int} = [1, 6, 12, 24],
+                        print_interval::Float64 = 1.0,
+                        verbose::Bool = true)
+        -> (ts::SimulationTimeSeries, snapshots::Dict{Int,CellPopulation})
 
-Run the ABM simulation loop until `terminal_time` (in hours) or until no further
-events are available, updating `cell_df` in-place. Returns a time series and a
-dictionary of snapshots.
+Run the core agent-based model (ABM) simulation in-place on a `CellPopulation`,
+advancing through discrete stochastic events until `terminal_time`, while
+optionally recording periodic snapshots of the population state.
+
+# What it does
+- Initializes a time series container `ts` and a snapshot dictionary `snapshots`.
+- Records the **initial state** at `t = 0` (always; stored both in `ts` and as a snapshot).
+- Repeats:
+    1. Compute the next event time and type via `compute_next_event(pop)`.
+    2. Stop if no further events (`isinf(next_time)`) or if the next event would
+        exceed `terminal_time`.
+    3. Advance simulation time `t += next_time`, increment event counter.
+    4. Print progress when `t ≥ next_print_time` (if `verbose`).
+    5. If the current hour `floor(t)` matches any `snapshot_times` and has not yet
+        been captured, store `create_snapshot(pop)` in `snapshots[current_hour]`.
+    6. Apply the event with `update_ABM!(pop, next_time, event, idx, nat_apo)`.
+    7. Record the new state at time `t` with `record_timepoint!(ts, t, pop)`.
+- Prints a summary when done (if `verbose`) and returns `(ts, snapshots)`.
 
 # Arguments
-- `cell_df::DataFrame`: Simulation state. Mutated in place by event handlers.
-- `nat_apo::Float64`: Natural apoptosis parameter passed to update/check functions.
-
-# Keyword Arguments
-- `terminal_time::Float64=48.0`: Stop time (inclusive within a small tolerance `eps_time`).
-- `snapshot_times::Vector{Int}=[1, 6, 12, 24]`: Whole-hour marks to save population snapshots.
-- `print_interval::Float64=1.0`: Console progress print step in hours. If `<= 0`, disables periodic prints.
-- `max_events::Int=typemax(Int)`: Hard cap to avoid runaway loops.
-- `eps_time::Float64=1e-9`: Time comparison tolerance (e.g., handle floating-point accumulation).
-- `verbose::Bool=true`: If true, prints initial stats, progress, and final summary.
-- `snapshots_at_start::Bool=true`: If true, saves a snapshot at `t=0`.
-
-# Behavior
-- Initializes a `SimulationTimeSeries`, records the initial state at `t=0`.
-- In each loop:
-    1. Finds `(next_time, idx, event) = compute_next_event(cell_df)`.
-    2. If `next_time` is `Inf`, stops (no events remaining).
-    3. Advances time by `next_time`. If this would exceed `terminal_time` with tolerance,
-        truncates final step to stop at `terminal_time` and ends afterwards.
-    4. Processes the event via `update_ABM!`.
-    5. Records a timepoint into the time series.
-    6. Optionally prints progress at fixed wall-clock intervals.
-    7. Creates snapshots when crossing integer hours in `snapshot_times`.
-- On completion, prints a final summary (if `verbose`) and returns `(ts, snapshots)`.
+- `pop::CellPopulation`: Population in **structure-of-arrays** form. Mutated in place.
+- `nat_apo::Float64`: Baseline (natural) apoptosis rate used during updates.
+- `terminal_time::Float64=48.0`: End time for the simulation (e.g., hours).
+- `snapshot_times::Vector{Int}=[1, 6, 12, 24]`: Whole-hour times at which to save
+    one snapshot each. Keys in the returned `snapshots` dictionary are these hours,
+    plus an initial snapshot at `0`.
+- `print_interval::Float64=1.0`: Interval (same units as time) at which progress lines
+    are printed when `verbose=true`.
+- `verbose::Bool=true`: If `true`, prints initial stats, progress, snapshot notices,
+    and a summary.
 
 # Returns
-- `(ts::SimulationTimeSeries, snapshots::Dict{Int, DataFrame})`
+A tuple:
+- `ts::SimulationTimeSeries`: The recorded time series of the population (via
+    repeated `record_timepoint!` calls).
+- `snapshots::Dict{Int, CellPopulation}`: Snapshots keyed by whole-hour `Int`s,
+    including `0`. Each value is a deep copy / snapshot produced by `create_snapshot(pop)`.
 
-# Notes
-- Uses `create_snapshot(cell_df)` to copy alive rows into each snapshot.
-- Assumes `compute_next_event`, `update_ABM!`, `record_timepoint!`, and `create_snapshot`
-    are defined and consistent with your model.
+# Behavior & Notes
+- **Initial snapshot** at `t = 0` is always created and stored under key `0`.
+- Snapshot capture uses the **floor** of the current time (in hours):
+    `current_hour = floor(t) |> Int`. Each listed hour is stored at most once.
+- The simulation loop halts if:
+    - `compute_next_event` reports no more events (`isinf(next_time)`), or
+    - the next event time would exceed `terminal_time`.
+- `verbose` output includes: initial stats, per-interval progress lines of the form
+    `t=…h | <event> | Cells=<n_alive> | Events=<count>`, snapshot notifications, and a final summary.
+- This function mutates `pop` as time advances. If you need the initial state later,
+    store/copy it before calling, or rely on the `snapshots[0]`.
+
+# Example
+```julia
+ts, snaps = run_simulation_abm!(pop, 0.01;
+                                terminal_time=72.0,
+                                snapshot_times=[1, 6, 12, 24, 48, 72],
+                                print_interval=2.0,
+                                verbose=true)
+
+@show length(ts)            # number of recorded timepoints
+@show keys(snaps)           # includes 0 and requested hours that were reached
+```
 """
-function run_simulation_abm!(pop::CellPopulation, nat_apo::Float64;
+function run_simulation_abm!(pop::CellPopulation;
+                            nat_apo::Float64 = 10^-10,
                             terminal_time::Float64=48.0,
                             snapshot_times::Vector{Int}=[1, 6, 12, 24],
                             print_interval::Float64=1.0,
@@ -1470,10 +1494,72 @@ function run_simulation_abm!(pop::CellPopulation, nat_apo::Float64;
     return (ts, snapshots)
 end
 
-function run_simulation_abm!(cell_df::DataFrame, nat_apo::Float64; 
+"""
+    run_simulation_abm!(cell_df::DataFrame;
+                        nat_apo::Float64 = 10^-10,
+                        terminal_time::Float64 = 48.0,
+                        return_dataframes::Bool = true,
+                        update_input::Bool = true,
+                        kwargs...) -> (ts, snapshots)
+
+High-level convenience wrapper to run the ABM simulation starting from a
+**row-oriented** `DataFrame`, with optional in-place updates and flexible
+snapshot outputs.
+
+This method:
+1. Converts the input `cell_df` (AoS) into a `CellPopulation` (SoA) for simulation.
+2. Runs the core simulation via `run_simulation_abm!(pop, nat_apo; terminal_time, kwargs...)`,
+    returning time points `ts` and a dictionary of snapshots of the population state.
+3. **Optionally** writes back the final population state into `cell_df` (`update_input=true`).
+4. **Optionally** converts the snapshots to `DataFrame`s (`return_dataframes=true`)
+    for easier downstream analysis/serialization.
+
+# Arguments
+- `cell_df::DataFrame`: Input cell state in tabular (AoS) form. Will be **updated in place**
+    at the end of the simulation if `update_input=true`.
+- `nat_apo::Float64`: Baseline (natural) apoptosis rate used by the simulator.
+- `terminal_time::Float64=48.0`: Final simulation time (same units as the core ABM; e.g., hours).
+- `return_dataframes::Bool=true`: If `true`, convert each snapshot from SoA to a `DataFrame`
+    (`alive_only=true`) and return a `Dict{Int,DataFrame}`; otherwise return the original
+    SoA snapshots (`Dict{Int, CellPopulation}`).
+- `update_input::Bool=true`: If `true`, apply `update_dataframe!(cell_df, pop)` after the run,
+  so `cell_df` reflects the **final** population state.
+- `kwargs...`: Additional keyword arguments forwarded verbatim to the inner
+    `run_simulation_abm!(pop, nat_apo; ...)` (e.g., seeding, intervention schedules, logging).
+
+# Returns
+A tuple `(ts, snapshots)` where:
+- `ts`: The vector (or iterable) of recorded time points returned by the core simulator.
+- `snapshots`: Either
+    - `Dict{Int, DataFrame}` if `return_dataframes=true`, with one `DataFrame` per recorded time,
+    filtered to `alive_only=true`, or
+    - `Dict{Int, CellPopulation}` if `return_dataframes=false`.
+
+# Side Effects
+- If `update_input=true`, `cell_df` is **mutated** in place to match the final population
+    after the simulation completes.
+
+# Notes
+- This is a **wrapper** around the SoA-based `run_simulation_abm!(::CellPopulation, ...)`.
+- Snapshot keys are the recorded times (as `Int` here); ensure your downstream code expects that.
+- Conversion uses `to_dataframe(snap_pop, alive_only=true)`; adjust there if you need dead cells too.
+
+# Example
+```julia
+ts, snaps = run_simulation_abm!(cells_df, 0.01;
+                                terminal_time=72.0,
+                                update_input=true,
+                                return_dataframes=true,
+                                seed=42)
+
+`cells_df` now reflects the final state; `snaps` is Dict{Int,DataFrame}
+```
+"""
+function run_simulation_abm!(cell_df::DataFrame;
+                            nat_apo::Float64 = 10^-10,
                             terminal_time::Float64=48.0, 
                             return_dataframes::Bool=true, 
-                            update_input::Bool=true,  # NEW PARAMETER
+                            update_input::Bool=true,  
                             kwargs...)
     # Convert to SoA
     pop = CellPopulation(cell_df)
@@ -1538,5 +1624,3 @@ function update_dataframe!(df::DataFrame, pop::CellPopulation)
     
     return nothing
 end
-
-# Modified version that updates the original DataFrame

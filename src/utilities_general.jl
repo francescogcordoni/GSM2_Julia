@@ -1,24 +1,35 @@
+#! ============================================================================
+#! utilities_general.jl
+#!
+#! FUNCTIONS
+#! ---------
+#~ Hit Generation
+#?   GenerateHit_BOX(X_box; verbose)
+#?   GenerateHit_BOX(rng, X_box; verbose)
+#       Uniform random hit in a square box [0, X_box] × [0, X_box].
+#
+#?   GenerateHit_Circle(x_, y_, R_beam; verbose)
+#?   GenerateHit_Circle(rng, x_, y_, R_beam; verbose)
+#       Uniform random hit inside a disk centered at (x_, y_) with radius R_beam.
+#       Uses sqrt(U) sampling for correct area uniformity.
+#
+#?   GenerateHit(cell, Rk; verbose)
+#?   GenerateHit(rng, cell, Rk; verbose)
+#       Uniform random hit inside a disk of radius (cell.r + Rk) centered at origin.
+#       Used to sample ion impacts around a cell with track halo Rk.
+#! ============================================================================
+
 """
-    GenerateHit_BOX(X_box::Float64; verbose::Bool = false) -> (x::Float64, y::Float64)
+    GenerateHit_BOX(X_box::Float64; verbose::Bool = false) -> (x, y)
     GenerateHit_BOX(rng::AbstractRNG, X_box::Float64; verbose::Bool = false) -> (x, y)
 
-Sample a **uniform random hit** inside a square box with side `X_box`,
-i.e. `x, y ~ Uniform(0, X_box)` independently.
+Uniform random hit in a square box: `x, y ~ Uniform(0, X_box)` independently.
 
-# Arguments
-- `X_box::Float64` : Box side length.
-
-# Keywords
-- `verbose::Bool=false` : If `true`, prints the sampled coordinates.
-
-# RNG overload
-- Provide an explicit `rng::AbstractRNG` for reproducible sampling.
-
-# Returns
-- `(x, y)` sampled uniformly in `[0, X_box] × [0, X_box]`.
-
-# Notes
-- Uses independent uniform sampling on each axis.
+# Example
+```julia
+x, y = GenerateHit_BOX(900.0)
+x, y = GenerateHit_BOX(MersenneTwister(42), 900.0)
+```
 """
 function GenerateHit_BOX(rng::AbstractRNG, X_box::Float64; verbose::Bool = false)
     x0 = rand(rng, Uniform(0, 1)) * X_box
@@ -34,28 +45,16 @@ function GenerateHit_BOX(X_box::Float64; verbose::Bool = false)
 end
 
 """
-    GenerateHit_Circle(x_::Float64, y_::Float64, R_beam::Float64; verbose::Bool = false) -> (x, y)
-    GenerateHit_Circle(rng::AbstractRNG, x_::Float64, y_::Float64, R_beam::Float64; verbose::Bool = false) -> (x, y)
+    GenerateHit_Circle(x_, y_, R_beam::Float64; verbose::Bool = false) -> (x, y)
+    GenerateHit_Circle(rng, x_, y_, R_beam::Float64; verbose::Bool = false) -> (x, y)
 
-Sample a **uniform random hit** inside a circle (disk) centered at `(x_, y_)` with radius `R_beam`.
-Uniformity over **area** is ensured by sampling `radius = R_beam * sqrt(U)`, `theta = 2πV`,
-with `U, V ~ Uniform(0,1)`.
+Uniform random hit inside a disk centered at `(x_, y_)` with radius `R_beam`.
+Uses `radius = R_beam * sqrt(U)` for correct area uniformity (naive sampling oversamples the rim).
 
-# Arguments
-- `x_, y_::Float64` : Disk center.
-- `R_beam::Float64` : Disk radius.
-
-# Keywords
-- `verbose::Bool=false` : If `true`, prints the sampled polar and Cartesian coordinates.
-
-# RNG overload
-- Provide `rng::AbstractRNG` for reproducibility.
-
-# Returns
-- `(x, y)` uniformly distributed in the disk.
-
-# Notes
-- The `sqrt(U)` factor is essential for uniformity over the area (otherwise si sovracampiona il bordo).
+# Example
+```julia
+x, y = GenerateHit_Circle(0.0, 0.0, 450.0)
+```
 """
 function GenerateHit_Circle(
     rng::AbstractRNG,
@@ -83,24 +82,13 @@ end
     GenerateHit(cell::Cell, Rk::Float64; verbose::Bool = false) -> (x, y)
     GenerateHit(rng::AbstractRNG, cell::Cell, Rk::Float64; verbose::Bool = false) -> (x, y)
 
-Sample a **uniform random hit** inside a circle of radius `(cell.r + Rk)` centered at the origin.
-This is typically used to sample an impact around a cell with additional halo `Rk`.
+Uniform random hit inside a disk of radius `cell.r + Rk` centered at the origin.
+Used to sample ion impact points around a cell including track halo `Rk`.
 
-# Arguments
-- `cell::Cell`     : Object providing field `r` (cell radius).
-- `Rk::Float64`    : Additional radial margin (e.g., track range).
-
-# Keywords
-- `verbose::Bool=false` : If `true`, prints the sampled polar and Cartesian coordinates.
-
-# RNG overload
-- Provide `rng::AbstractRNG` for reproducible sequences.
-
-# Returns
-- `(x, y)` uniformly distributed in the disk of radius `cell.r + Rk`.
-
-# Notes
-- Uses `radius = (cell.r + Rk) * sqrt(U)` and `theta = 2πV` for uniform area sampling.
+# Example
+```julia
+x, y = GenerateHit(cell, track.Rk)
+```
 """
 function GenerateHit(rng::AbstractRNG, cell::Cell, Rk::Float64; verbose::Bool = false)
     R = (cell.r + Rk)

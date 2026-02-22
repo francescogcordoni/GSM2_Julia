@@ -1,42 +1,66 @@
+#! ============================================================================
+#! utilities_GSM2.jl
+#!
+#! FUNCTIONS
+#! ---------
+#~ Domain Geometry
+#?   calculate_centers(x0, y0, radius, nucleus) -> (center_x, center_y)
+#       Computes domain center positions on a circular lattice inside the nucleus.
+#?   create_domain_dataframes(cell_df, rel_center_x, rel_center_y)
+#           -> (df_center_x, df_center_y, at)
+#       Builds absolute domain center DataFrames for all cells and initializes
+#       the AT (Amorphous Track) results table.
+#
+#~ Damage Computation
+#?   MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle; verbose, show_progress) -> Nothing
+#       Computes per-domain X/Y DNA damage for each cell using a Poisson process.
+#       Updates dam_X_dom, dam_Y_dom, dam_X_total, dam_Y_total in-place.
+#?   calculate_OER(LET, O) -> Float64
+#       Oxygen Enhancement Ratio from LET and oxygenation level O.
+#?   calculate_kappa(ion_name, LET, O; OER_bool) -> Float64
+#       Damage yield per Gy, ion-species dependent, with optional OER correction.
+#
+#~ Survival
+#?   compute_cell_survival_GSM2!(cell_df, gsm2_cycle; NFrac) -> Nothing
+#       Per-cell survival probabilities via GSM2. Resets timing fields and
+#       updates cell_df.sp in-place. Supports multi-fraction dosing (NFrac).
+#?   domain_GSM2(X, Y, gsm2) -> Float64
+#       GSM2 survival probability for a single cell from per-domain X/Y damage vectors.
+#       Returns 0 immediately if any Y-type (lethal) damage is present.
+#?   survival_ci(surv; alpha) -> (p_hat, lower, upper)
+#       Wilson score confidence interval for survival from a vector of
+#       per-trial probabilities (simulates Bernoulli outcomes internally).
+#! ============================================================================
+
 """
-calculate_centers(x0::Float64, y0::Float64, radius::Float64, nucleus::Float64)
+    calculate_centers(x0::Float64, y0::Float64, radius::Float64, nucleus::Float64)
+        -> (center_x, center_y)
 
-Compute the positions of the centers of domains of radius radius in a circle of radius nucleus
+Domain center positions on a circular lattice inside a nucleus of radius `nucleus`.
+Domains have radius `radius` and are packed in concentric rings.
 
-# Arguments
-- `x0::Float64`: the x-coordinate of the center of the cell
-- `y0::Float64`: the y-coordinate of the center of the cell
-- `radius::Float64`: the radius of the domain
-- `nucleus::Float64`: the radius of the nucleus
-
-# Returns
-- `center_x::Vector{Float64}`: the x-coordinates of the centers of the domains
-- `center_y::Vector{Float64}`: the y-coordinates of the centers of the domains
+# Example
+```julia
+cx, cy = calculate_centers(0.0, 0.0, 0.5, 4.0)
+```
 """
 function calculate_centers(x0::Float64, y0::Float64, radius::Float64, nucleus::Float64)
-
-    # Initialize the vectors to store the positions of the centers of the spheres
     center_x = Vector{Float64}(undef, 0)
     center_y = Vector{Float64}(undef, 0)
 
-    # Add the center of the lattice
+    # Central domain
     push!(center_x, x0)
     push!(center_y, y0)
 
-    # Loop over the layers of the lattice
+    # Concentric rings
     for rho in 1:(floor(Int64, nucleus / (2 * radius)))
-        # Calculate the radius of the current layer
-        center_rho = (rho) * 2 * radius
+        center_rho = rho * 2 * radius
+        n_circle   = floor(Int64, (pi * center_rho) / radius)
+        theta      = range(0, 2π, length=n_circle)
 
-        # Calculate the number of spheres in the current layer
-        n_circle = floor(Int64, (pi * center_rho) / radius)
-
-        # Calculate the positions of the spheres in the current layer
-        theta = range(0, 2π, length=n_circle)
         xi = x0 .+ center_rho .* cos.(theta[1:(end-1)])
         yi = y0 .+ center_rho .* sin.(theta[1:(end-1)])
 
-        # Add the positions of the spheres in the current layer to the vectors
         center_x = vcat(center_x, xi)
         center_y = vcat(center_y, yi)
     end
@@ -45,85 +69,39 @@ function calculate_centers(x0::Float64, y0::Float64, radius::Float64, nucleus::F
 end
 
 """
-create_domain_dataframes(
-        cell_df::DataFrame,
-        rel_center_x::Vector{Float64},
-        rel_center_y::Vector{Float64}
-    ) -> (df_center_x, df_center_y, at)
+    create_domain_dataframes(cell_df, rel_center_x, rel_center_y)
+        -> (df_center_x, df_center_y, at)
 
-Generate the absolute domain-center coordinates for every cell and create the
-corresponding DataFrames used by the AT (Amorphous Track) computation.
+Absolute domain center DataFrames for all cells and initialized AT results table.
 
-# Purpose
-Each cell has a template of **relative** domain-center positions (`rel_center_x`,
-`rel_center_y`) produced by `calculate_centers`. This function:
+Shifts the relative domain template `(rel_center_x, rel_center_y)` by each cell's
+`(x, y)` position. Returns:
+- `df_center_x`, `df_center_y` — one row per cell, one column per domain center
+- `at` — zero-initialized AT table (same indexing)
 
-1. Shifts those relative coordinates by each cell’s (x, y) position → **absolute positions**
-2. Builds two DataFrames:
-    - `df_center_x`: x‑coordinates of all domains for all cells
-    - `df_center_y`: y‑coordinates of all domains for all cells
-3. Initializes an empty `at` DataFrame used to store domain-level track quantities.
-
-# Arguments
-- `cell_df`:
-    DataFrame containing at least `:x` and `:y` cell center coordinates.
-- `rel_center_x`, `rel_center_y`:
-    Vectors of relative offsets (domain layout template).
-
-# Returns
-- `df_center_x`: absolute domain center x-positions per cell
-- `df_center_y`: absolute domain center y-positions per cell
-- `at`: AT dataframe initialized with zeros, matching domain dimensionality
-
-# Notes
-- Domain counts ≡ `length(rel_center_x)`  
-- Uses broadcasting for fast vectorized transformations  
-- Each DataFrame row corresponds to a **cell**, each column to a **domain**  
+# Example
+```julia
+df_cx, df_cy, at = create_domain_dataframes(cell_df, rel_cx, rel_cy)
+```
 """
 function create_domain_dataframes(cell_df::DataFrame,
                                     rel_center_x::Vector{Float64},
                                     rel_center_y::Vector{Float64})
-
     println("... Creating domain dataframes ...")
 
-    # Number of domains per cell (i.e., number of relative center coordinates)
     num_cols = length(rel_center_x)
 
-    # ------------------------------------------------------------------
-    # Compute absolute domain center coordinates
-    #
-    # For each cell:
-    #   absolute_x = cell.x + rel_center_x[:]
-    #   absolute_y = cell.y + rel_center_y[:]
-    #
-    # Broadcasting + transpose rel_center vectors gives a matrix:
-    #   rows   = cells
-    #   cols   = domain centers
-    # ------------------------------------------------------------------
+    # Absolute coordinates: rows = cells, cols = domains
     mat_center_x = cell_df.x .+ transpose(rel_center_x)
     mat_center_y = cell_df.y .+ transpose(rel_center_y)
 
-    # ------------------------------------------------------------------
-    # Create DataFrames for the domain centers
-    # Column names are :center_1, :center_2, ..., :center_N
-    # ------------------------------------------------------------------
     df_center_x = DataFrame(mat_center_x, Symbol.("center_$i" for i in 1:num_cols))
-    df_center_x.index = cell_df.index   # preserve cell indexing
+    df_center_x.index = cell_df.index
 
     df_center_y = DataFrame(mat_center_y, Symbol.("center_$i" for i in 1:num_cols))
     df_center_y.index = cell_df.index
 
-    # ------------------------------------------------------------------
-    # Create the AT dataframe
-    #
-    # AT (Amorphous Track) table will hold domain-level track quantities.
-    # It is initialized as a zero matrix with:
-    #
-    #   rows = number of cells
-    #   cols = (num_cols - 1)   # historical convention from original code
-    #
-    # Rename columns to match the domain naming convention.
-    # ------------------------------------------------------------------
+    # AT table: zero-initialized, (num_cols - 1) columns (historical convention)
     at = DataFrame(zeros(size(df_center_y, 1), (size(df_center_y, 2) - 1)), :auto)
     rename!(at, Symbol.("center_$i" for i in 1:(size(df_center_y, 2) - 1)))
     at.index = df_center_y.index
@@ -132,22 +110,22 @@ function create_domain_dataframes(cell_df::DataFrame,
 end
 
 """
-    MC_loop_damage!(ion, cell_df, irrad_cond, gsm2;
-                                        verbose=false, show_progress=true)
+    MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle; verbose, show_progress) -> Nothing
 
-Compute DNA damage (X and Y components) for each cell from domain-level
-dose vectors using a Poisson process.
+Per-domain X/Y DNA damage for each cell via Poisson sampling.
+Updates `dam_X_dom`, `dam_Y_dom`, `dam_X_total`, `dam_Y_total` in `cell_df` in-place.
 
-- LET is taken from irrad_cond[cell.energy_step].LET
-- Oxygen O is taken from cell_df.O
-- Dose distribution for each cell is taken from cell_df.dose::Vector{Float64}
+Damage rates per domain:
+- `λX = kappa_base * d`  (double-strand breaks)
+- `λY = lambda_base * d` (complex/lethal lesions, ~1e-3 × λX)
 
-Damage per domain uses:
-    λX = kappa_base * d
-    λY = lambda_base * d
-with:
-    kappa_base  = 9 * kappa_yield / (n_repeat * N_domains)
-    lambda_base = kappa_base * 1e-3
+where `kappa_base = 9 * kappa_yield / (n_repeat * N_domains)`.
+LET and O are taken per-cell from `irrad_cond[energy_step].LET` and `cell_df.O`.
+
+# Example
+```julia
+MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle; show_progress=true)
+```
 """
 function MC_loop_damage!(
     ion::Ion,
@@ -171,26 +149,20 @@ function MC_loop_damage!(
     println("Cells       : $num_cells")
     println("n_repeat    : $n_repeat\n")
 
-    # Check required fields
-    @assert hasproperty(cell_df, :dose) "Missing column: dose"
+    @assert hasproperty(cell_df, :dose)        "Missing column: dose"
     @assert hasproperty(cell_df, :energy_step) "Missing column: energy_step"
-    @assert hasproperty(cell_df, :O) "Missing column: O"
-    @assert hasproperty(cell_df, :is_cell) "Missing column: is_cell"
+    @assert hasproperty(cell_df, :O)           "Missing column: O"
+    @assert hasproperty(cell_df, :is_cell)     "Missing column: is_cell"
 
-    # Determine expected output vector length
+    # Expected output vector length
     first_nonempty = findfirst(x -> !isempty(x), cell_df.dose)
-    expected_len = if first_nonempty === nothing
-        0
-    else
-        length(cell_df.dose[first_nonempty]) * n_repeat
-    end
+    expected_len = first_nonempty === nothing ? 0 : length(cell_df.dose[first_nonempty]) * n_repeat
 
-    # Initialize X and Y damage vectors
+    # Initialize damage vector columns
     for cname in (:dam_X_dom, :dam_Y_dom)
         if !hasproperty(cell_df, cname)
             cell_df[!, cname] = [zeros(Int, expected_len) for _ in 1:num_cells]
         else
-            # Verifica che sia del tipo corretto
             col = cell_df[!, cname]
             if !(col isa Vector{Vector{Int}})
                 @warn "$cname had wrong type ($(typeof(col))), reinitializing"
@@ -199,40 +171,23 @@ function MC_loop_damage!(
         end
     end
 
-    # Initialize total damage columns (scalars)
-    if !hasproperty(cell_df, :dam_X_total)
-        cell_df[!, :dam_X_total] = zeros(Int, num_cells)
-    end
-    if !hasproperty(cell_df, :dam_Y_total)
-        cell_df[!, :dam_Y_total] = zeros(Int, num_cells)
-    end
+    # Initialize scalar damage totals
+    hasproperty(cell_df, :dam_X_total) || (cell_df[!, :dam_X_total] = zeros(Int, num_cells))
+    hasproperty(cell_df, :dam_Y_total) || (cell_df[!, :dam_Y_total] = zeros(Int, num_cells))
 
-    # Progress bar
-    if show_progress
-        p = Progress(num_cells, 1, "Damage: ")
-    end
+    show_progress && (p = Progress(num_cells, 1, "Damage: "))
 
-    # Pre-allocate Poisson sample buffers (riutilizzati per evitare allocazioni)
+    # Pre-allocated Poisson sample buffers
     buffer_X = Vector{Int}(undef, n_repeat)
     buffer_Y = Vector{Int}(undef, n_repeat)
 
-    # ---------------------------------------------------------
-    # Main loop over cells
-    # ---------------------------------------------------------
     for i in 1:num_cells
         show_progress && next!(p)
         vprintln("Processing cell $i")
 
         # Skip inactive or zero-dose cells
-        if cell_df.is_cell[i] != 1 || isempty(cell_df.dose[i])
-            fill!(cell_df.dam_X_dom[i], 0)
-            fill!(cell_df.dam_Y_dom[i], 0)
-            cell_df.dam_X_total[i] = 0
-            cell_df.dam_Y_total[i] = 0
-            continue
-        end
-        
-        if hasproperty(cell_df, :dose_cell) && cell_df.dose_cell[i] <= 0.0
+        if cell_df.is_cell[i] != 1 || isempty(cell_df.dose[i]) ||
+           (hasproperty(cell_df, :dose_cell) && cell_df.dose_cell[i] <= 0.0)
             fill!(cell_df.dam_X_dom[i], 0)
             fill!(cell_df.dam_Y_dom[i], 0)
             cell_df.dam_X_total[i] = 0
@@ -241,110 +196,84 @@ function MC_loop_damage!(
         end
 
         dose_vector = cell_df.dose[i]
-        L = length(dose_vector)
-        O = cell_df.O[i]
+        L   = length(dose_vector)
+        O   = cell_df.O[i]
         LET = irrad_cond[cell_df.energy_step[i]].LET
 
-        # YIELD
         kappa_yield = calculate_kappa(ion.ion, LET, O)
         kappa_base  = 9.0 * kappa_yield / (n_repeat * L)
         lambda_base = kappa_base * 1e-3
 
         vprintln("  LET=", LET, "  O=", O,
-                    "  kappa_base=", kappa_base,
-                    "  lambda_base=", lambda_base)
+                 "  kappa_base=", kappa_base, "  lambda_base=", lambda_base)
 
-        # Ensure vector sizes
         row_len = L * n_repeat
         Xrow = cell_df.dam_X_dom[i]
         Yrow = cell_df.dam_Y_dom[i]
-        
-        # Ridimensiona se necessario
-        if length(Xrow) != row_len
-            resize!(Xrow, row_len)
-            cell_df.dam_X_dom[i] = Xrow
-        end
-        if length(Yrow) != row_len
-            resize!(Yrow, row_len)
-            cell_df.dam_Y_dom[i] = Yrow
-        end
 
-        # Fill the vector
+        length(Xrow) != row_len && (resize!(Xrow, row_len); cell_df.dam_X_dom[i] = Xrow)
+        length(Yrow) != row_len && (resize!(Yrow, row_len); cell_df.dam_Y_dom[i] = Yrow)
+
         pos = 1
         @inbounds for d in dose_vector
             λX = max(0.0, kappa_base * d)
             λY = max(0.0, lambda_base * d)
 
-            # Campiona in buffer pre-allocati
-            if λX > 0.0
-                rand!(Poisson(λX), buffer_X)
-            else
-                fill!(buffer_X, 0)
-            end
-            
-            if λY > 0.0
-                rand!(Poisson(λY), buffer_Y)
-            else
-                fill!(buffer_Y, 0)
-            end
+            λX > 0.0 ? rand!(Poisson(λX), buffer_X) : fill!(buffer_X, 0)
+            λY > 0.0 ? rand!(Poisson(λY), buffer_Y) : fill!(buffer_Y, 0)
 
-            # Copia nei vettori finali
             copyto!(Xrow, pos, buffer_X, 1, n_repeat)
             copyto!(Yrow, pos, buffer_Y, 1, n_repeat)
-
             pos += n_repeat
         end
 
-        # Calcola i totali (somma di tutti gli elementi del vettore)
         cell_df.dam_X_total[i] = sum(Xrow)
         cell_df.dam_Y_total[i] = sum(Yrow)
-        
-        vprintln("  dam_X_total=", cell_df.dam_X_total[i], 
-                "  dam_Y_total=", cell_df.dam_Y_total[i])
+
+        vprintln("  dam_X_total=", cell_df.dam_X_total[i],
+                 "  dam_Y_total=", cell_df.dam_Y_total[i])
     end
 
     println("\n✔ Finished damage computation.")
     println("  Total X damages across all cells: ", sum(cell_df.dam_X_total))
     println("  Total Y damages across all cells: ", sum(cell_df.dam_Y_total))
     println()
-    
+
     return nothing
 end
 
 """
-    calculate_OER(LET, O)
+    calculate_OER(LET::Float64, O::Float64) -> Float64
 
-Compute the Oxygen Enhancement Ratio (OER) using LET and oxygenation O,
-following the model in the original calculate_OER function.
+Oxygen Enhancement Ratio from LET (keV/µm) and oxygenation level O.
+Uses the empirical model: `OER = (b*(a*M0 + LET^g)/(a + LET^g) + O) / (b + O)`.
 
-Inputs:
-- LET :: Float64
-- O   :: Float64   (oxygen level for the cell)
-
-Returns:
-- OER :: Float64
+# Example
+```julia
+oer = calculate_OER(50.0, 5.0)
+```
 """
 function calculate_OER(LET::Float64, O::Float64)
     M0 = 3.4
     b  = 0.41
     a  = 8.27e5
     g  = 3.0
-
     return (b * (a*M0 + LET^g) / (a + LET^g) + O) / (b + O)
 end
 
-
 """
-calculate_kappa(ion_name, LET, O; OER_bool=true)
+    calculate_kappa(ion_name::String, LET::Float64, O::Float64; OER_bool=true) -> Float64
 
-Compute the yield of damage per unit Gy using:
-- ion species (p1..p5 parameters)
-- LET of the cell (layer-dependent)
-- O2 of that cell
+Damage yield per Gy for a given ion, LET, and oxygenation level.
+Ion-specific parameters supported: `"12C"`, `"4He"`, `"3He"`, `"1H"`, `"2H"`, `"16O"`.
+Applies OER correction by default (`OER_bool=true`).
+
+# Example
+```julia
+κ = calculate_kappa("12C", 80.0, 5.0)
+```
 """
 function calculate_kappa(ion_name::String, LET::Float64, O::Float64; OER_bool::Bool = true)
-
-    # Ion-specific parameters
     if ion_name == "12C"
         p1,p2,p3,p4,p5 = 6.8, 0.156, 0.9214, 0.005245, 1.395
     elseif ion_name == "4He" || ion_name == "3He"
@@ -358,147 +287,71 @@ function calculate_kappa(ion_name::String, LET::Float64, O::Float64; OER_bool::B
         return 0.0
     end
 
-    # Basic yield
     yield = (p1 + (p2 * LET)^p3) / (1 + (p4 * LET)^p5)
 
-    # Apply OER correction if required
-    if OER_bool
-        OER = calculate_OER(LET, O)
-        yield /= OER
-    end
+    OER_bool && (yield /= calculate_OER(LET, O))
 
     return yield
 end
 
 """
-compute_cell_survival_GSM2!(cell_df, gsm2; NFrac::Int = 1)
+    compute_cell_survival_GSM2!(cell_df, gsm2_cycle; NFrac=1) -> Nothing
 
-Compute per‑cell survival probabilities using the GSM2 model and update
-the corresponding fields of `cell_df` **in place**.
+Per-cell survival probabilities via GSM2. Resets timing/death fields and updates
+`cell_df.sp` in-place. Phase-dependent GSM2 params: G1/G0→[1], S→[2], G2/M→[3].
+Supports multi-fraction dosing via `NFrac` (SP = SP_cell ^ NFrac).
 
-This function evaluates the radiobiological survival probability for each
-active cell (`is_cell == 1`) based on its accumulated X- and Y-type damage,
-using the GSM2 model.  
-The final survival probability accounts for a specified number of fractions
-(`NFrac`), which defaults to **1**.
-
-# Behavior
-- Resets/initializes the following per-cell state variables:
-    * `sp`             → survival probability (set to 1.0 initially)
-    * `apo_time`       → apoptotic trigger time (set to `Inf`)
-    * `death_time`     → total death time (set to `Inf`)
-    * `recover_time`   → repair/recovery time (set to `Inf`)
-    * `cycle_time`     → cell-cycle time (set to `Inf`)
-    * `is_death_rad`   → radiogenic death flag (set to 0)
-    * `death_type`     → categorical death mode (set to -1)
-
-- For each active cell (`is_cell == 1`):
-    * Retrieves X- and Y-type domain damage (`dam_X_dom`, `dam_Y_dom`)
-    * Evaluates the GSM2 survival function:
-        `SP_cell = domain_GSM2(dam_X_dom[i], dam_Y_dom[i], gsm2)`
-    * Applies the number of fractions:
-        `SP_total = SP_cell ^ NFrac`
-    * Stores `SP_total` into `cell_df.sp[i]`
-
-# Arguments
-- `cell_df::DataFrame`: table containing per‑cell radiobiological information  
-- `gsm2::GSM2`: instance of the GSM2 model  
-- `NFrac::Int = 1`: **number of fractions**, default = *1*  
-
-# Notes
-- This function **modifies `cell_df` in place**.
-- Only rows with `is_cell == 1` are processed.
-
-# Returns
-- Nothing (`nothing`)
+# Example
+```julia
+compute_cell_survival_GSM2!(cell_df, gsm2_cycle; NFrac=5)
+```
 """
 function compute_cell_survival_GSM2!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}; NFrac::Int64 = 1)
-
-    cell_df.sp .= 1.
-    cell_df.apo_time .= Inf
-    cell_df.death_time .= Inf
+    cell_df.sp          .= 1.
+    cell_df.apo_time    .= Inf
+    cell_df.death_time  .= Inf
     cell_df.recover_time .= Inf
-    cell_df.cycle_time .= Inf
+    cell_df.cycle_time  .= Inf
     cell_df.is_death_rad .= 0
-    cell_df.death_type .= -1
+    cell_df.death_type  .= -1
 
     for i in cell_df.index[cell_df.is_cell .== 1]
-        # survival using GSM2
-        if cell_df.cell_cycle[i] == "G1"
-            gsm2 = gsm2_cycle[1]
+        gsm2 = if cell_df.cell_cycle[i] == "G1" || cell_df.cell_cycle[i] == "G0"
+            gsm2_cycle[1]
         elseif cell_df.cell_cycle[i] == "S"
-            gsm2 = gsm2_cycle[2]
-        elseif cell_df.cell_cycle[i] == "G2"
-            gsm2 = gsm2_cycle[3]
-        elseif cell_df.cell_cycle[i] == "M"
-            gsm2 = gsm2_cycle[3]
-        elseif cell_df.cell_cycle[i] == "G0"  
-            gsm2 = gsm2_cycle[1]  
+            gsm2_cycle[2]
+        elseif cell_df.cell_cycle[i] == "G2" || cell_df.cell_cycle[i] == "M"
+            gsm2_cycle[3]
         else
             println("Cell cycle not found: cell $i has phase '$(cell_df.cell_cycle[i])'")
-            gsm2 = gsm2_cycle[4]
+            gsm2_cycle[4]
         end
-        SP_cell = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
 
-        # apply number of fractions (default NFrac = 1)
+        SP_cell = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
         cell_df.sp[i] = SP_cell ^ NFrac
     end
 end
 
 """
-domain_GSM2(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2)
+    domain_GSM2(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2) -> Float64
 
-Compute the per-domain survival probability predicted by the GSM2 model,
-based on the number of X- and Y-type DNA damage clusters in a cell domain.
+GSM2 survival probability for a single cell from per-domain X/Y damage vectors.
+Returns `0.0` immediately if any Y-type (lethal) damage is present (`sum(Y) > 0`).
 
-This function evaluates the GSM2 survival model **for a single cell**,
-given the lists of domain-level damages `X` (single-track lesions) and `Y`
-(multi-track interactions). The GSM2 model assumes that:
+For each domain `j` with `X[j]` lesions:
+`p_j = ∏_{i=1}^{X[j]}  (i*r) / ((r+a)*i + b*i*(i-1))`
 
-- **Any Y-type lesion is lethal**, i.e. if `sum(Y) > 0`, the survival
-  probability is immediately **0**.
-- The surviving probability is the **product** of survival probabilities
-    for each domain, computed iteratively from the number of X-lesions.
+Total survival: `SP = ∏_j p_j`.
 
-# Mathematical model
-
-For each domain `j`, let `X[j]` be the number of X-lesions.
-
-The survival probability contribution of that domain is:
-p_j = ∏_{i = 1 to X[j]}  ( i * r ) / ( (r + a)i + bi*(i-1) )
-with GSM2 parameters:
-
-- `r`  → repair probability  
-- `a`  → lethal conversion parameter  
-- `b`  → sublethal interaction parameter  
-
-The total cell survival is:
-SP = ∏_{j} p_j
-# Arguments
-- `X::Vector{Int64}`  
-  Number of X-type lesions **per domain**.
-
-- `Y::Vector{Int64}`  
-  Number of Y-type lesions **per domain**.  
-  If `sum(Y) > 0`, the model returns **0**.
-
-- `gsm2::GSM2`  
-    Object containing GSM2 parameters `r`, `a`, `b`.
-
-# Returns
-- `p_cell::Float64`  
-    Survival probability predicted by the GSM2 domain model.
-
+# Example
+```julia
+sp = domain_GSM2(X_vec, Y_vec, gsm2)
+```
 """
 function domain_GSM2(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2)
-
-    # Any Y-type cluster is lethal
-    if sum(Y) > 0
-        return 0.
-    end
+    sum(Y) > 0 && return 0.
 
     p_cell = 1.
-
     for j in 1:length(X)
         p = 1.0
         for i in X[j]:-1:1
@@ -514,53 +367,15 @@ end
 """
     survival_ci(surv::AbstractVector{<:Real}; alpha=0.05) -> (p_hat, lower, upper)
 
-Compute a **binomial proportion confidence interval** for survival using the
-**Wilson score interval** at significance level `alpha` (default 0.05 ⇒ 95% CI).
-
-# Arguments
-- `surv::AbstractVector{<:Real}`: Vector of **per-trial survival probabilities** in `[0,1]`.
-  Each element `surv[i]` is treated as the success probability of a Bernoulli trial.
-  The function **simulates** one Bernoulli outcome for each entry via `rand() < surv[i]`,
-  then computes the Wilson interval from the simulated success/failure counts.
-
-- `alpha::Real=0.05`: Significance level for the two-sided interval.
-
-# Returns
-- `(p_hat, lower, upper)`: A tuple containing
-  - `p_hat`: the sample proportion of simulated survivals (successes),
-  - `lower`, `upper`: the Wilson score **lower** and **upper** confidence limits.
-
-# Details
-This routine first converts the input probabilities into a vector of **0/1 outcomes**
-by a single Bernoulli draw per element, i.e. it estimates counts
-`n_s = sum(surv01)` and `n_f = n - n_s`, with `n = length(surv)`.
-It then applies the **Wilson score interval**:
-
-    center   = (n_s + 0.5*z^2) / (n + z^2)
-    halfwidth = (z/(n + z^2)) * sqrt( (n_s*n_f)/n + z^2/4 )
-
-with `z = quantile(Normal(), 1 - alpha/2)`. The interval is `center ± halfwidth`.
-
-# Notes
-- **Stochastic:** Results vary across calls because outcomes are simulated.
-    For reproducibility, set a seed with `using Random; Random.seed!(...)` before calling.
-- If you already have **observed 0/1 outcomes** (not probabilities), pass that
-    vector directly to avoid extra Monte Carlo noise.
-- If you have **aggregated counts** (`n_s`, `n`), consider a specialized method
-    that computes Wilson CI directly from counts instead of simulating.
+Wilson score confidence interval for survival from a vector of per-trial probabilities.
+Simulates one Bernoulli outcome per element, then computes the Wilson interval at
+level `alpha` (default 0.05 → 95% CI). Stochastic: set `Random.seed!` for reproducibility.
 
 # Example
 ```julia
-using Random
-Random.seed!(123)
-
-surv = [0.7, 0.9, 0.5, 0.8, 0.6]  # per-trial survival probabilities
-p̂, lo, hi = survival_ci(surv; alpha=0.05)
-
-@show p̂, lo, hi
+p̂, lo, hi = survival_ci([0.7, 0.9, 0.5, 0.8]; alpha=0.05)
 ```
 """
-
 function survival_ci(surv::AbstractVector{<:Real}; alpha=0.05)
     surv01 = rand.(Ref(Random.default_rng()), Bernoulli.(surv)) .|> Int
 
@@ -569,15 +384,11 @@ function survival_ci(surv::AbstractVector{<:Real}; alpha=0.05)
     n_f = n - n_s
 
     p_hat = n_s / n
-    z = quantile(Normal(), 1 - alpha/2)
+    z     = quantile(Normal(), 1 - alpha/2)
 
-    denom    = n + z^2
-    center   = (n_s + 0.5*z^2) / denom
+    denom     = n + z^2
+    center    = (n_s + 0.5*z^2) / denom
     halfwidth = (z/denom) * sqrt((n_s*n_f)/n + (z^2)/4)
 
-    lower = center - halfwidth
-    upper = center + halfwidth
-
-    return p_hat, lower, upper
+    return p_hat, center - halfwidth, center + halfwidth
 end
-

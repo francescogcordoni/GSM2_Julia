@@ -1,3 +1,25 @@
+#! ============================================================================
+#! utilities_structures.jl
+#!
+#! STRUCTS
+#! -------
+#~ Cell & Spatial
+#?   Cell          — mutable: single cell state (position, cycle, damage, dose, neighbors...)
+#?   CellPopulation — mutable: SoA representation of a cell population (optimized memory)
+#?   Voxel         — mutable: spatial voxel with dose and survival probability
+#?   Track         — immutable: ion track (position + radius)
+#
+#~ Radiation & Physics
+#?   Ion    — mutable: ion properties (type, energy, mass, charge, LET, density)
+#?   Irrad  — mutable: irradiation parameters (dose, dose rate, kR)
+#?   AT     — mutable: Amorphous Track model parameters
+#?   GSM2   — mutable: GSM2 model parameters (r, a, b, rd, Rn)
+#
+#~ Simulation Tracking
+#?   SimulationTimeSeries — mutable: time-series recorder for population dynamics
+#                           (total, G0/G1/S/G2/M, stem/non-stem counts over time)
+#! ============================================================================
+
 begin
     mutable struct Cell
         x::Float64
@@ -6,36 +28,36 @@ begin
         center_x::Vector{Float64}
         center_y::Vector{Float64}
         nei::Array{Int64}
-        r::Float64### r_nucleus    
-        R::Float64### R_cell
+        r::Float64          ### r_nucleus    
+        R::Float64          ### R_cell
         a_gsm2::Float64
         b_gsm2::Float64
-        r_gsm2::Float64 #repear rate
-        rd_gsm2::Float64 #interaction range of damage
-        is_stem::Int64 #is a stem cell
+        r_gsm2::Float64     # repair rate
+        rd_gsm2::Float64    # interaction range of damage
+        is_stem::Int64      # is a stem cell
         proliferation::Int64
-        cell_cycle::String #cell cycle for now is M-phase or other
+        cell_cycle::String  # cell cycle phase
         dam_X::Matrix{Float64}
         dam_Y::Matrix{Float64}
         dam_X_dom::Vector{Int64}
         dam_Y_dom::Vector{Int64}
-        O::Float64 #Oxygenation [%]
-        SP::Float64 #survival probability
-        dose::Array{Float64} #dose recevied
+        O::Float64          # Oxygenation [%]
+        SP::Float64         # survival probability
+        dose::Array{Float64}
         dose_cell::Float64
-        is_cell::Int64 #is node occupied by cell?
-        can_divide::Int64 #is node occupied by cell?
-        number_nei::Int64 #number of adjacent cell
-        apo_time::Float64 #time of death
-        death_time::Float64 #time of death
-        recover_time::Float64 #time of recovery
-        cycle_time::Float64 #time of cycle change (at the end of cycle M it divides)
+        is_cell::Int64      # is node occupied by cell?
+        can_divide::Int64
+        number_nei::Int64   # number of adjacent cells
+        apo_time::Float64
+        death_time::Float64
+        recover_time::Float64
+        cycle_time::Float64 # time of cycle change (at end of M → divides)
         is_death_rad::Int64
         i_voxel_x::Int64
         i_voxel_y::Int64
         i_voxel_z::Int64
     end
-    
+
     mutable struct Voxel
         xmin::Float64
         xmax::Float64
@@ -43,10 +65,10 @@ begin
         ymax::Float64
         zmin::Float64
         zmax::Float64
-        ni::Float64 #1 - Survival probability
+        ni::Float64     # 1 - Survival probability
         Dose::Float64
-        #CellList::Array{Cell,1}#####list of the cells in the voxel
     end
+
     struct Track
         x::Float64
         y::Float64
@@ -89,50 +111,51 @@ begin
         Rn::Float64
     end
 end
+
 mutable struct SimulationTimeSeries
     time::Vector{Float64}
     total_cells::Vector{Int32}
-    g0_cells::Vector{Int32}  # ← Add this
+    g0_cells::Vector{Int32}
     g1_cells::Vector{Int32}
     s_cells::Vector{Int32}
     g2_cells::Vector{Int32}
     m_cells::Vector{Int32}
     stem_cells::Vector{Int32}
     non_stem_cells::Vector{Int32}
-    
+
     function SimulationTimeSeries()
         new(Float64[], Int32[], Int32[], Int32[], Int32[], Int32[], Int32[], Int32[], Int32[])
     end
 end
 
 mutable struct CellPopulation
-    # Boolean states (use Int8: 1 byte vs 8 bytes for Int64)
+    # Boolean states (Int8: 1 byte vs 8 bytes for Int64)
     is_cell::Vector{Int8}
     can_divide::Vector{Int8}
     is_stem::Union{Vector{Int8}, Nothing}
     is_death_rad::Union{Vector{Int8}, Nothing}
-    
-    # Timing information (Float64)
+
+    # Timing information
     death_time::Vector{Float64}
     cycle_time::Vector{Float64}
     recover_time::Vector{Float64}
-    
-    # Cell cycle phase (String7: inline string up to 7 bytes)
-    # Fits "G1", "S", "G2", "M" perfectly with no heap allocation
+
+    # Cell cycle phase (String7: inline string, no heap allocation)
+    # Fits "G1", "S", "G2", "M", "G0" with zero allocation
     cell_cycle::Vector{String7}
-    
+
     # Spatial information
-    number_nei::Vector{Int16}  # Typically small (< 256)
-    nei::Vector{Vector{Int32}}  # Neighbor indices
-    
-    # Optional spatial coordinates (if needed)
+    number_nei::Vector{Int16}       # Typically small (< 256)
+    nei::Vector{Vector{Int32}}      # Neighbor indices
+
+    # Optional spatial coordinates
     x::Union{Vector{Int32}, Nothing}
     y::Union{Vector{Int32}, Nothing}
-    
+
     # Metadata
-    n_cells::Int32  # Current number of cell slots
-    n_alive::Int32  # Number of alive cells (cached for performance)
-    
-    # Original indices (if conversion from DataFrame needed)
+    n_cells::Int32      # Current number of cell slots
+    n_alive::Int32      # Number of alive cells (cached for performance)
+
+    # Original indices (for DataFrame conversion)
     indices::Vector{Int32}
 end
