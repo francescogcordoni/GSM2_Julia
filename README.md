@@ -302,11 +302,3 @@ All utility files use a consistent inline color convention for navigation:
 ```
 
 ---
-
-## Notes
-
-- `cell_df` is a global DataFrame injected into `Main` by the `setup_*!` functions.
-- `plot_dose_cell` and `plot_survival_probability_cell` have been merged into `plot_scalar_cell(cell_df, col)`.
-- `plot_damage(cell_df; layer_plot=true)` groups by `:energy_step`, not `:layer`.
-- `MC_loop_ions_domain_tsc_fast!` has two definitions in the original codebase — ensure only one is loaded (see `utilities_MC_dose.jl` note).
-- `A = 1.` is hardcoded in `setup_IonIrrad!` after parsing `A_` — verify if intentional for protons.

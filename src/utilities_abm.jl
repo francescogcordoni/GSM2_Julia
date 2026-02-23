@@ -4,7 +4,7 @@
 #! FUNCTIONS
 #! ---------
 #~ Radiation Damage & Repair
-#?   compute_times_domain!(cell_df, gsm2_cycle, nat_apo; terminal_time, verbose, print_every, summary)
+#?   compute_times_domain!(cell_df, gsm2_cycle; nat_apo, terminal_time, verbose, print_every, summary)
 #       Parallel per-cell GSM2 survival + stochastic repair scheduling.
 #       Updates sp, death_time, recover_time, cycle_time, is_cell in place.
 #       Dispatches gsm2 by cell_cycle phase. Deferred neighbor updates applied serially.
@@ -78,7 +78,8 @@
 #! ============================================================================
 
 """
-    compute_times_domain!(cell_df, gsm2_cycle, nat_apo;
+    compute_times_domain!(cell_df, gsm2_cycle;
+                            nat_apo=1e-10,
                             terminal_time=Inf, verbose=false, print_every=0, summary=true)
         -> Nothing
 
@@ -105,7 +106,8 @@ Required columns: `:index, :is_cell, :dam_X_dom, :dam_Y_dom, :sp, :apo_time,
 compute_times_domain!(cell_df, gsm2_cycle, 0.01; terminal_time=24.0, summary=true)
 ```
 """
-function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2}, nat_apo::Float64;
+function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
+                                nat_apo::Float64 = 1e-10,
                                 terminal_time::Float64 = Inf,
                                 verbose::Bool = false, print_every::Int = 0, summary::Bool = true)
 
