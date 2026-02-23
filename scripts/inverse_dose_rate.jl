@@ -259,29 +259,79 @@ compute_times_domain!(cell_df_istant, gsm2_cycle)
 cell_df_istant_ = cell_df_istant[cell_df_istant.is_cell .== 1, :]
 push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/Ntot)
 
-times_split = [0.05, 0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0, 72.0, 96.0]
-for t in times_split 
+tumor_radius = 500.0
+ParIrr = "false"  # use "true" to enable partial irradiation
+track_seg = true  # use "true" to enable track segmentation
+setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide; ParIrr="false", track_seg = track_seg)
+setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
+println("Number of cells = ", sum(cell_df.is_cell .== 1))
+setup_irrad_conditions!(
+    ion, irrad, type_AT,
+    cell_df,
+    track_seg
+)
+set_oxygen!(cell_df; plot_oxygen = false)
+O2_mean = mean(cell_df.O[cell_df.is_cell.==1])
+cell_df.O .= 21.
+F = irrad.dose / (1.602 * 10^(-9) * LET)
+Npar = round(Int, F * (pi * (R_beam)^2 * 10^(-8)))
+zF = irrad.dose / Npar
+D = irrad.doserate / zF
+T = irrad.dose / (zF * D) * 3600
+cell_df_second = deepcopy(cell_df)
+@time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_second, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
+MC_loop_damage!(ion, cell_df_second, irrad_cond, gsm2_cycle)
+
+phase_times = DataFrame(time = Float64[], Nalive = Int[],
+                        G0 = Int[], G1 = Int[], S = Int[], G2 = Int[], M = Int[])
+
+phase_times_pre = DataFrame(time = Float64[], Nalive = Int[],
+                        G0 = Int[], G1 = Int[], S = Int[], G2 = Int[], M = Int[])
+times_split = [0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0]
+for t in times_split
     println(t)
     cell_ = deepcopy(cell_df_copy)
+
     X_prev = cell_.dam_X_total
-    compute_times_domain!(cell_, gsm2_cycle, nat_apo, terminal_time = t)
+    compute_times_domain!(cell_, gsm2_cycle; terminal_time = t)
     cell_.is_cell[isfinite.(cell_.death_time)] .= 0
-    run_simulation_abm!(cell_, nat_apo, terminal_time = t)
+    run_simulation_abm!(cell_; terminal_time = t)
 
-    cell_df_split_ = cell_[cell_.is_cell .== 1, :]
-    Nalive = size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)
+    counts_pre = count_phase_alive(cell_; phase_col=:cell_cycle)
+    alive_mask = (cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)
+    Nalive_pre = count(alive_mask)
 
-    plot_phase_proportions_alive(cell_)
+    push!(phase_times_pre, (
+        t,
+        Nalive_pre,
+        counts_pre["G0"], counts_pre["G1"], counts_pre["S"],
+        counts_pre["G2"], counts_pre["M"]
+    ))
 
-    cell_irrad = deepcopy(cell_)
-    MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_irrad, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
-    MC_loop_damage!(ion, cell_irrad, irrad_cond, gsm2_cycle)
-    X_new = cell_irrad.dam_X_total
-    
-    cell_.dam_X_dom .+= cell_irrad.dam_X_dom
-    cell_.dam_Y_dom .+= cell_irrad.dam_Y_dom
-    X_post = cell_.dam_X_total + cell_irrad.dam_X_total
-    compute_times_domain!(cell_, gsm2_cycle, nat_apo)
+    #cell_irrad = deepcopy(cell_)
+    #MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_irrad, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
+    #MC_loop_damage!(ion, cell_irrad, irrad_cond, gsm2_cycle)
+    X_new = cell_df_second.dam_X_total
+
+    cell_.dam_X_dom .+= cell_df_second.dam_X_dom
+    cell_.dam_Y_dom .+= cell_df_second.dam_Y_dom
+    X_post = cell_.dam_X_total + cell_df_second.dam_X_total
+
+    # Let the model update phases and fates after damage
+    compute_times_domain!(cell_, gsm2_cycle)
+
+    # final counts at time t (post-irradiation step)
+    counts_post = count_phase_alive(cell_; phase_col=:cell_cycle)
+    alive_mask_post = (cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)
+    Nalive_post = count(alive_mask_post)
+
+    push!(phase_times, (
+        t,
+        Nalive_post,
+        counts_post["G0"], counts_post["G1"], counts_post["S"],
+        counts_post["G2"], counts_post["M"]
+    ))
+
     cell_df_split_ = cell_[cell_.is_cell .== 1, :]
     push!(surv_prob, size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)/Ntot)
 end

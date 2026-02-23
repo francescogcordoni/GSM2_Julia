@@ -66,6 +66,8 @@
 #       Appends current state to SimulationTimeSeries (total, G0/G1/S/G2/M, stem counts).
 #?   print_initial_stats(pop) -> Nothing
 #       Prints n_alive to stdout. Lightweight pre-run header.
+#?   count_phase_alive(df; phase_col, phases) -> Dict{Symbol,Int}
+#       Returns Dict(phase=>count) for each phase in phases.
 #
 #~ Top-Level Simulation Runner
 #?   run_simulation_abm!(pop; nat_apo, terminal_time, snapshot_times, print_interval, verbose)
@@ -308,7 +310,7 @@ function compute_repair_domain(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
                                 rng::AbstractRNG          = Random.default_rng(),
                                 verbose::Bool             = false,
                                 max_events_log::Int       = 0)
-    au = 4.0
+    au = 8.0
 
     if any(>(0), Y)
         verbose && println("[compute_repair_domain] Y-lesion detected → immediate lethal.")
@@ -1039,4 +1041,52 @@ function run_simulation_abm!(cell_df::DataFrame;
     else
         return (ts, snapshots_soa)
     end
+end
+
+
+"""
+    count_phase_alive(df::DataFrame;
+                        phase_col::Symbol = :cell_cycle,
+                        phases = ["G0","G1","S","G2","M"])
+
+Return the number of **alive cells** in each cell-cycle phase.
+
+A cell is considered *alive* if:
+- `df.is_cell == 1`  (the agent is still present), and
+- `df.death_time` is not finite (i.e. the model has not assigned a death time).
+
+The function inspects the `phase_col` column (default: `:cell_cycle`)
+and counts how many alive cells are in each of the phases listed in `phases`.
+Phases that do not appear among alive cells are included with a count of `0`.
+
+# Arguments
+- `df::DataFrame`: the table containing the cell population.
+- `phase_col::Symbol`: the column containing the cell-cycle phase (`"G0"`, `"G1"`, `"S"`, `"G2"`, `"M"`).
+- `phases`: an ordered list that determines which phases are reported.
+
+# Returns
+A `Dict{String,Int}` mapping each phase to the number of alive cells. Example:
+
+```julia
+Dict("G0" => 12, "G1" => 58, "S" => 41, "G2" => 23, "M" => 6)
+```
+"""
+function count_phase_alive(df::DataFrame; phase_col::Symbol = :cell_cycle,
+                                            phases=["G0", "G1", "S", "G2", "M"])
+                                            # Alive = present AND no finite death_time
+    alive_mask = (df.is_cell .== 1) .& .!isfinite.(df.death_time)
+
+    # Initialize result dictionary
+    counts = Dict(p => 0 for p in phases)
+
+    if !isempty(df)
+        phase_vals = df[alive_mask, phase_col]
+        for p in phase_vals
+            if p in phases
+                counts[p] += 1
+            end
+        end
+    end
+
+    return counts
 end
