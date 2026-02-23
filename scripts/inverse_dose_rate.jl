@@ -296,7 +296,7 @@ df_sub = filter(:is_cell => ==(1), cell_)
 df_sub = dropmissing(df_sub, :cell_cycle)
 
 # Count per category and convert to proportions
-counts = countmap(df_sub.cell_cycle)          # Dict{String, Int}
+counts = countmap(df_sub.cell_cycle)        
 cats   = collect(keys(counts))
 vals   = collect(values(counts))
 props  = vals 
@@ -310,7 +310,7 @@ bar(
     ylabel = "Proportion (within is_cell == 1)",
     title  = "Cell cycle proportions among is_cell == 1",
     bar_width = 0.8,
-    color = "#D55E00",   # Francesco's preferred rust orange 😉
+    color = "#D55E00",  
     framestyle = :box,
     yticks = 0:0.1:1.0,
 )

@@ -1,246 +1,173 @@
+#! ============================================================================
+#! utilities_plots.jl
+#!
+#! FUNCTIONS
+#! ---------
+#~ Dose, Survival & Damage
+#?   plot_scalar_cell(cell_df, col; layer_plot) -> Plot
+#       Generic two-panel figure for any scalar column col (e.g. :dose_cell, :sp).
+#       Panel 1: density (all active cells, or grouped by energy_step when layer_plot=true).
+#       Panel 2: 3D scatter of (x,y,z) colored by col.
+#       Replaces the old plot_dose_cell and plot_survival_probability_cell.
+#?   plot_damage(cell_df; layer_plot) -> Plot
+#       Density of total X-damage per active cell.
+#       layer_plot=true: one curve per energy_step. layer_plot=false: single density + mean line.
+#
+#~ Timing
+#?   plot_times(cell_df; show_means, summary, verbose, ...) -> Plot
+#       Four-panel figure: death_time, recover_time, cycle_time densities,
+#       and total X-damage density. Active cells only. Finite values only.
+#?   plot_initial_distributions(cell_df; bins, linewidth, size, ...) -> Plot
+#       Two-panel figure: death_time and recover_time densities at initialization.
+#
+#~ Population Dynamics (SimulationTimeSeries)
+#?   plot_cell_dynamics(ts) -> Plot
+#       Total cell count vs time.
+#?   plot_phase_dynamics(ts) -> Plot
+#       G1/S/G2/M cell counts vs time.
+#?   plot_stem_dynamics(ts) -> Plot
+#       Stem vs non-stem cell counts vs time.
+#       Returns placeholder if no stem data available.
+#?   plot_simulation_results(ts) -> Plot
+#       Combined 3-panel figure: total cells + phases + stem/non-stem.
+#
+#~ Cell Cycle Distribution
+#?   plot_phase_proportions_alive(cell_df; title_text) -> Plot
+#       Color-coded bar chart of phase percentages for alive cells.
+#       Bars: G0=black, G1=green, S=orange, G2=purple, M=red.
+#?   print_phase_distribution(cell_df; label) -> Nothing
+#       Prints phase counts and percentages to stdout. No plot produced.
+#?   plot_cell_cycle_distribution(cell_df; phase_plot, half_sphere) -> Plot
+#       Two panels: phase bar chart (counts or %) + 3D scatter colored by phase.
+#       half_sphere=true filters to x≥0 for the 3D panel.
+#?   plot_cell_cycle_snapshots(snapshots; times, half_sphere) -> Plot
+#       Multi-row figure with one row per snapshot time (bar + 3D).
+#       Accepts Dict{Int, DataFrame} or Dict{Int, CellPopulation}.
+#?   animate_cell_cycle_3d(snapshots; output_file, fps, half_sphere) -> Animation
+#       GIF animation of 3D scatter colored by cell-cycle phase over time.
+#       Accepts Dict{Int, DataFrame} or Dict{Int, CellPopulation}.
+#
+#~ Utilities
+#?   create_snapshot(pop::CellPopulation) -> CellPopulation
+#       Returns a new CellPopulation containing only alive cells (is_cell==1).
+#! ============================================================================
+
+using Plots
+using Statistics
+using DataFrames
+
 """
-    plot_dose_cell(cell_df; layer_plot::Bool = false)
+    plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot=false) -> Plot
 
-Crea una figura con **due pannelli** per visualizzare la distribuzione delle dosi a livello di cellula.
+Generic two-panel figure for any per-cell scalar column `col`.
+- Panel 1: density of `col` for active cells (`is_cell==1`, positive values only).
+  `layer_plot=false` → single density + mean line.
+  `layer_plot=true`  → one curve per `energy_step`.
+- Panel 2: 3D scatter of `(x, y, z)` colored by `col` (half-sphere `x≥0`).
 
-# Pannelli
-- **Pannello sinistro (Density)**
-  - Se `layer_plot == false` → densità di `dose_cell` per **tutte le celle attive** (`is_cell == 1`), considerando solo valori positivi.
-  - Se `layer_plot == true`  → densità **raggruppata per `energy_step`**: una curva per ciascun valore distinto di `energy_step` presente tra le celle attive.
+Returns `nothing` if no active cells or no positive values.
 
-- **Pannello destro (3D scatter)**
-    - Rappresentazione 3D di `(x, y, dose_cell)` per le celle attive.
-    - I punti sono colorati in funzione di `dose_cell`.
-    - (Opzionale) filtro `x ≥ 0` per una vista “semi-sfera”.
+Required columns: `:x, :y, :z, :is_cell, col`.
+Layer mode also requires `:energy_step`.
 
-# Requisiti colonne in `cell_df`
-- Obbligatorie: `:x`, `:y`, `:dose_cell`, `:is_cell`
-- Ulteriore richiesta se `layer_plot == true`: `:energy_step`
-
-# Argomenti
-- `cell_df::DataFrame`: tabella con le informazioni per cellula.
-- `layer_plot::Bool = false`: 
-    - `false` → singola densità su tutte le celle attive.
-    - `true`  → densità suddivisa per `energy_step`.
-
-# Comportamento
-- Le densità considerano solo `dose_cell > 0`.
-- Le celle non attive (`is_cell != 1`) vengono escluse in entrambe le visualizzazioni.
-- Il pannello 3D utilizza sempre `dose_cell` come asse z e come colormap.
-
-# Ritorno
-- Restituisce l’oggetto `Plots.Plot` contenente i due pannelli affiancati.
-- Restituisce `nothing` se non sono presenti celle attive o valori positivi di `dose_cell`.
-
-# Esempi
+# Example
 ```julia
-# Densità complessiva (celle attive) + 3D scatter
-plot_dose_cell(cell_df)
-
-# Densità per energy_step + 3D scatter
-plot_dose_cell(cell_df; layer_plot=true)
+plot_scalar_cell(cell_df, :dose_cell)
+plot_scalar_cell(cell_df, :sp; layer_plot=true)
 ```
 """
-function plot_dose_cell(cell_df; layer_plot::Bool = false)
-
-    # ============================================================
-    # 0. Extract active cells and check DataFrame integrity
-    # ============================================================
-    if !all(c -> c in propertynames(cell_df), [:x, :y, :dose_cell, :is_cell])
-        error("cell_df must contain columns :x, :y, :dose_cell, :is_cell")
+function plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot::Bool = false)
+    for c in [:x, :y, :z, :is_cell, col]
+        hasproperty(cell_df, c) || error("cell_df must contain column :$c")
     end
 
     df_active = cell_df[cell_df.is_cell .== 1, :]
+    isempty(df_active) && (@warn "No active cells (is_cell == 1)."; return nothing)
 
-    if isempty(df_active)
-        @warn "No active cells found (is_cell == 1)."
-        return nothing
-    end
+    active_vals = filter(>(0), df_active[!, col])
+    isempty(active_vals) && (@warn "No positive values in column :$col."; return nothing)
 
-    # Vector of dose values for density plots
-    doses = df_active.dose_cell
-    active_doses = filter(>(0), doses)
+    col_str = string(col)
 
-    if isempty(active_doses)
-        @warn "No positive dose values available."
-        return nothing
-    end
-
-    # ============================================================
-    # PANEL 1 → Density
-    # ============================================================
-
+    # Panel 1 — density
     if !layer_plot
-        # Standard density on all active cells
-        p1 = density(
-            active_doses,
-            title = "Dose Density (all active cells)",
-            xlabel = "dose_cell",
-            ylabel = "Density",
-            linewidth = 2,
-            legend = false,
-        )
-
-        vline!(p1, [mean(active_doses)], color=:red, linestyle=:dash)
+        p1 = density(active_vals;
+                     title="$col_str Density (all active cells)",
+                     xlabel=col_str, ylabel="Density",
+                     linewidth=2, legend=false)
+        vline!(p1, [mean(active_vals)], color=:red, linestyle=:dash)
     else
-        # Grouped by energy_step
-        if !(:energy_step in propertynames(cell_df))
-            error("Grouped density requires column :energy_step")
-        end
-
-        energy_steps = sort(unique(df_active.energy_step))
-
-        p1 = plot(
-            title = "Dose Density grouped by energy_step",
-            xlabel = "dose_cell",
-            ylabel = "Density",
-            legend = :topright,
-            linewidth = 2,
-        )
-
-        for E in energy_steps
-            sub = df_active[df_active.energy_step .== E, :].dose_cell
-            sub_pos = filter(>(0), sub)
-            if isempty(sub_pos)
-                continue
-            end
+        hasproperty(cell_df, :energy_step) ||
+            error("layer_plot=true requires column :energy_step")
+        p1 = plot(title="$col_str Density grouped by energy_step",
+                  xlabel=col_str, ylabel="Density",
+                  legend=:topright, linewidth=2)
+        for E in sort(unique(df_active.energy_step))
+            sub_pos = filter(>(0), df_active[df_active.energy_step .== E, col])
+            isempty(sub_pos) && continue
             density!(p1, sub_pos, label="energy_step $E")
         end
     end
 
-    # ============================================================
-    # PANEL 2 → 3D scatter of x,y,dose_cell
-    # ============================================================
+    # Panel 2 — 3D scatter (half-sphere x≥0)
+    df3 = df_active[df_active.x .>= 0, :]
+    p2 = scatter(df3.x, df3.y, df3.z;
+                 markersize=4, markerstrokewidth=0.1,
+                 marker_z=df3[!, col], colorbar=true,
+                 xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
+                 title="3D $col_str Distribution", legend=false,
+                 aspect_ratio=:equal, seriescolor=:viridis,
+                 size=(900, 700), camera=(320, 30))
 
-    df3 = df_active[df_active.x .>= 0, :]   # half-sphere selection (optional)
-
-    p2 = scatter(
-        df3.x,
-        df3.y,
-        df3.z;
-        markersize = 4,
-        markerstrokewidth = 0.1,
-        marker_z = df3.dose_cell,
-        colorbar = true,
-        xlabel = "x (µm)",
-        ylabel = "y (µm)",
-        zlabel = "z",
-        title = "3D Dose Distribution",
-        legend = false,
-        aspect_ratio = :equal,
-        seriescolor = :viridis,
-        size = (900, 700),
-        camera = (320, 30),
-    )
-
-    # ============================================================
-    # Combine both panels into one figure
-    # ============================================================
     return plot(p1, p2, layout=(1, 2), size=(1200, 500))
 end
 
 """
-    plot_damage(cell_df; layer_plot::Bool = false)
+    plot_damage(cell_df; layer_plot=false) -> Plot
 
-Plot the distribution of X-type damage per active cell (is_cell == 1),  
-with optional grouping by `layer`.
+Density of total X-damage (`sum(dam_X_dom)`) per active cell.
+`layer_plot=true`: one density curve per `energy_step`.
+`layer_plot=false`: single density with mean line.
+Returns `nothing` if no valid data.
 
-# Modes
+Required columns: `:is_cell, :dam_X_dom`. Layer mode also requires `:energy_step`.
 
-## 1. Standard mode (`layer_plot = false`)
-- Selects active cells (is_cell == 1)
-- Extracts damage vectors from `dam_X_dom`
-- Computes total damage per cell (`sum(dam_X_dom[i])`)
-- Plots a single density distribution
-- Draws a vertical dashed red line indicating the mean
-
-## 2. Layer-grouped mode (`layer_plot = true`)
-- For each layer in `cell_df.layer`:
-    * filters active cells belonging to that layer
-    * computes total X-damage per cell
-    * plots one density curve per layer with different colors
-- Useful for comparing X-damage distributions across layers
-
-# Required columns
-- Standard mode: `:is_cell`, `:dam_X_dom`
-- Layer-grouped mode: additionally requires `:layer`
-
-# Returns
-- A Plots.jl plot object  
-- Nothing if no valid data available
+# Example
+```julia
+plot_damage(cell_df)
+plot_damage(cell_df; layer_plot=true)
+```
 """
 function plot_damage(cell_df::DataFrame; layer_plot::Bool = false)
 
-    # ============================================================
-    # MODE 1 → GROUPED DENSITY PLOT BY LAYER
-    # ============================================================
     if layer_plot
-        
-        required_cols = (:is_cell, :dam_X_dom, :layer)
-        for c in required_cols
-            if !(c in propertynames(cell_df))
-                error("Layer-grouped damage plot requires column :$c in cell_df.")
-            end
+        for c in (:is_cell, :dam_X_dom, :energy_step)
+            hasproperty(cell_df, c) ||
+                error("Layer-grouped damage plot requires column :$c")
         end
 
-        layers = unique(cell_df.layer)
-        sort!(layers)
+        plt = plot(title="X-Damage Distribution Grouped by energy_step",
+                   xlabel="Total X-Damage", ylabel="Density",
+                   legend=:topright, linewidth=2)
 
-        plt = plot(
-            title = "X-Damage Distribution Grouped by Layer",
-            xlabel = "Total X-Damage",
-            ylabel = "Density",
-            legend = :topright,
-            linewidth = 2,
-        )
+        for E in sort(unique(cell_df.energy_step))
+            idx = findall(i -> cell_df.is_cell[i] == 1 && cell_df.energy_step[i] == E,
+                          1:nrow(cell_df))
+            isempty(idx) && (@warn "energy_step $E has no active cells."; continue)
 
-        for L in layers
-            # Select active cells from this layer
-            idx = findall(i -> cell_df.is_cell[i] == 1 && cell_df.energy_step[i] == L,
-                            1:nrow(cell_df))
+            damage_vals = [sum(cell_df.dam_X_dom[i])
+                           for i in idx if cell_df.dam_X_dom[i] isa AbstractVector]
+            isempty(damage_vals) && (@warn "energy_step $E has no valid damage vectors."; continue)
 
-            if isempty(idx)
-                @warn "Layer $L has no active cells. Skipping."
-                continue
-            end
-
-            # Compute damage values
-            damage_vals = Float64[]
-            for i in idx
-                dam = cell_df.dam_X_dom[i]
-                if dam isa AbstractVector
-                    push!(damage_vals, sum(dam))
-                end
-            end
-
-            if isempty(damage_vals)
-                @warn "Layer $L has no valid damage vectors. Skipping."
-                continue
-            end
-
-            density!(
-                plt,
-                damage_vals,
-                label = "Layer $L",
-            )
+            density!(plt, damage_vals, label="energy_step $E")
         end
-
         return plt
     end
 
-    # ============================================================
-    # MODE 2 → ORIGINAL SINGLE DISTRIBUTION
-    # ============================================================
-
-    # Filter active cells
+    # Single distribution
     active_idx = findall(row -> row.is_cell == 1, eachrow(cell_df))
+    isempty(active_idx) && (@warn "No active cells (is_cell == 1)."; return nothing)
 
-    if isempty(active_idx)
-        @warn "No active cells found (is_cell == 1)."
-        return nothing
-    end
-
-    # Compute total damage per active cell
     damage_values = Float64[]
     for i in active_idx
         dam = cell_df.dam_X_dom[i]
@@ -250,1111 +177,485 @@ function plot_damage(cell_df::DataFrame; layer_plot::Bool = false)
             @warn "dam_X_dom at row $i is not a vector. Skipping."
         end
     end
+    isempty(damage_values) && (@warn "No valid damage vectors."; return nothing)
 
-    if isempty(damage_values)
-        @warn "No valid damage vectors found."
-        return nothing
-    end
-
-    # Compute mean damage
     mean_damage = mean(damage_values)
     println("Mean X-damage per active cell = $(round(mean_damage, digits=4))")
 
-    # Create density plot
-    plt = density(
-        damage_values,
-        title = "Density of X-Damage per Active Cell",
-        xlabel = "Total X-Damage",
-        ylabel = "Density",
-        linewidth = 2,
-        legend = :topright
-    )
-
-    # Add vertical mean line
+    plt = density(damage_values;
+                  title="Density of X-Damage per Active Cell",
+                  xlabel="Total X-Damage", ylabel="Density",
+                  linewidth=2, legend=:topright)
     vline!(plt, [mean_damage], color=:red, linestyle=:dash, label="Mean")
-
     return plt
 end
+
 """
-    plot_survival_probability_cell(cell_df; layer_plot::Bool = false)
+    plot_times(cell_df; show_means=true, summary=true, verbose=false, ...) -> Plot
 
-Crea una figura con **due pannelli** per visualizzare la distribuzione delle dosi a livello di cellula.
+Four-panel figure for active cells (`is_cell==1`):
+1. `death_time` density   2. `recover_time` density
+3. `cycle_time` density   4. total X-damage density
 
-# Pannelli
-- **Pannello sinistro (Density)**
-  - Se `layer_plot == false` → densità di `dose_cell` per **tutte le celle attive** (`is_cell == 1`), considerando solo valori positivi.
-  - Se `layer_plot == true`  → densità **raggruppata per `energy_step`**: una curva per ciascun valore distinto di `energy_step` presente tra le celle attive.
+Finite values only. If `dam_X_total` is absent, computes `sum(dam_X_dom[i])` on the fly.
+Missing columns produce annotated empty panels rather than errors.
 
-- **Pannello destro (3D scatter)**
-    - Rappresentazione 3D di `(x, y, dose_cell)` per le celle attive.
-    - I punti sono colorati in funzione di `dose_cell`.
-    - (Opzionale) filtro `x ≥ 0` per una vista “semi-sfera”.
-
-# Requisiti colonne in `cell_df`
-- Obbligatorie: `:x`, `:y`, `:dose_cell`, `:is_cell`
-- Ulteriore richiesta se `layer_plot == true`: `:energy_step`
-
-# Argomenti
-- `cell_df::DataFrame`: tabella con le informazioni per cellula.
-- `layer_plot::Bool = false`: 
-    - `false` → singola densità su tutte le celle attive.
-    - `true`  → densità suddivisa per `energy_step`.
-
-# Comportamento
-- Le densità considerano solo `dose_cell > 0`.
-- Le celle non attive (`is_cell != 1`) vengono escluse in entrambe le visualizzazioni.
-- Il pannello 3D utilizza sempre `dose_cell` come asse z e come colormap.
-
-# Ritorno
-- Restituisce l’oggetto `Plots.Plot` contenente i due pannelli affiancati.
-- Restituisce `nothing` se non sono presenti celle attive o valori positivi di `dose_cell`.
-
-# Esempi
+# Example
 ```julia
-# Densità complessiva (celle attive) + 3D scatter
-plot_dose_cell(cell_df)
-
-# Densità per energy_step + 3D scatter
-plot_dose_cell(cell_df; layer_plot=true)
+plot_times(cell_df; show_means=true, summary=true)
 ```
 """
-function plot_survival_probability_cell(cell_df; layer_plot::Bool = false)
-
-    # ============================================================
-    # 0. Extract active cells and check DataFrame integrity
-    # ============================================================
-    if !all(c -> c in propertynames(cell_df), [:x, :y, :dose_cell, :is_cell])
-        error("cell_df must contain columns :x, :y, :sp, :is_cell")
-    end
-
-    df_active = cell_df[cell_df.is_cell .== 1, :]
-
-    if isempty(df_active)
-        @warn "No active cells found (is_cell == 1)."
-        return nothing
-    end
-
-    # Vector of dose values for density plots
-    doses = df_active.sp
-    active_doses = filter(>(0), doses)
-
-    if isempty(active_doses)
-        @warn "No positive dose values available."
-        return nothing
-    end
-
-    # ============================================================
-    # PANEL 1 → Density
-    # ============================================================
-
-    if !layer_plot
-        # Standard density on all active cells
-        p1 = density(
-            active_doses,
-            title = "Survival probability",
-            xlabel = "survival probability",
-            ylabel = "Density",
-            linewidth = 2,
-            legend = false,
-        )
-
-        vline!(p1, [mean(active_doses)], color=:red, linestyle=:dash)
-    else
-        # Grouped by energy_step
-        if !(:energy_step in propertynames(cell_df))
-            error("Grouped density requires column :energy_step")
-        end
-
-        energy_steps = sort(unique(df_active.energy_step))
-
-        p1 = plot(
-            title = "Survival probability grouped by energy_step",
-            xlabel = "survival probability",
-            ylabel = "Density",
-            legend = :topright,
-            linewidth = 2,
-        )
-
-        for E in energy_steps
-            sub = df_active[df_active.energy_step .== E, :].sp
-            sub_pos = filter(>(0), sub)
-            if isempty(sub_pos)
-                continue
-            end
-            density!(p1, sub_pos, label="energy_step $E")
-        end
-    end
-
-    # ============================================================
-    # PANEL 2 → 3D scatter of x,y,dose_cell
-    # ============================================================
-
-    df3 = df_active[df_active.x .>= 0, :]   # half-sphere selection (optional)
-
-    p2 = scatter(
-        df3.x,
-        df3.y,
-        df3.z;
-        markersize = 4,
-        markerstrokewidth = 0.1,
-        marker_z = df3.sp,
-        colorbar = true,
-        xlabel = "x (µm)",
-        ylabel = "y (µm)",
-        zlabel = "z",
-        title = "3D Dose Distribution",
-        legend = false,
-        aspect_ratio = :equal,
-        seriescolor = :viridis,
-        size = (900, 700),
-        camera = (320, 30),
-    )
-
-    # ============================================================
-    # Combine both panels into one figure
-    # ============================================================
-    return plot(p1, p2, layout=(1, 2), size=(1200, 500))
-end
-
-using Plots
-using Statistics
-using DataFrames
-
-"""
-    plot_times(cell_df::DataFrame;
-               show_means::Bool = true,
-               summary::Bool = true,
-               verbose::Bool = false,
-               color_main = :D55E00,               # rust orange accent
-               color_alt  = :steelblue,            # secondary for variety
-               layout_tuple::Tuple{Int,Int} = (2, 2),
-               size_px::Tuple{Int,Int} = (1200, 800))
-
-Create a **four‑panel figure** showing densities of time-related outcomes and total X damage,
-using only rows where `is_cell == 1`.
-
-# Panels (top-left to bottom-right)
-1. **Death time** — density of `death_time` restricted to finite values.
-2. **Recovery time** — density of `recover_time` restricted to finite values.
-3. **Cycle time** — density of `cycle_time` restricted to finite values.
-4. **Total X damage** — density of `dam_X_total`. If `dam_X_total` does not exist,
-   but `dam_X_dom` does and contains vectors, the function computes it on the fly as
-   `sum(dam_X_dom[i])` for the selected (active) rows.
-
-# Arguments
-- `cell_df::DataFrame`: Input table.
-- `show_means::Bool = true`: If `true`, draw a vertical dashed red line at the mean for each panel (when data is available).
-- `summary::Bool = true`: If `true`, print a short summary of how many values were plotted and their means.
-- `verbose::Bool = false`: If `true`, print extra details (e.g., when columns are missing or empty).
-- `color_main`: Primary color for the first three panels (default rust orange `:D55E00`).
-- `color_alt`: Secondary color for the damage panel.
-- `layout_tuple = (2,2)`: Grid layout for subplots.
-- `size_px = (1200,800)`: Overall figure size in pixels.
-
-# Requirements in `cell_df`
-- Must contain: `:is_cell` (Int or Bool), and preferably `:death_time`, `:recover_time`, `:cycle_time`.
-- For the 4th panel, either `:dam_X_total` **or** `:dam_X_dom` (vector per row).
-
-# Returns
-- A `Plots.Plot` object with the 4 panels.  
-- Returns `nothing` if there are no active cells.
-
-# Notes
-- Values equal to `Inf` are excluded from the time densities.
-- Missing columns are handled gracefully; the corresponding panel will show a message.
-"""
 function plot_times(cell_df::DataFrame;
-                    show_means::Bool = true,
-                    summary::Bool = true,
-                    verbose::Bool = false,
-                    color_main = :D55E00,
-                    color_alt  = :steelblue,
+                    show_means::Bool     = true,
+                    summary::Bool        = true,
+                    verbose::Bool        = false,
+                    color_main           = :D55E00,
+                    color_alt            = :steelblue,
                     layout_tuple::Tuple{Int,Int} = (2, 2),
-                    size_px::Tuple{Int,Int} = (1200, 800))
+                    size_px::Tuple{Int,Int}      = (1200, 800))
 
-    # -----------------------------
-    # 0) Select active cells
-    # -----------------------------
-    if !(:is_cell in propertynames(cell_df))
-        error("plot_times: cell_df must contain :is_cell.")
-    end
+    :is_cell in propertynames(cell_df) || error("plot_times: cell_df must contain :is_cell.")
 
     df_active = cell_df[cell_df.is_cell .== 1, :]
     if nrow(df_active) == 0
-        println("[plot_times] No active cells (is_cell == 1). Nothing to plot.")
+        println("[plot_times] No active cells. Nothing to plot.")
         return nothing
     end
 
-    # Helper to extract finite values safely
-    get_finite = function(df::DataFrame, col::Symbol)
-        if !(col in propertynames(df))
-            if verbose
-                println("[plot_times] Column $(col) not found.")
-            end
-            return Float64[]
-        end
-        v = df[!, col]
-        # Convert to Float64 where possible; filter finite values only
-        vals = Float64[]
-        for x in v
-            if x isa Real
-                fx = Float64(x)
-                if isfinite(fx)
-                    push!(vals, fx)
-                end
-            end
-        end
-        return vals
+    get_finite = function(df, col)
+        !(col in propertynames(df)) && (verbose && println("[plot_times] Column $col not found."); return Float64[])
+        [Float64(x) for x in df[!, col] if x isa Real && isfinite(Float64(x))]
     end
 
-    # -----------------------------
-    # 1) Prepare vectors for panels
-    # -----------------------------
     death_vals   = get_finite(df_active, :death_time)
     recover_vals = get_finite(df_active, :recover_time)
     cycle_vals   = get_finite(df_active, :cycle_time)
 
-    # dam_X_total: prefer existing column, otherwise try computing from dam_X_dom
-    damX_vals = Float64[]
-    if :dam_X_total in propertynames(df_active)
-        damX_vals = Float64.(df_active.dam_X_total)
+    damX_vals = if :dam_X_total in propertynames(df_active)
+        [x for x in Float64.(df_active.dam_X_total) if isfinite(x)]
     elseif :dam_X_dom in propertynames(df_active)
-        # compute sum(dam_X_dom[i]) when dam_X_dom[i] is a vector
-        damX_vals = Float64[]
-        for row in eachrow(df_active)
-            v = row[:dam_X_dom]
-            if v isa AbstractVector
-                push!(damX_vals, sum(v))
-            elseif verbose
-                println("[plot_times] Row index $(row.row) has non-vector dam_X_dom; skipped.")
-            end
-        end
+        [sum(row[:dam_X_dom]) for row in eachrow(df_active)
+         if row[:dam_X_dom] isa AbstractVector]
     else
-        if verbose
-            println("[plot_times] Neither :dam_X_total nor :dam_X_dom found; damage panel will be empty.")
-        end
+        verbose && println("[plot_times] Neither :dam_X_total nor :dam_X_dom found.")
+        Float64[]
     end
 
-    # Remove non-finite from damX if any (usually all finite)
-    damX_vals = [x for x in damX_vals if isfinite(x)]
-
-    # -----------------------------
-    # 2) Create subplots
-    # -----------------------------
-    p1 = plot(title = "Death time", xlabel = "time", ylabel = "Density", legend = false)
-    if !isempty(death_vals)
-        density!(p1, death_vals; lw=2)
-        if show_means
-            vline!(p1, [mean(death_vals)]; color=:red, ls=:dash)
+    function _panel(title, xlabel, vals)
+        p = plot(title=title, xlabel=xlabel, ylabel="Density", legend=false)
+        if !isempty(vals)
+            density!(p, vals; lw=2)
+            show_means && vline!(p, [mean(vals)]; color=:red, ls=:dash)
+        else
+            annotate!(p, 0.5, 0.5, text("No finite values", 10, :gray))
         end
-    else
-        annotate!(p1, 0.5, 0.5, text("No finite values", 10, :gray))
+        return p
     end
 
-    p2 = plot(title = "Recovery time", xlabel = "time", ylabel = "Density", legend = false)
-    if !isempty(recover_vals)
-        density!(p2, recover_vals; lw=2)
-        if show_means
-            vline!(p2, [mean(recover_vals)]; color=:red, ls=:dash)
-        end
-    else
-        annotate!(p2, 0.5, 0.5, text("No finite values", 10, :gray))
-    end
+    p1 = _panel("Death time",    "time",   death_vals)
+    p2 = _panel("Recovery time", "time",   recover_vals)
+    p3 = _panel("Cycle time",    "time",   cycle_vals)
+    p4 = _panel("Total X damage","damage", damX_vals)
 
-    p3 = plot(title = "Cycle time", xlabel = "time", ylabel = "Density", legend = false)
-    if !isempty(cycle_vals)
-        density!(p3, cycle_vals; lw=2)
-        if show_means
-            vline!(p3, [mean(cycle_vals)]; color=:red, ls=:dash)
-        end
-    else
-        annotate!(p3, 0.5, 0.5, text("No finite values", 10, :gray))
-    end
-
-    p4 = plot(title = "Total X damage", xlabel = "damage", ylabel = "Density", legend = false)
-    if !isempty(damX_vals)
-        density!(p4, damX_vals; lw=2)
-        if show_means
-            vline!(p4, [mean(damX_vals)]; color=:red, ls=:dash)
-        end
-    else
-        annotate!(p4, 0.5, 0.5, text("No values", 10, :gray))
-    end
-
-    plt = plot(p1, p2, p3, p4; layout=layout_tuple, size=size_px)
-
-    # -----------------------------
-    # 3) Optional printing
-    # -----------------------------
     if summary
-        println("[plot_times] Active cells used     : $(nrow(df_active))")
-        println("[plot_times] death_time  (finite) : $(length(death_vals))",
-                isempty(death_vals) ? "" : " | mean=$(round(mean(death_vals), digits=4))")
-        println("[plot_times] recover_time(finite) : $(length(recover_vals))",
-                isempty(recover_vals) ? "" : " | mean=$(round(mean(recover_vals), digits=4))")
-        println("[plot_times] cycle_time  (finite) : $(length(cycle_vals))",
-                isempty(cycle_vals) ? "" : " | mean=$(round(mean(cycle_vals), digits=4))")
-        println("[plot_times] dam_X_total          : $(length(damX_vals))",
-                isempty(damX_vals) ? "" : " | mean=$(round(mean(damX_vals), digits=4))")
-    end
-    if verbose
-        missing_cols = Symbol[]
-        for c in (:death_time, :recover_time, :cycle_time)
-            if !(c in propertynames(cell_df))
-                push!(missing_cols, c)
-            end
-        end
-        if !(:dam_X_total in propertynames(cell_df)) && !(:dam_X_dom in propertynames(cell_df))
-            push!(missing_cols, :dam_X_total)
-            push!(missing_cols, :dam_X_dom)
-        end
-        if !isempty(missing_cols)
-            println("[plot_times] Missing columns in input: $(unique(missing_cols))")
+        for (name, vals) in [("death_time", death_vals), ("recover_time", recover_vals),
+                              ("cycle_time", cycle_vals), ("dam_X_total", damX_vals)]
+            print("[plot_times] $name : $(length(vals))")
+            isempty(vals) || print(" | mean=$(round(mean(vals), digits=4))")
+            println()
         end
     end
 
-    return plt
+    return plot(p1, p2, p3, p4; layout=layout_tuple, size=size_px)
 end
 
 """
-plot_initial_distributions(cell_df::DataFrame;
-                                bins::Int=50,
-                                linewidth::Int=2,
-                                size::Tuple{Int,Int}=(1000,400),
-                                titlefont=12,
-                                labelfont=10)
+    plot_initial_distributions(cell_df; bins=50, linewidth=2, size=(1000,400), ...) -> Plot
 
-Plot the initial distributions of **death times** and **recovery times**
-for alive cells (`is_cell == 1`). Two side-by-side density plots are produced.
+Two-panel figure: `death_time` and `recover_time` density for alive cells.
+Missing or all-Inf columns produce labeled placeholder panels.
 
-# Behavior
-- Extracts finite (non-missing, non-Inf) values from:
-    - `death_time` (always required)
-    - `recover_time` (optional column)
-- If a distribution contains no finite values, an empty placeholder plot with
-    the corresponding title is shown instead.
-- Returns a combined plot object produced by `Plots.plot(...)`.
-
-# Arguments
-- `cell_df::DataFrame`: Simulation state containing:
-    - `is_cell::Vector{Int}`
-    - `death_time::Vector{<:Real or Missing}`
-    - optional `recover_time::Vector{<:Real or Missing}`
-
-# Keyword Arguments
-- `bins::Int=50`: Number of bins used internally by the density estimation.
-- `linewidth::Int=2`: Line width for density curves.
-- `size=(1000,400)`: Dimensions of the output plot.
-- `titlefont`, `labelfont`: Font sizes for titles and labels.
-
-# Returns
-- A single `Plots.Plot` object containing the two subplots.
-
-# Notes
-- Uses `density()` from `Plots.jl`.  
-- `missing` and `Inf` values are automatically ignored.
-- If `recover_time` is absent, the recovery panel displays “Column `recover_time` not found”.
+# Example
+```julia
+plot_initial_distributions(cell_df)
+```
 """
 function plot_initial_distributions(cell_df::DataFrame;
-                                    bins::Int=50,
-                                    linewidth::Int=2,
-                                    size::Tuple{Int,Int}=(1000, 400),
-                                    titlefont=12,
-                                    labelfont=10)
-
+                                    bins::Int              = 50,
+                                    linewidth::Int         = 2,
+                                    size::Tuple{Int,Int}   = (1000, 400),
+                                    titlefont              = 12,
+                                    labelfont              = 10)
     alive_mask = cell_df.is_cell .== 1
 
-    # Helper to gather finite numeric values
-    @inline function _finite_values(vec)
-        vals = vec[alive_mask]
-        return [v for v in vals if !(ismissing(v) || isinf(v))]
-    end
+    finite_vals(vec) = [v for v in vec[alive_mask] if !(ismissing(v) || isinf(v))]
 
-    # --- Death times ---
-    finite_death = _finite_values(cell_df.death_time)
-    p_death =
-        if !isempty(finite_death)
-            density(
-                finite_death;
-                title="Death Time Distribution",
-                xlabel="Time (h)",
-                ylabel="Density",
-                label="Death Times",
-                linewidth=linewidth,
-                titlefont=titlefont,
-                guidefont=labelfont
-            )
-        else
-            plot(
-                title="No finite death times",
-                titlefont=titlefont
-            )
-        end
+    finite_death = finite_vals(cell_df.death_time)
+    p_death = isempty(finite_death) ?
+        plot(title="No finite death times", titlefont=titlefont) :
+        density(finite_death; title="Death Time Distribution",
+                xlabel="Time (h)", ylabel="Density", label="Death Times",
+                linewidth=linewidth, titlefont=titlefont, guidefont=labelfont)
 
-    # --- Recovery times (optional) ---
-    have_recover = hasproperty(cell_df, :recover_time)
+    have_recover  = hasproperty(cell_df, :recover_time)
+    finite_recover = have_recover ? finite_vals(cell_df.recover_time) : Float64[]
 
-    finite_recover =
-        have_recover ? _finite_values(cell_df.recover_time) : Float64[]
+    p_recover = !have_recover ?
+        plot(title="Column `recover_time` not found", titlefont=titlefont) :
+        isempty(finite_recover) ?
+        plot(title="No finite recovery times", titlefont=titlefont) :
+        density(finite_recover; title="Recovery Time Distribution",
+                xlabel="Time (h)", ylabel="Density", label="Recovery Times",
+                linewidth=linewidth, titlefont=titlefont, guidefont=labelfont)
 
-    p_recover =
-        if !have_recover
-            plot(title="Column `recover_time` not found", titlefont=titlefont)
-        elseif isempty(finite_recover)
-            plot(title="No finite recovery times", titlefont=titlefont)
-        else
-            density(
-                finite_recover;
-                title="Recovery Time Distribution",
-                xlabel="Time (h)",
-                ylabel="Density",
-                label="Recovery Times",
-                linewidth=linewidth,
-                titlefont=titlefont,
-                guidefont=labelfont
-            )
-        end
-
-    return plot(p_death, p_recover; layout=(1,2), size=size)
+    return plot(p_death, p_recover; layout=(1, 2), size=size)
 end
 
-"""
-create_snapshot(cell_df::DataFrame) -> DataFrame
-
-Return a **copy** of the subset of `cell_df` containing only the alive cells
-(`is_cell == 1`). This produces a standalone DataFrame representing a
-simulation snapshot at a given time point.
-
-# Arguments
-- `cell_df::DataFrame`: The full simulation state containing at least the
-    column `is_cell`, where `1` indicates an alive cell and `0` indicates an
-    empty lattice location.
-
-# Returns
-- `DataFrame`: A *new* DataFrame containing only the rows where `is_cell == 1`.
-    All columns are preserved. The result is a deep copy, so modifications to the
-  returned DataFrame do **not** affect the original `cell_df`.
-
-# Notes
-- If you need a **view** for performance instead of a copy, consider:
-    `@view cell_df[cell_df.is_cell .== 1, :]`
-    But views keep references to the original storage, so modifications reflect
-    back into `cell_df`.
-- This function guarantees isolation by using `copy(...)`.
+#! ============================================================================
+#! Population Dynamics
+#! ============================================================================
 
 """
-function create_snapshot(pop::CellPopulation)::CellPopulation
-    # Find alive cells
-    alive_indices = findall(pop.is_cell .== 1)
-    n_alive = length(alive_indices)
-    
-    # Create new population with only alive cells
-    snapshot = CellPopulation(
-        pop.is_cell[alive_indices],
-        pop.can_divide[alive_indices],
-        isnothing(pop.is_stem) ? nothing : pop.is_stem[alive_indices],
-        isnothing(pop.is_death_rad) ? nothing : pop.is_death_rad[alive_indices],
-        pop.death_time[alive_indices],
-        pop.cycle_time[alive_indices],
-        pop.recover_time[alive_indices],
-        pop.cell_cycle[alive_indices],
-        pop.number_nei[alive_indices],
-        [copy(pop.nei[i]) for i in alive_indices],
-        isnothing(pop.x) ? nothing : pop.x[alive_indices],
-        isnothing(pop.y) ? nothing : pop.y[alive_indices],
-        Int32(n_alive),
-        Int32(n_alive),
-        pop.indices[alive_indices]
-    )
-    
-    return snapshot
-end
+    plot_cell_dynamics(ts::SimulationTimeSeries) -> Plot
 
-"""
-plot_cell_dynamics(ts::SimulationTimeSeries) -> Plot
+Total cell count vs time.
 
-Plot the total number of cells over time from a `SimulationTimeSeries` object.
-
-# Arguments
-- `ts::SimulationTimeSeries`: The recorded time‑series data from a simulation.
-    Must contain:
-    - `ts.time::Vector{Float64}`
-    - `ts.total_cells::Vector{Int}`
-
-# Returns
-- A Plots.jl `Plot` object showing the total cell population dynamics.
-
-# Notes
-- This function does not display the plot; it only returns the plot object.
-    Call `display(plot_cell_dynamics(ts))` or just `plot_cell_dynamics(ts)` at the REPL.
-- If you want to save the figure, use:
-        `savefig(plot_cell_dynamics(ts), "population.png")`
+# Example
+```julia
+plot_cell_dynamics(ts)
+```
 """
 function plot_cell_dynamics(ts::SimulationTimeSeries)
-    p = plot(
-        ts.time,
-        ts.total_cells,
-        xlabel = "Time (h)",
-        ylabel = "Number of Cells",
-        title  = "Total Cell Population Dynamics",
-        label  = "Total Cells",
-        linewidth = 2,
-        legend = :best,
-        grid = true,
-        framestyle = :box,
-    )
-    return p
+    return plot(ts.time, ts.total_cells;
+                xlabel="Time (h)", ylabel="Number of Cells",
+                title="Total Cell Population Dynamics",
+                label="Total Cells", linewidth=2,
+                legend=:best, grid=true, framestyle=:box)
 end
 
 """
-plot_phase_dynamics(ts::SimulationTimeSeries) -> Plot
+    plot_phase_dynamics(ts::SimulationTimeSeries) -> Plot
 
-Plot the number of cells in each cell‑cycle phase (G1, S, G2, M) over time
-using data stored in a `SimulationTimeSeries` object.
+G1/S/G2/M cell counts vs time.
 
-# Arguments
-- `ts::SimulationTimeSeries`: The simulation time‑series data structure, expected
-    to contain:
-    - `time::Vector{Float64}`
-    - `g1_cells::Vector{Int}`
-    - `s_cells::Vector{Int}`
-    - `g2_cells::Vector{Int}`
-    - `m_cells::Vector{Int}`
-
-# Returns
-- A Plots.jl `Plot` object showing the temporal evolution of the cell‑cycle
-    phase distribution.
-
-# Notes
-- The plot is not displayed automatically; it is returned to the caller.
-    Use `display(plot_phase_dynamics(ts))` or simply call it in the REPL.
-- To save the figure:
-        `savefig(plot_phase_dynamics(ts), "phases.png")`
+# Example
+```julia
+plot_phase_dynamics(ts)
+```
 """
 function plot_phase_dynamics(ts::SimulationTimeSeries)
-    p = plot(
-        xlabel = "Time (h)",
-        ylabel = "Number of Cells",
-        title  = "Cell Cycle Phase Distribution",
-        legend = :best,
-        grid   = true,
-        framestyle = :box,
-    )
-
+    p = plot(xlabel="Time (h)", ylabel="Number of Cells",
+             title="Cell Cycle Phase Distribution",
+             legend=:best, grid=true, framestyle=:box)
     plot!(p, ts.time, ts.g1_cells, label="G1", linewidth=2)
     plot!(p, ts.time, ts.s_cells,  label="S",  linewidth=2)
     plot!(p, ts.time, ts.g2_cells, label="G2", linewidth=2)
     plot!(p, ts.time, ts.m_cells,  label="M",  linewidth=2)
-
     return p
 end
 
 """
-plot_stem_dynamics(ts::SimulationTimeSeries) -> Plot
+    plot_stem_dynamics(ts::SimulationTimeSeries) -> Plot
 
-Plot the temporal evolution of stem vs. non‑stem cell populations from a
-`SimulationTimeSeries` object.
+Stem vs non-stem cell counts vs time.
+Returns a placeholder if no stem cell data (`all zeros`).
 
-# Behavior
-- If both `ts.stem_cells` and `ts.non_stem_cells` contain only zeros, the function
-    returns a simple plot stating that no stem cell data are available.
-- Otherwise, it produces a line plot of:
-    - stem cells vs time
-    - non‑stem cells vs time
-
-# Arguments
-- `ts::SimulationTimeSeries`: Time‑series data containing:
-    - `time::Vector{Float64}`
-    - `stem_cells::Vector{Int}`
-    - `non_stem_cells::Vector{Int}`
-
-# Returns
-- A Plots.jl `Plot` object suitable for display or saving with `savefig`.
-
-# Notes
-- The plot is returned but not displayed automatically.
-- To show it in the REPL or notebook:  
-        `display(plot_stem_dynamics(ts))`
+# Example
+```julia
+plot_stem_dynamics(ts)
+```
 """
 function plot_stem_dynamics(ts::SimulationTimeSeries)
-    # No stem-cell data detected
     if all(ts.stem_cells .== 0) && all(ts.non_stem_cells .== 0)
-        return plot(
-            title = "No stem cell data available",
-            framestyle = :box,
-            grid = true
-        )
+        return plot(title="No stem cell data available", framestyle=:box, grid=true)
     end
-
-    # Build the plot
-    p = plot(
-        xlabel = "Time (h)",
-        ylabel = "Number of Cells",
-        title  = "Stem vs Non-Stem Cell Dynamics",
-        legend = :best,
-        grid   = true,
-        framestyle = :box,
-    )
-
-    plot!(p, ts.time, ts.stem_cells,
-            label = "Stem Cells", linewidth = 2)
-
-    plot!(p, ts.time, ts.non_stem_cells,
-            label = "Non-Stem Cells", linewidth = 2)
-
+    p = plot(xlabel="Time (h)", ylabel="Number of Cells",
+             title="Stem vs Non-Stem Cell Dynamics",
+             legend=:best, grid=true, framestyle=:box)
+    plot!(p, ts.time, ts.stem_cells,     label="Stem Cells",     linewidth=2)
+    plot!(p, ts.time, ts.non_stem_cells, label="Non-Stem Cells", linewidth=2)
     return p
 end
 
 """
-plot_simulation_results(ts::SimulationTimeSeries) -> Plot
+    plot_simulation_results(ts::SimulationTimeSeries) -> Plot
 
-Generate a composite figure with three vertically stacked panels summarizing
-the results of a full ABM simulation. The layout includes:
+Combined 3-panel figure: total cells + phases + stem/non-stem (3×1 layout).
 
-1. **Total cell population dynamics**  
-    (via `plot_cell_dynamics(ts)`)
-
-2. **Cell‑cycle phase distribution**  
-    (via `plot_phase_dynamics(ts)`)
-
-3. **Stem vs non‑stem population dynamics**  
-    (via `plot_stem_dynamics(ts)`)
-
-# Arguments
-- `ts::SimulationTimeSeries`: The simulation time‑series object returned by
-    `run_ab_simulation!`, containing population counts, phase counts, and
-    optionally stem/non‑stem counts.
-
-# Returns
-- A Plots.jl `Plot` object with a 3×1 layout consisting of:
-    - total cells  
-    - phase dynamics  
-    - stem vs non‑stem dynamics  
-
-# Notes
-- The plot is *returned* but not displayed automatically.
-    To display it:  
-        `display(plot_simulation_results(ts))`
-- To save the entire figure:  
-        `savefig(plot_simulation_results(ts), "simulation_summary.png")`
+# Example
+```julia
+plot_simulation_results(ts)
+savefig(plot_simulation_results(ts), "summary.png")
+```
 """
 function plot_simulation_results(ts::SimulationTimeSeries)
-    p1 = plot_cell_dynamics(ts)
-    p2 = plot_phase_dynamics(ts)
-    p3 = plot_stem_dynamics(ts)
-
-    return plot(
-        p1, p2, p3;
-        layout = (3, 1),
-        size   = (1000, 1200),
-    )
+    return plot(plot_cell_dynamics(ts), plot_phase_dynamics(ts), plot_stem_dynamics(ts);
+                layout=(3, 1), size=(1000, 1200))
 end
 
+#! ============================================================================
+#! Cell Cycle Distribution
+#! ============================================================================
+
 """
-Plot cell cycle phase proportions among alive cells only (is_cell == 1)
-Can be used with DataFrame or SimulationTimeSeries
+    plot_phase_proportions_alive(cell_df; title_text="Cell Cycle Distribution (Alive Cells)")
+        -> Plot
+
+Color-coded bar chart of phase percentages for alive cells (`is_cell==1`).
+G0=black, G1=green, S=orange, G2=purple, M=red.
+Percentage labels shown on bars >2%.
+
+# Example
+```julia
+plot_phase_proportions_alive(cell_df; title_text="Final Proportions")
+```
 """
-function plot_phase_proportions_alive(cell_df::DataFrame; title_text::String="Cell Cycle Distribution (Alive Cells)")
-    # Filter to alive cells only
-    alive_mask = cell_df.is_cell .== 1
-    alive_phases = cell_df.cell_cycle[alive_mask]
-    
-    if isempty(alive_phases)
-        return plot(title="No alive cells", grid=false, showaxis=false)
+function plot_phase_proportions_alive(cell_df::DataFrame;
+                                      title_text::String = "Cell Cycle Distribution (Alive Cells)")
+    alive_phases = cell_df.cell_cycle[cell_df.is_cell .== 1]
+    isempty(alive_phases) && return plot(title="No alive cells", grid=false, showaxis=false)
+
+    phases     = ["G0", "G1", "S", "G2", "M"]
+    ph_colors  = [:black, :green, :orange, :purple, :red]
+    counts     = Dict(p => count(==(String(p)), alive_phases) for p in phases)
+    total      = sum(values(counts))
+    percents   = [100.0 * counts[p] / total for p in phases]
+
+    p = bar(phases, percents;
+            xlabel="Cell Cycle Phase", ylabel="Percentage (%)",
+            title="$title_text\n(n=$total alive cells)",
+            legend=false, color=ph_colors, alpha=0.7, ylims=(0, 100))
+
+    for (i, pct) in enumerate(percents)
+        pct > 2 && annotate!(i, pct + 2, text("$(round(pct, digits=1))%", 8))
     end
-    
-    # Count phases
-    phase_counts = Dict(
-        "G0" => count(==(String("G0")), alive_phases),
-        "G1" => count(==(String("G1")), alive_phases),
-        "S"  => count(==(String("S")), alive_phases),
-        "G2" => count(==(String("G2")), alive_phases),
-        "M"  => count(==(String("M")), alive_phases)
-    )
-    
-    total = sum(values(phase_counts))
-    phase_percents = Dict(k => 100.0 * v / total for (k, v) in phase_counts)
-    
-    # Create bar plot
-    phases = ["G0", "G1", "S", "G2", "M"]
-    percents = [phase_percents[p] for p in phases]
-    
-    p = bar(phases, percents,
-            xlabel="Cell Cycle Phase",
-            ylabel="Percentage (%)",
-            title="$title_text\n(n=$(total) alive cells)",
-            legend=false,
-            color=[:gray :green :orange :purple :red],
-            alpha=0.7,
-            ylims=(0, 100))
-    
-    # Add percentage labels on bars
-    for (i, (phase, pct)) in enumerate(zip(phases, percents))
-        if pct > 2  # Only show label if bar is tall enough
-            annotate!(i, pct + 2, text("$(round(pct, digits=1))%", 8))
-        end
-    end
-    
     return p
 end
 
 """
-Plot cell cycle proportions over time from SimulationTimeSeries (alive cells only)
-"""
-function plot_phase_proportions_timeseries(ts::SimulationTimeSeries; 
-                                            title_text::String="Cell Cycle Distribution Over Time")
-    # Calculate proportions (already only counts alive cells)
-    total = ts.g0_cells .+ ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells
-    
-    # Handle division by zero
-    g0_prop = ifelse.(total .> 0, 100 .* ts.g0_cells ./ total, 0.0)
-    g1_prop = ifelse.(total .> 0, 100 .* ts.g1_cells ./ total, 0.0)
-    s_prop = ifelse.(total .> 0, 100 .* ts.s_cells ./ total, 0.0)
-    g2_prop = ifelse.(total .> 0, 100 .* ts.g2_cells ./ total, 0.0)
-    m_prop = ifelse.(total .> 0, 100 .* ts.m_cells ./ total, 0.0)
-    
-    p = plot(xlabel="Time (h)",
-                ylabel="Percentage (%)",
-                title=title_text,
-                legend=:best,
-                ylims=(0, 100))
-    
-    plot!(p, ts.time, g0_prop, label="G0", linewidth=2, color=:gray)
-    plot!(p, ts.time, g1_prop, label="G1", linewidth=2, color=:green)
-    plot!(p, ts.time, s_prop, label="S", linewidth=2, color=:orange)
-    plot!(p, ts.time, g2_prop, label="G2", linewidth=2, color=:purple)
-    plot!(p, ts.time, m_prop, label="M", linewidth=2, color=:red)
-    
-    return p
-end
+    print_phase_distribution(cell_df; label="Current") -> Nothing
 
-"""
-Plot side-by-side comparison of initial vs final phase distribution
-"""
-function plot_phase_comparison_before_after(cell_df_initial::DataFrame, 
-                                                cell_df_final::DataFrame)
-    p1 = plot_phase_proportions_alive(cell_df_initial, title_text="Initial Distribution")
-    p2 = plot_phase_proportions_alive(cell_df_final, title_text="Final Distribution")
-    
-    return plot(p1, p2, layout=(1, 2), size=(1000, 400))
-end
+Prints phase counts and percentages to stdout for alive cells (`is_cell==1`).
+Also prints cycling (G1+S+G2+M) vs quiescent (G0) summary.
 
+# Example
+```julia
+print_phase_distribution(cell_df; label="t = 12h")
+```
 """
-Print phase distribution statistics for alive cells
-"""
-function print_phase_distribution(cell_df::DataFrame; label::String="Current")
-    alive_mask = cell_df.is_cell .== 1
-    alive_phases = cell_df.cell_cycle[alive_mask]
-    
-    if isempty(alive_phases)
-        println("[$label] No alive cells")
-        return
-    end
-    
-    phase_counts = Dict(
-        "G0" => count(==(String("G0")), alive_phases),
-        "G1" => count(==(String("G1")), alive_phases),
-        "S"  => count(==(String("S")), alive_phases),
-        "G2" => count(==(String("G2")), alive_phases),
-        "M"  => count(==(String("M")), alive_phases)
-    )
-    
-    total = sum(values(phase_counts))
-    
+function print_phase_distribution(cell_df::DataFrame; label::String = "Current")
+    alive_phases = cell_df.cell_cycle[cell_df.is_cell .== 1]
+    isempty(alive_phases) && (println("[$label] No alive cells"); return)
+
+    phases  = ["G0", "G1", "S", "G2", "M"]
+    counts  = Dict(p => count(==(String(p)), alive_phases) for p in phases)
+    total   = sum(values(counts))
+
     println("\n[$label] Phase Distribution (n=$total alive cells):")
-    for phase in ["G0", "G1", "S", "G2", "M"]
-        count = phase_counts[phase]
-        pct = 100.0 * count / total
-        println("  $phase: $count ($(round(pct, digits=1))%)")
+    for p in phases
+        pct = 100.0 * counts[p] / total
+        println("  $p: $(counts[p]) ($(round(pct, digits=1))%)")
     end
-    
-    # Cycling vs quiescent
-    cycling = phase_counts["G1"] + phase_counts["S"] + phase_counts["G2"] + phase_counts["M"]
-    quiescent = phase_counts["G0"]
-    println("  Cycling: $cycling ($(round(100.0*cycling/total, digits=1))%)")
+
+    cycling   = counts["G1"] + counts["S"] + counts["G2"] + counts["M"]
+    quiescent = counts["G0"]
+    println("  Cycling:   $cycling ($(round(100.0*cycling/total, digits=1))%)")
     println("  Quiescent: $quiescent ($(round(100.0*quiescent/total, digits=1))%)")
 end
 
 """
-Plot cell cycle distribution and 3D spatial distribution colored by phase.
-Similar structure to plot_dose_cell but for cell cycle analysis.
+    plot_cell_cycle_distribution(cell_df; phase_plot=false, half_sphere=true) -> Plot
 
-Arguments:
-- cell_df: DataFrame with columns :x, :y, :z, :cell_cycle, :is_cell
-- phase_plot: if true, shows distribution for each phase separately
-- half_sphere: if true, only plots cells with x >= 0 (hemisphere cut)
+Two panels: phase bar chart (counts or percentages when `phase_plot=true`)
++ 3D scatter colored by phase.
+`half_sphere=true` restricts 3D panel to `x ≥ 0`.
+Returns `nothing` if no active cells.
+
+Required columns: `:x, :y, :z, :cell_cycle, :is_cell`.
+
+# Example
+```julia
+plot_cell_cycle_distribution(cell_df; phase_plot=false, half_sphere=true)
+```
 """
 function plot_cell_cycle_distribution(cell_df; phase_plot::Bool = false, half_sphere::Bool = true)
-
-    # ============================================================
-    # 0. Extract active cells and check DataFrame integrity
-    # ============================================================
     required_cols = [:x, :y, :z, :cell_cycle, :is_cell]
-    if !all(c -> c in propertynames(cell_df), required_cols)
-        error("cell_df must contain columns: ", join(string.(required_cols), ", "))
-    end
+    all(c -> c in propertynames(cell_df), required_cols) ||
+        error("cell_df must contain: ", join(string.(required_cols), ", "))
 
     df_active = cell_df[cell_df.is_cell .== 1, :]
+    isempty(df_active) && (@warn "No active cells."; return nothing)
 
-    if isempty(df_active)
-        @warn "No active cells found (is_cell == 1)."
-        return nothing
-    end
-
-    # ============================================================
-    # PANEL 1 → Cell Cycle Distribution (Bar Chart)
-    # ============================================================
-
-    phases = ["G0", "G1", "S", "G2", "M"]
-    phase_colors = Dict(
-        "G0" => :black,
-        "G1" => :green,
-        "S"  => :orange,
-        "G2" => :purple,
-        "M"  => :red
-    )
+    phases    = ["G0", "G1", "S", "G2", "M"]
+    ph_colors = Dict("G0"=>:black, "G1"=>:green, "S"=>:orange, "G2"=>:purple, "M"=>:red)
+    counts    = Dict(p => count(==(String(p)), df_active.cell_cycle) for p in phases)
+    total     = sum(values(counts))
 
     if !phase_plot
-        # Standard bar chart with counts
-        phase_counts = Dict(p => count(==(String(p)), df_active.cell_cycle) for p in phases)
-        total = sum(values(phase_counts))
-        
-        counts = [phase_counts[p] for p in phases]
-        colors = [phase_colors[p] for p in phases]
-        
-        p1 = bar(
-            phases,
-            counts,
-            title = "Cell Cycle Distribution\n(n=$total active cells)",
-            xlabel = "Cell Cycle Phase",
-            ylabel = "Number of Cells",
-            legend = false,
-            color = colors,
-            alpha = 0.7,
-            bar_width = 0.6
-        )
-        
-        # Add percentage labels on bars
-        for (i, (phase, count)) in enumerate(zip(phases, counts))
-            pct = 100.0 * count / total
-            if count > 0
-                annotate!(p1, [(i, count + total*0.02, 
-                            text("$(round(pct, digits=1))%", 8, :center))])
-            end
+        vals = [counts[p] for p in phases]
+        p1 = bar(phases, vals;
+                 title="Cell Cycle Distribution\n(n=$total active cells)",
+                 xlabel="Cell Cycle Phase", ylabel="Number of Cells",
+                 legend=false, color=[ph_colors[p] for p in phases],
+                 alpha=0.7, bar_width=0.6)
+        for (i, (ph, c)) in enumerate(zip(phases, vals))
+            c > 0 && annotate!(p1, [(i, c + total*0.02,
+                                    text("$(round(100.0*c/total, digits=1))%", 8, :center))])
         end
-        
     else
-        # Percentage version
-        phase_counts = Dict(p => count(==(String(p)), df_active.cell_cycle) for p in phases)
-        total = sum(values(phase_counts))
-        
-        percents = [100.0 * phase_counts[p] / total for p in phases]
-        colors = [phase_colors[p] for p in phases]
-        
-        p1 = bar(
-            phases,
-            percents,
-            title = "Cell Cycle Distribution (%)\n(n=$total active cells)",
-            xlabel = "Cell Cycle Phase",
-            ylabel = "Percentage (%)",
-            legend = false,
-            color = colors,
-            alpha = 0.7,
-            bar_width = 0.6,
-            ylims = (0, 100)
-        )
-        
-        # Add value labels
-        for (i, (phase, pct)) in enumerate(zip(phases, percents))
-            if pct > 2
-                annotate!(p1, [(i, pct + 2, 
-                            text("$(round(pct, digits=1))%", 8, :center))])
-            end
+        percents = [100.0 * counts[p] / total for p in phases]
+        p1 = bar(phases, percents;
+                 title="Cell Cycle Distribution (%)\n(n=$total active cells)",
+                 xlabel="Cell Cycle Phase", ylabel="Percentage (%)",
+                 legend=false, color=[ph_colors[p] for p in phases],
+                 alpha=0.7, bar_width=0.6, ylims=(0, 100))
+        for (i, pct) in enumerate(percents)
+            pct > 2 && annotate!(p1, [(i, pct+2,
+                                      text("$(round(pct, digits=1))%", 8, :center))])
         end
     end
 
-    # ============================================================
-    # PANEL 2 → 3D scatter colored by cell cycle phase
-    # ============================================================
-
-    # Optional hemisphere cut
     df3 = half_sphere ? df_active[df_active.x .>= 0, :] : df_active
+    isempty(df3) && (@warn "No cells in selected region for 3D plot."; return p1)
 
-    if isempty(df3)
-        @warn "No cells in selected region for 3D plot."
-        return p1
+    phase_to_num  = Dict("G0"=>0, "G1"=>1, "S"=>2, "G2"=>3, "M"=>4)
+    color_values  = [get(phase_to_num, String(p), -1) for p in df3.cell_cycle]
+    custom_colors = [RGB(0.,0.,0.), RGB(0.,0.8,0.), RGB(1.,0.65,0.),
+                     RGB(0.6,0.,0.8), RGB(1.,0.,0.)]
+
+    p2 = scatter(df3.x, df3.y, df3.z;
+                 markersize=4, markerstrokewidth=0.1,
+                 marker_z=color_values, colorbar=false,
+                 xlabel="x (µm)", ylabel="y (µm)", zlabel="z (µm)",
+                 title="3D Cell Cycle Distribution" * (half_sphere ? " (x ≥ 0)" : ""),
+                 legend=:topright, aspect_ratio=:equal,
+                 seriescolor=cgrad(custom_colors, 5, categorical=true),
+                 label="", size=(900, 700), camera=(320, 30), clims=(-0.5, 4.5))
+
+    for phase in phases
+        n = count(==(String(phase)), df3.cell_cycle)
+        scatter!(p2, Float64[], Float64[], Float64[];
+                 markersize=6, color=ph_colors[phase], label="$phase (n=$n)")
     end
 
-    # Map phases to numeric values for coloring
-    phase_to_num = Dict("G0" => 0, "G1" => 1, "S" => 2, "G2" => 3, "M" => 4)
-    color_values = [get(phase_to_num, String(p), -1) for p in df3.cell_cycle]
-    
-    # Create custom colormap matching phase colors
-    custom_colors = [
-        RGB(0., 0., 0.),      # G0 - black
-        RGB(0.0, 0.8, 0.0),   # G1 - green
-        RGB(1.0, 0.65, 0.0),  # S - orange
-        RGB(0.6, 0.0, 0.8),   # G2 - purple
-        RGB(1.0, 0.0, 0.0)    # M - red
-    ]
-    
-    p2 = scatter(
-        df3.x,
-        df3.y,
-        df3.z;
-        markersize = 4,
-        markerstrokewidth = 0.1,
-        marker_z = color_values,
-        colorbar = false,
-        xlabel = "x (µm)",
-        ylabel = "y (µm)",
-        zlabel = "z (µm)",
-        title = "3D Cell Cycle Distribution" * (half_sphere ? " (x ≥ 0)" : ""),
-        legend = :topright,
-        aspect_ratio = :equal,
-        seriescolor = cgrad(custom_colors, 5, categorical=true),
-        label = "",  # ← FIX: Disable default label for main scatter
-        size = (900, 700),
-        camera = (320, 30),
-        clims = (-0.5, 4.5)
-    )
-    
-    # Add manual legend for phases
-    for (i, phase) in enumerate(phases)
-        count_phase = count(==(String(phase)), df3.cell_cycle)
-        scatter!(p2, Float64[], Float64[], Float64[],  # ← FIX: Use Float64[] instead of []
-                markersize=6, 
-                color=phase_colors[phase],
-                label="$phase (n=$count_phase)")
-    end
-
-    # ============================================================
-    # Combine both panels into one figure
-    # ============================================================
     return plot(p1, p2, layout=(1, 2), size=(1400, 600))
 end
 
 """
-Plot cell cycle distribution over multiple snapshots in time
+    plot_cell_cycle_snapshots(snapshots; times=nothing, half_sphere=true) -> Plot
+
+Multi-row figure with one row per snapshot time (phase bar + 3D scatter).
+`times=nothing` plots all keys in sorted order.
+Accepts `Dict{Int, DataFrame}` or `Dict{Int, CellPopulation}`.
+
+# Example
+```julia
+plot_cell_cycle_snapshots(snapshots; times=[0, 6, 12, 24])
+```
 """
-function plot_cell_cycle_snapshots(snapshots::Dict; 
-                                    times::Union{Nothing, Vector{Int}}=nothing,
-                                    half_sphere::Bool=true)
-    
-    plot_times = isnothing(times) ? sort(collect(keys(snapshots))) : times
-    
-    if length(plot_times) < 1
-        @warn "No snapshots to plot"
-        return nothing
-    end
-    
+function plot_cell_cycle_snapshots(snapshots::Dict;
+                                   times::Union{Nothing, Vector{Int}} = nothing,
+                                   half_sphere::Bool = true)
+    plot_times_keys = isnothing(times) ? sort(collect(keys(snapshots))) : times
+    isempty(plot_times_keys) && (@warn "No snapshots to plot"; return nothing)
+
     plots = []
-    
-    for t in plot_times
-        if !haskey(snapshots, t)
-            @warn "Snapshot at t=$t not found"
-            continue
-        end
-        
-        snapshot = snapshots[t]
-        
-        # Handle both DataFrame and CellPopulation
-        if isa(snapshot, CellPopulation)
-            cell_df = to_dataframe(snapshot, alive_only=true)
-        else
-            cell_df = snapshot
-        end
-        
-        p = plot_cell_cycle_distribution(cell_df, 
-                                            phase_plot=false, 
-                                            half_sphere=half_sphere)
-        
-        # Update title to include time
+    for t in plot_times_keys
+        haskey(snapshots, t) || (@warn "Snapshot at t=$t not found"; continue)
+
+        cell_df = isa(snapshots[t], CellPopulation) ?
+            to_dataframe(snapshots[t], alive_only=true) : snapshots[t]
+
+        p = plot_cell_cycle_distribution(cell_df; phase_plot=false, half_sphere=half_sphere)
         plot!(p[1], title="Cell Cycle at t=$(t)h\n(n=$(nrow(cell_df)) cells)")
         plot!(p[2], title="3D Distribution t=$(t)h" * (half_sphere ? " (x ≥ 0)" : ""))
-        
         push!(plots, p)
     end
-    
-    if isempty(plots)
-        return plot(title="No valid plots created")
-    end
-    
-    # Stack vertically
-    return plot(plots..., layout=(length(plots), 1), size=(1400, 600*length(plots)))
+
+    isempty(plots) && return plot(title="No valid plots created")
+    return plot(plots...; layout=(length(plots), 1), size=(1400, 600*length(plots)))
 end
 
 """
-Create animation of cell cycle distribution in 3D over time
+    animate_cell_cycle_3d(snapshots; output_file="cell_cycle_3d.gif", fps=2, half_sphere=true)
+        -> Animation
+
+GIF animation of 3D scatter colored by cell-cycle phase (G0→gray, G1→green,
+S→orange, G2→purple, M→red). One frame per snapshot. Requires ≥ 2 snapshots.
+Accepts `Dict{Int, DataFrame}` or `Dict{Int, CellPopulation}`.
+
+# Example
+```julia
+anim = animate_cell_cycle_3d(snapshots; output_file="cc.gif", fps=3)
+```
 """
-function animate_cell_cycle_3d(snapshots::Dict; 
-                                output_file::String="cell_cycle_3d.gif",
-                                fps::Int=2,
-                                half_sphere::Bool=true)
-    
+function animate_cell_cycle_3d(snapshots::Dict;
+                                output_file::String = "cell_cycle_3d.gif",
+                                fps::Int            = 2,
+                                half_sphere::Bool   = true)
     times = sort(collect(keys(snapshots)))
-    
-    if length(times) < 2
-        @warn "Need at least 2 snapshots for animation"
-        return nothing
-    end
-    
-    phase_colors = Dict(
-        "G0" => :gray, "G1" => :green, "S" => :orange, 
-        "G2" => :purple, "M" => :red
-    )
-    
-    phase_to_num = Dict("G0" => 0, "G1" => 1, "S" => 2, "G2" => 3, "M" => 4)
-    custom_colors = [
-        RGB(0.5, 0.5, 0.5), RGB(0.0, 0.8, 0.0), RGB(1.0, 0.65, 0.0),
-        RGB(0.6, 0.0, 0.8), RGB(1.0, 0.0, 0.0)
-    ]
-    
+    length(times) < 2 && (@warn "Need at least 2 snapshots for animation"; return nothing)
+
+    ph_colors    = Dict("G0"=>:gray, "G1"=>:green, "S"=>:orange, "G2"=>:purple, "M"=>:red)
+    phase_to_num = Dict("G0"=>0, "G1"=>1, "S"=>2, "G2"=>3, "M"=>4)
+    custom_colors = [RGB(0.5,0.5,0.5), RGB(0.,0.8,0.), RGB(1.,0.65,0.),
+                     RGB(0.6,0.,0.8),  RGB(1.,0.,0.)]
+
     anim = @animate for t in times
-        snapshot = snapshots[t]
-        
-        # Handle both types
-        if isa(snapshot, CellPopulation)
-            cell_df = to_dataframe(snapshot, alive_only=true)
-        else
-            cell_df = snapshot[snapshot.is_cell .== 1, :]
-        end
-        
+        cell_df = isa(snapshots[t], CellPopulation) ?
+            to_dataframe(snapshots[t], alive_only=true) :
+            snapshots[t][snapshots[t].is_cell .== 1, :]
+
         df3 = half_sphere ? cell_df[cell_df.x .>= 0, :] : cell_df
-        
         color_values = [get(phase_to_num, String(p), -1) for p in df3.cell_cycle]
-        
-        p = scatter(
-            df3.x, df3.y, df3.z;
-            markersize = 4,
-            markerstrokewidth = 0.1,
-            marker_z = color_values,
-            colorbar = false,
-            xlabel = "x (µm)",
-            ylabel = "y (µm)",
-            zlabel = "z (µm)",
-            title = "Cell Cycle Distribution at t=$(t)h (n=$(nrow(df3)))",
-            legend = :topright,
-            aspect_ratio = :equal,
-            seriescolor = cgrad(custom_colors, 5, categorical=true),
-            size = (900, 700),
-            camera = (320, 30),
-            clims = (-0.5, 4.5)
-        )
-        
-        # Add legend
-        phases = ["G0", "G1", "S", "G2", "M"]
-        for phase in phases
-            count_phase = count(==(String(phase)), df3.cell_cycle)
-            scatter!(p, [], [], [], 
-                    markersize=6, 
-                    color=phase_colors[phase],
-                    label="$phase (n=$count_phase)")
+
+        p = scatter(df3.x, df3.y, df3.z;
+                    markersize=4, markerstrokewidth=0.1,
+                    marker_z=color_values, colorbar=false,
+                    xlabel="x (µm)", ylabel="y (µm)", zlabel="z (µm)",
+                    title="Cell Cycle at t=$(t)h (n=$(nrow(df3)))",
+                    legend=:topright, aspect_ratio=:equal,
+                    seriescolor=cgrad(custom_colors, 5, categorical=true),
+                    size=(900, 700), camera=(320, 30), clims=(-0.5, 4.5))
+
+        for phase in ["G0", "G1", "S", "G2", "M"]
+            n = count(==(String(phase)), df3.cell_cycle)
+            scatter!(p, [], [], []; markersize=6, color=ph_colors[phase], label="$phase (n=$n)")
         end
     end
-    
+
     gif(anim, output_file, fps=fps)
     println("Animation saved to: $output_file")
-    
     return anim
+end
+
+#! ============================================================================
+#! Snapshot Utility
+#! ============================================================================
+
+"""
+    create_snapshot(pop::CellPopulation) -> CellPopulation
+
+Returns a new `CellPopulation` containing only alive cells (`is_cell==1`).
+All fields are copied; modifications to the result do not affect the original.
+
+# Example
+```julia
+snap = create_snapshot(pop)
+```
+"""
+function create_snapshot(pop::CellPopulation)::CellPopulation
+    alive = findall(pop.is_cell .== 1)
+    n     = length(alive)
+    return CellPopulation(
+        pop.is_cell[alive], pop.can_divide[alive],
+        isnothing(pop.is_stem)      ? nothing : pop.is_stem[alive],
+        isnothing(pop.is_death_rad) ? nothing : pop.is_death_rad[alive],
+        pop.death_time[alive], pop.cycle_time[alive], pop.recover_time[alive],
+        pop.cell_cycle[alive], pop.number_nei[alive],
+        [copy(pop.nei[i]) for i in alive],
+        isnothing(pop.x) ? nothing : pop.x[alive],
+        isnothing(pop.y) ? nothing : pop.y[alive],
+        Int32(n), Int32(n), pop.indices[alive]
+    )
 end
