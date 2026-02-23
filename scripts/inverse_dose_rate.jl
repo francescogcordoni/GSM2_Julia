@@ -248,16 +248,21 @@ MC_loop_damage!(ion, cell_irrad, irrad_cond, gsm2_cycle)
 cell_df_istant.dam_X_dom .+= cell_irrad.dam_X_dom
 cell_df_istant.dam_Y_dom .+= cell_irrad.dam_Y_dom
 compute_cell_survival_GSM2!(cell_df_istant, gsm2_cycle)
+compute_cell_survival_GSM2!(cell_irrad, gsm2_cycle)
+
 mean(cell_df_istant[cell_df_istant.is_cell .== 1, :sp])
+mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])
+mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])^2
+
 nat_apo = 10^-10
-compute_times_domain!(cell_df_istant, gsm2_cycle, nat_apo)
+compute_times_domain!(cell_df_istant, gsm2_cycle)
 cell_df_istant_ = cell_df_istant[cell_df_istant.is_cell .== 1, :]
 push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/Ntot)
 
 times_split = [0.05, 0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0, 72.0, 96.0]
 for t in times_split 
     println(t)
-    cell_ = deepcopy(cell_df_original)
+    cell_ = deepcopy(cell_df_copy)
     X_prev = cell_.dam_X_total
     compute_times_domain!(cell_, gsm2_cycle, nat_apo, terminal_time = t)
     cell_.is_cell[isfinite.(cell_.death_time)] .= 0
