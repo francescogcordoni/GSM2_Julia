@@ -26,19 +26,18 @@ Each step is handled by a dedicated utility module. The pipeline supports:
 
 ```
 src/
-  load_utilities.jl           — include all utility files
-utilities/
-  utilities_structures.jl     — core structs (Cell, Ion, Irrad, AT, GSM2, ...)
-  utilities_radiation.jl      — hit generation (box, circle, halo)
-  utilities_AT_computation.jl — amorphous track structure, stopping power, LET
-  utilities_GSM2.jl           — GSM2 damage model, OER, domain survival
-  utilities_env.jl            — environment setup (GSM2, ion/irrad, cell lattice)
-  utilities_MC_dose.jl        — CPU Monte Carlo dose kernels
-  utilities_MC_gpu.jl         — GPU-accelerated dose (CUDA), auto CPU/GPU dispatch
-  utilities_dose_computation.jl — radial dose integration, track geometry
-  utilities_plots.jl          — dose, damage, survival, cell-cycle plots
-  utilities_ABM.jl            — ABM event loop, repair simulation, CellPopulation
-  utilities_ABM_plots.jl      — population dynamics, phase plots, dashboards
+  utilities_structures.jl          — core structs (Cell, Ion, Irrad, AT, GSM2, ...)
+  utilities_general.jl             — general-purpose helpers and shared utilities
+  utilities_radiation.jl           — hit generation (box, circle, halo)
+  utilities_GSM2.jl                — GSM2 damage model, OER, domain survival
+  utilities_biology.jl             — cell biology: cycle, division, apoptosis logic
+  utilities_env.jl                 — environment setup (GSM2, ion/irrad, cell lattice)
+  utilities_dose_computation.jl    — CPU Monte Carlo dose kernels
+  utilities_dose_computation_GPU.jl — GPU-accelerated dose (CUDA), auto CPU/GPU dispatch
+  utilities_AT_computation.jl      — amorphous track structure, stopping power, LET
+  utilities_plot.jl                — dose, damage, survival, cell-cycle plots
+  utilities_abm.jl                 — ABM event loop, repair simulation, CellPopulation
+  utilities_plot_abm.jl            — population dynamics, phase plots, dashboards
 ```
 
 ---
@@ -63,7 +62,19 @@ using CUDA                  # optional — CPU fallback available
 ### 1. Setup
 
 ```julia
-include(joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
+# load all utilities (adjust path to match your project layout)
+include(joinpath(@__DIR__, "..", "src", "utilities_structures.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_general.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_radiation.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_GSM2.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_biology.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_env.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_dose_computation.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_dose_computation_GPU.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_AT_computation.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_plot.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_abm.jl"))
+include(joinpath(@__DIR__, "..", "src", "utilities_plot_abm.jl"))
 
 # Stopping power table
 sp = load_stopping_power()
