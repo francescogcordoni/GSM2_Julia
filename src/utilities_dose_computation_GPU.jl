@@ -358,10 +358,26 @@ function MC_dose_fast!(
 
         else
             println("• [CPU] TSC mode")
-            MC_loop_ions_domain_tsc_fast!(
+            cell_df_is = filter(row -> row.is_cell == 1, cell_df_copy)
+            nrow(cell_df_is) == 0 && (@warn "No cells with is_cell = 1 → skipping."; return)
+
+            grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
+                                    :index => first => :representative_index)
+            rep_indices_set = Set(grouped_df.representative_index)
+            println("  → Found $(length(rep_indices_set)) representative cells")
+
+            cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+            cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+            at_single        = filter(row -> row.index in rep_indices_set, at)
+
+            mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+
+            MC_loop_ions_domain_tsc_matrix!(
                 Npar, x_cb, y_cb, [irrad_cond[1]], gsm2,
-                sx, sy, at_single, R_beam, type_AT, ion
+                mat_x, mat_y, mat_at, R_beam, type_AT, ion
             )
+
+            matrix_to_dataframe!(at_single, mat_at)
         end
 
         MC_loop_copy_dose_domain_fast!(cell_df_copy, at_single, at)
@@ -370,18 +386,17 @@ function MC_dose_fast!(
     # LAYERED (non-TSC) branch
     # ─────────────────────────────────────────────────────────────────────────
     else
+        if use_gpu
+            Np = rand(Poisson(Npar))
+            println("• Sampling $Np particles...")
+            x_list, y_list = _sample_hits(Np)
 
-        Np = rand(Poisson(Npar))
-        println("• Sampling $Np particles...")
-        x_list, y_list = _sample_hits(Np)
+            for id in unique(cell_df_copy.energy_step)
+                println("  → Layer $id")
 
-        for id in unique(cell_df_copy.energy_step)
-            println("  → Layer $id")
+                _, sx, sy, at_single = _get_representatives(cell_df_copy, id)
+                sx === nothing && (println("    (empty)"); continue)
 
-            _, sx, sy, at_single = _get_representatives(cell_df_copy, id)
-            sx === nothing && (println("    (empty)"); continue)
-
-            if use_gpu
                 println("• [GPU] Layered mode")
 
                 dose_vec, core_dose, cr_sq, mr_sq, pr_sq, Kp, lmin, lmax =
@@ -401,16 +416,46 @@ function MC_dose_fast!(
 
                 mat_at .= reshape(Array(cu_out), num_dom, num_cells)'
                 matrix_to_dataframe!(at_single, mat_at)
+                MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_copy, at_single, at, id)
+            end
+        else
+            println("• [CPU] non-TSC mode")
 
-            else
-                println("• [CPU] Layered mode")
-                MC_loop_ions_domain_fast!(
-                    x_list, y_list, [irrad_cond[id]], gsm2,
-                    sx, sy, at_single, type_AT, ion
-                )
+            Np = rand(Poisson(Npar))
+            println("• Sampling $Np particle hits...")
+
+            x_list = Vector{Float64}(undef, Np)
+            y_list = Vector{Float64}(undef, Np)
+            Threads.@threads for ip in 1:Np
+                x_list[ip], y_list[ip] = GenerateHit_Circle(x_cb, y_cb, R_beam)
             end
 
-            MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_copy, at_single, at, id)
+            for id in unique(cell_df_copy.energy_step)
+                println("  → Layer $id")
+                cell_df_is = filter(row -> (row.is_cell == 1) && (row.energy_step == id), cell_df_copy)
+                if nrow(cell_df_is) == 0
+                    println("    (empty → skip)")
+                    continue
+                end
+
+                grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
+                                        :index => first => :representative_index)
+                rep_indices_set = Set(grouped_df.representative_index)
+
+                cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+                cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+                at_single        = filter(row -> row.index in rep_indices_set, at)
+
+                mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+
+                MC_loop_ions_domain_matrix!(
+                    x_list, y_list, [irrad_cond[id]], gsm2,
+                    mat_x, mat_y, mat_at, type_AT, ion
+                )
+
+                matrix_to_dataframe!(at_single, mat_at)
+                MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_copy, at_single, at, id)
+            end
         end
     end
 

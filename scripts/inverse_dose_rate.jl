@@ -15,6 +15,9 @@ using Optim
 using LsqFit
 using ProgressMeter
 using InlineStrings
+using InlineStrings
+using CUDA
+using Statistics: mean
 
 nthreads()
 
@@ -213,7 +216,7 @@ end
 cell_df_original = deepcopy(cell_df_copy)
 
 @time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
-plot_dose_cell(cell_df_copy, layer_plot = true)
+plot_scalar_cell(cell_df_copy, :dose_cell, layer_plot = true)
 
 #~ ==========================================================================================
 #~ ================================== compute damage ========================================
