@@ -1,128 +1,301 @@
-# GSM2_Julia
+# Radiobiology ABM Simulation Framework
 
-**GSM2_Julia** is a high-performance Julia implementation of the **Generalized Stochastic Microdosimetric Model (GSM2)** coupled with a spatial **Agent-Based Model (ABM)**. 
+A Julia framework for Monte Carlo dose deposition, DNA damage computation, and agent-based modelling (ABM) of cell population dynamics under ion irradiation. Designed for spheroid geometries but applicable to any 2D/3D cell lattice.
 
-This framework simulates the biological effects of ion radiation on cell populations, spanning from physical energy deposition (microdosimetry) to biological repair kinetics and tissue-level dynamics.
+---
 
-## Key Features
+## Overview
 
-*   **GSM2 radiobiological model**: Simulates DNA damage formation and repair using the generalized stochastic microdosimetric model. It tracks two types of lesions ($X$ and $Y$) and handles repair ($r$), misrepair ($a$), and lethal interaction ($b$) rates.
-*   **Microdosimetry & Track Structure**: 
-    *   Supports various ion types (e.g., Protons, Carbon) and energies.
-    *   Calculates energy deposition in subcellular domains using Monte Carlo simulations.
-    *   Includes both **Track-Segment (TSC)** and **Full Monte Carlo** modes for dose calculation.
-*   **Agent-Based Model (ABM)**:
-    *   Simulates a 3D population of cells in a lattice (square or circular geometries).
-    *   Models cell cycle progression (G1, S, G2, M), division, and contact inhibition.
-    *   Handles radiation-induced death (mitotic catastrophe, interphase death) and natural apoptosis.
-*   **Performance**: Utilizes Julia's multi-threading (`Base.Threads`) for parallel Monte Carlo dose computation and stochastic repair simulations.
+The framework computes the full chain from physical dose to biological outcome:
 
-## Installation
-
-1.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/yourusername/GSM2_Julia.git
-    cd GSM2_Julia
-    ```
-
-2.  **Install Dependencies**:
-    Open the Julia REPL and install the required packages:
-    ```julia
-    using Pkg
-    Pkg.add(["DataFrames", "Distributions", "CSV", "Plots", "StatsBase", "ProgressMeter", "JLD2", "LsqFit", "GLM"])
-    ```
-
-## Project Structure
-
-*   **`src/`**: Core source code.
-    *   `utilities_env.jl`: Environment setup and global variable injection.
-    *   `utilities_dose_computation.jl`: Monte Carlo algorithms for dose deposition.
-    *   `utilities_abm.jl`: Agent-based model logic (time stepping, division, death).
-    *   `utilities_structures.jl`: Data structures (`Cell`, `GSM2`, `Ion`, `SimulationTimeSeries`).
-    *   `utilities_GSM2.jl`: Core GSM2 kinetic equations.
-*   **`scripts/`**: Example scripts.
-    *   `sphere.jl`: A complete workflow simulating a spheroid of cells under irradiation.
-
-## Usage Example
-
-Below is a simplified workflow based on `scripts/sphere.jl`.
-
-### 1. Setup Environment and Model
-```julia
-using GSM2_Julia # Assuming package structure or include files directly
-
-# Define GSM2 parameters (repair, lethal, interaction rates, domain radius, nucleus radius)
-r, a, b = 4.3, 0.01, 0.30
-rd, Rn  = 0.8, 7.2
-
-# Initialize GSM2 globals
-setup_GSM2!(r, a, b, rd, Rn)
-
-# Define Irradiation (Dose in Gy, Energy in MeV/u, Ion type)
-setup_IonIrrad!(1.0, 150.0, "1H") # 1 Gy of 150 MeV Protons
+```
+Ion beam → MC dose → DNA damage (GSM2) → Survival → ABM cell dynamics
 ```
 
-### 2. Initialize Cell Population
-```julia
-# Define geometry (Box size, Cell radius, Voxel settings)
-X_box, R_cell = 900.0, 15.0
-N_sideVox = 6
-N_CellsSide = 60
+Each step is handled by a dedicated utility module. The pipeline supports:
+- Proton and heavy ion beams (Katz–Chatterjee / LEM track structure)
+- Phase-dependent radiosensitivity (G1, S, G2/M)
+- Oxygen enhancement ratio (OER)
+- Partial irradiation and track segmentation
+- GPU-accelerated dose computation (CUDA)
+- Agent-based proliferation/death dynamics on a cell lattice
 
-# Create the lattice and populate cells
-setup_cell_lattice!("circle", X_box, R_cell, N_sideVox, N_CellsSide)
+---
+
+## File Structure
+
+```
+src/
+  load_utilities.jl           — include all utility files
+utilities/
+  utilities_structures.jl     — core structs (Cell, Ion, Irrad, AT, GSM2, ...)
+  utilities_radiation.jl      — hit generation (box, circle, halo)
+  utilities_AT_computation.jl — amorphous track structure, stopping power, LET
+  utilities_GSM2.jl           — GSM2 damage model, OER, domain survival
+  utilities_env.jl            — environment setup (GSM2, ion/irrad, cell lattice)
+  utilities_MC_dose.jl        — CPU Monte Carlo dose kernels
+  utilities_MC_gpu.jl         — GPU-accelerated dose (CUDA), auto CPU/GPU dispatch
+  utilities_dose_computation.jl — radial dose integration, track geometry
+  utilities_plots.jl          — dose, damage, survival, cell-cycle plots
+  utilities_ABM.jl            — ABM event loop, repair simulation, CellPopulation
+  utilities_ABM_plots.jl      — population dynamics, phase plots, dashboards
+```
+
+---
+
+## Dependencies
+
+```julia
+using Base.Threads, Distributed
+using CSV, DataFrames, JLD2, DelimitedFiles
+using Distributions, Random, Statistics, StatsBase
+using Plots, StatsPlots
+using GLM, Optim, LsqFit
+using ProgressBars, ProgressMeter
+using InlineStrings
+using CUDA                  # optional — CPU fallback available
+```
+
+---
+
+## Quickstart: Spheroid Irradiation + ABM
+
+### 1. Setup
+
+```julia
+include(joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
+
+# Stopping power table
+sp = load_stopping_power()
+
+# GSM2 parameters (phase-dependent)
+gsm2_cycle = Vector{GSM2}(undef, 4)
+gsm2_cycle[1] = GSM2(r_G1, a_G1, b_G1, rd, Rn)   # G1
+gsm2_cycle[2] = GSM2(r_S,  a_S,  b_S,  rd, Rn)   # S
+gsm2_cycle[3] = GSM2(r_G2, a_G2, b_G2, rd, Rn)   # G2/M
+gsm2_cycle[4] = GSM2(r,    a,    b,    rd, Rn)    # mixed (fallback)
+
+setup_GSM2!(r, a, b, rd, Rn)
+```
+
+### 2. Geometry and Beam
+
+```julia
+X_box        = 900.0    # half-side of simulation box (µm)
+X_voxel      = 300.0    # voxel size (µm)
+R_cell       = 15.0     # cell radius (µm)
+tumor_radius = 850.0    # irradiated region radius (µm)
+
+E        = 50.0         # kinetic energy (MeV/u)
+particle = "1H"
+dose     = 1.0          # Gy
+
+setup_IonIrrad!(dose, E, particle)
+
+R_beam, x_beam, y_beam = calculate_beam_properties(
+    "full", "circle", X_box, X_voxel, tumor_radius
+)
+```
+
+### 3. Cell Lattice
+
+```julia
+track_seg = true   # track segmentation mode
+setup_cell_lattice!(
+    "circle", X_box, R_cell, N_sideVox, N_CellsSide;
+    ParIrr="false", track_seg=track_seg
+)
 setup_cell_population!("circle", X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
 
-# Compute irradiation conditions per layer
-setup_irrad_conditions!(ion, irrad, type_AT, cell_df, true)
+setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+
+# Optional: oxygen distribution
+set_oxygen!(cell_df; plot_oxygen=false)
 ```
 
-### 3. Compute Dose and Damage
-```julia
-# Run Monte Carlo Dose Calculation
-# Npar is the number of particles, R_beam is beam radius
-MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df, df_center_x, df_center_y, at, gsm2_cycle, type_AT, true)
+### 4. Monte Carlo Dose
 
-# Compute initial DNA damage (Lesions X and Y)
-MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle)
+```julia
+# Particle fluence from dose
+F    = irrad.dose / (1.602e-9 * LET)
+Npar = round(Int, F * π * R_beam^2 * 1e-8)
+
+cell_df_copy = deepcopy(cell_df)
+
+# Auto CPU/GPU dispatch (GPU used if CUDA available and Npar ≥ 1_000_000)
+MC_dose_fast!(
+    ion, Npar, R_beam, irrad_cond,
+    cell_df_copy, df_center_x, df_center_y, at,
+    gsm2_cycle, type_AT, track_seg
+)
+
+plot_scalar_cell(cell_df_copy, :dose_cell)
 ```
 
-### 4. Run Agent-Based Simulation
+### 5. DNA Damage
+
 ```julia
-# Compute survival probabilities and repair times
-nat_apo = 1e-10 # Natural apoptosis rate
-compute_times_domain!(cell_df, gsm2_cycle, nat_apo)
+MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
+plot_damage(cell_df_copy; layer_plot=true)
+```
 
-# Run the time-dependent simulation
-ts, snapshots = run_simulation_abm!(cell_df, nat_apo; terminal_time=48.0)
+### 6. Cell Survival (GSM2)
 
-# Plot results
+```julia
+compute_cell_survival_GSM2!(cell_df_copy, gsm2_cycle)
+plot_scalar_cell(cell_df_copy, :sp)
+
+mean_sp = mean(cell_df_copy[cell_df_copy.is_cell .== 1, :sp])
+println("Mean survival probability: $mean_sp")
+```
+
+### 7. ABM: Repair Scheduling
+
+```julia
+nat_apo = 1e-10   # natural apoptosis rate
+compute_times_domain!(cell_df_copy, gsm2_cycle, nat_apo)
+
+plot_times(cell_df_copy)
+plot_initial_distributions(cell_df_copy)
+print_phase_distribution(cell_df_copy; label="Post-irradiation")
+```
+
+### 8. ABM: Population Dynamics
+
+```julia
+cell_df_ = deepcopy(cell_df_copy)
+
+ts, snapshots = run_simulation_abm!(
+    cell_df_;
+    nat_apo       = nat_apo,
+    terminal_time = 48.0,
+    snapshot_times = [1, 6, 12, 24, 48]
+)
+
 plot_simulation_results(ts)
+plot_analysis_dashboard(ts)
+print_simulation_summary(ts)
 ```
 
-## Core Functions
+### 9. Analysis and Visualization
 
-### `setup_GSM2!`
-Configures the GSM2 kinetic parameters and generates the domain template for the cell nucleus.
+```julia
+# Phase evolution
+plot_phase_proportions(ts)
+plot_phase_stacked(ts)
+plot_cycling_vs_quiescent(ts)
+plot_growth_rate(ts; window_size=12)
 
-### `setup_IonIrrad!`
-Sets up the ion species, energy, and LET. It computes the amorphous track structure parameters ($R_c$, $R_p$).
+# Snapshot comparisons
+plot_snapshot_comparison(snapshots; times=[0, 6, 12, 24])
+plot_phase_comparison_before_after(cell_df_copy, cell_df_)
 
-### `MC_dose_fast!`
-The main engine for dose calculation.
-*   **Track-Segment Mode (`track_seg=true`)**: Simulates a representative layer and propagates dose to all cells, optimizing performance for uniform beams.
-*   **Full Mode**: Simulates particle hits explicitly for every layer.
+# Spatial distribution (requires x, y coordinates)
+plot_cell_cycle_distribution(cell_df_)
+plot_spatial_distribution(snapshots[12]; color_by=:cell_cycle)
 
-### `run_simulation_abm!`
-Evolves the cell population over time.
-*   Handles **Cell Cycle**: Transitions between G1, S, G2, M phases.
-*   Handles **Division**: Checks for empty neighbors before dividing.
-*   Handles **Death**: Removes cells based on radiogenic damage or natural apoptosis.
+# Animation
+create_spatial_animation(snapshots; output_file="dynamics.gif", fps=3)
+animate_cell_cycle_3d(snapshots; output_file="cc3d.gif")
 
-## License
+# Export
+export_timeseries_csv(ts, "results.csv")
+```
 
-[Insert License Here]
+---
 
-## Authors
+## Key Structs
 
-*   **Utente** (GitHub: GSM2_Julia)
+| Struct | Purpose |
+|---|---|
+| `Ion` | Ion species: Z, A, E, LET |
+| `Irrad` | Beam: dose, dose rate, particle |
+| `AT` | Amorphous track: Rc, Rp, Kp |
+| `GSM2` | Repair model: a, b, r, rd, Rn |
+| `Cell` | Single cell: position, radius, phase |
+| `CellPopulation` | Structure-of-arrays population (used by ABM) |
+| `SimulationTimeSeries` | Time series buffers for ABM recording |
+| `Track` | Single ion track: position, halo radius |
+| `Voxel` | Spatial voxel for layered dose |
+
+---
+
+## GPU Acceleration
+
+`MC_dose_fast!` automatically selects the backend:
+
+```
+CUDA.functional() && Npar ≥ GPU_PARTICLE_THRESHOLD  →  GPU kernel
+otherwise                                            →  CPU (zero overhead)
+```
+
+Override at runtime:
+```julia
+GPU_PARTICLE_THRESHOLD = 0          # always GPU (if available)
+GPU_PARTICLE_THRESHOLD = typemax(Int)  # always CPU
+```
+
+The GPU kernel (`_mc_dose_kernel_fast!`) maps one CUDA thread per domain point and loops over all `Npar` primaries. For `Npar >> n_domains`, a 2D kernel with particle-dimension parallelism and `atomicAdd` gives better GPU saturation.
+
+---
+
+## GSM2 Radiosensitivity Model
+
+Phase-dependent parameters are passed as `gsm2_cycle::Vector{GSM2}`:
+
+| Index | Phase | Typical use |
+|---|---|---|
+| `[1]` | G1 / G0 | slow repair, moderate sensitivity |
+| `[2]` | S | low sensitivity |
+| `[3]` | G2 / M | high sensitivity |
+| `[4]` | mixed | fallback / unknown phase |
+
+The repair simulation (`compute_repair_domain`) runs a Gillespie algorithm over X-lesions with rates:
+- repair: `r · X[j]`
+- misrepair: `a · X[j]`
+- interaction: `b · X[j] · (X[j]-1)`
+
+Outcome codes: `1` = lethal, `0` = recovered, `-1` = timeout.
+
+---
+
+## ABM Cell Cycle
+
+Phase transitions follow `PHASE_TRANSITION`:
+```
+G1 → S → G2 → M → (division or G0)
+```
+
+Cycle times are Gamma-distributed via `PHASE_DURATIONS`:
+```julia
+# approximate defaults
+G1: Gamma(24, 0.5)   # ~12h mean
+S:  Gamma(16, 0.5)   # ~8h mean
+G2: Gamma(6,  0.5)   # ~3h mean
+M:  Gamma(2,  0.5)   # ~1h mean
+```
+
+Cells blocked by contact inhibition (`number_nei == 0`) enter G0. They re-enter the cycle when a neighbor dies and space opens.
+
+---
+
+## Comment Convention
+
+All utility files use a consistent inline color convention for navigation:
+
+```julia
+#!  file/section headers
+#~  category groupings
+#?  public function names / constants
+#   descriptions and details
+```
+
+---
+
+## Notes
+
+- `cell_df` is a global DataFrame injected into `Main` by the `setup_*!` functions.
+- `plot_dose_cell` and `plot_survival_probability_cell` have been merged into `plot_scalar_cell(cell_df, col)`.
+- `plot_damage(cell_df; layer_plot=true)` groups by `:energy_step`, not `:layer`.
+- `MC_loop_ions_domain_tsc_fast!` has two definitions in the original codebase — ensure only one is loaded (see `utilities_MC_dose.jl` note).
+- `A = 1.` is hardcoded in `setup_IonIrrad!` after parsing `A_` — verify if intentional for protons.
