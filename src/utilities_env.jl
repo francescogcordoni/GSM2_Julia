@@ -451,3 +451,166 @@ function compute_possible_division_df!(cell_df::DataFrame)
 
     return nothing
 end
+
+"""
+    setup_simulation(E, particle, dose, tumor_radius;
+                        X_box        = 900.0,
+                        X_voxel      = 300.0,
+                        r_nucleus    = Rn,
+                        R_cell       = 15.0,
+                        target_geom  = "circle",
+                        calc_type    = "full",
+                        type_AT      = "KC",
+                        ParIrr       = "false",
+                        track_seg    = true,
+                        plot_oxygen  = false,
+                        verbose      = true)
+
+Wrapper for the complete simulation‑setup pipeline for particle‑irradiation
+studies. This routine prepares geometry, ion and irradiation parameters,
+beam characteristics, cell‑lattice configuration, oxygenation, and
+particle fluence. Only the four required arguments must be provided; all
+other parameters have sensible defaults.
+
+# Required Arguments
+- `E`            :: Float64  
+    Ion kinetic energy in MeV/u.
+
+- `particle`     :: String  
+    Ion species identifier, e.g. `"1H"`, `"4He"`, `"12C"`.
+
+- `dose`         :: Float64  
+    Total delivered dose in Gy.
+
+- `tumor_radius` :: Float64  
+    Radius of the target/tumor region in µm.
+
+# Optional Keyword Arguments
+- `X_box`        :: Float64 = 900.0  
+    Half‑side of the computational domain (µm).
+
+- `X_voxel`      :: Float64 = 300.0  
+    Voxel side length used for grid discretization (µm).
+
+- `r_nucleus`    :: Float64 = Rn  
+    Nuclear radius of each cell (µm).
+
+- `R_cell`       :: Float64 = 15.0  
+    Cellular radius (µm), used in building the cell lattice.
+
+- `target_geom`  :: String = "circle"  
+    Target geometry: `"circle"` or `"square"` (or others if implemented).
+
+- `calc_type`    :: String = "full"  
+    Beam‑calculation mode, e.g. `"full"` or `"simple"`.
+
+- `type_AT`      :: String = "KC"  
+    Model type for amorphous track‑structure (AT) calculations.
+
+- `ParIrr`       :: String = "false"  
+    If `"true"`, enables parallel irradiation (model‑dependent).
+
+- `track_seg`    :: Bool = true  
+    Whether to enable track‑segmentation output.
+
+- `plot_oxygen`  :: Bool = false  
+    Whether to display oxygen‑distribution diagnostics.
+
+- `verbose`      :: Bool = true  
+    Toggles detailed printed output.
+
+# Description
+The function performs the following steps:
+1. **Geometry setup:** Computes voxel counts and cell‑lattice dimensions.  
+2. **Ion/irradiation initialization:** Sets ion properties and dose conditions.  
+3. **Beam‑parameter calculation:** Determines beam radius and centroid.  
+4. **Amorphous track‑structure initialization:** Computes AT radii and constructs an initial AT object.  
+5. **Cell‑lattice generation and population:** Generates spatial arrangement of cells and assigns biological parameters.  
+6. **Irradiation‑condition setup:** Prepares physical and radiobiological interaction parameters.  
+7. **Oxygenation:** Assigns oxygen values per cell and computes average O₂.  
+8. **Fluence and particle‑count estimation:** Converts dose to fluence and computes the number of required primaries.
+
+# Returns
+A tuple:
+`(Npar, R_beam, x_beam, y_beam, at_start, O2_mean)`, where
+
+- `Npar`    :: Int  
+    Number of primary particles required to deliver the dose.
+
+- `R_beam`  :: Float64  
+    Beam radius (µm).
+
+- `x_beam` / `y_beam` :: Float64  
+    Beam center coordinates (µm).
+
+- `at_start`  
+    Initial amorphous‑track object for the given ion and energy.
+
+- `O2_mean` :: Float64  
+    Mean oxygen level among all valid cells.
+
+"""
+function setup_simulation(
+    E            :: Float64,
+    particle     :: String,
+    dose         :: Float64,
+    tumor_radius :: Float64;
+    X_box        :: Float64  = 900.0,
+    X_voxel      :: Float64  = 300.0,
+    r_nucleus    :: Float64  = Rn,
+    R_cell       :: Float64  = 15.0,
+    target_geom  :: String   = "circle",
+    calc_type    :: String   = "full",
+    type_AT      :: String   = "KC",
+    ParIrr       :: String   = "false",
+    track_seg    :: Bool     = true,
+    plot_oxygen  :: Bool     = false,
+    verbose      :: Bool     = true
+)
+    # ── Geometry ──────────────────────────────────────────────────────────────
+    N_sideVox   = Int(floor(2 * X_box / X_voxel))
+    N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+
+    verbose && println("X_box        : $X_box")
+    verbose && println("X_voxel      : $X_voxel")
+    verbose && println("N_sideVox    : $N_sideVox")
+    verbose && println("r_nucleus    : $r_nucleus")
+    verbose && println("R_cell       : $R_cell")
+
+    # ── Ion & irradiation ─────────────────────────────────────────────────────
+    setup_IonIrrad!(dose, E, particle)
+
+    # ── Beam properties ───────────────────────────────────────────────────────
+    R_beam, x_beam, y_beam = calculate_beam_properties(
+        calc_type, target_geom, X_box, X_voxel, tumor_radius)
+
+    # ── Amorphous track structure ─────────────────────────────────────────────
+    Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
+    at_start   = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)  # Rk = Rp
+
+    # ── Cell lattice & population ─────────────────────────────────────────────
+    setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
+                        ParIrr=ParIrr, track_seg=track_seg)
+    setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
+    verbose && println("Number of cells : $(sum(cell_df.is_cell .== 1))")
+
+    # ── Irradiation conditions ────────────────────────────────────────────────
+    setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+
+    # ── Oxygen ───────────────────────────────────────────────────────────────
+    set_oxygen!(cell_df; plot_oxygen=plot_oxygen)
+    O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
+    verbose && println("Mean O2         : $(round(O2_mean, digits=3))")
+
+    # ── Particle fluence ──────────────────────────────────────────────────────
+    F    = irrad.dose / (1.602e-9 * LET)
+    Npar = round(Int, F * π * R_beam^2 * 1e-8)
+    zF   = irrad.dose / Npar
+    D    = irrad.doserate / zF
+    T    = irrad.dose / (zF * D) * 3600
+
+    verbose && println("Npar            : $Npar")
+    verbose && println("R_beam          : $(round(R_beam, digits=2))")
+
+    return (Npar, R_beam, x_beam, y_beam, at_start, O2_mean)
+end

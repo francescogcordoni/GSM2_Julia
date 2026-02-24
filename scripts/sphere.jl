@@ -81,118 +81,56 @@ setup_GSM2!(r, a, b, rd, Rn)
 #~ ============================================================
 #~ =================== Simulation Parameters ==================
 #~ ============================================================
+# Don't wrap in a function — use a macro or just a begin block
+begin
+    E            = 50.0
+    particle     = "1H"
+    dose         = 1.0
+    tumor_radius = 400.0
 
-#& Box size (µm)
-#& A square box with half‑side X_box → full side = 2*X_box
-X_box    = 900.0      # corresponds to a full 1.8 mm box
-println("X_box        :", X_box)
+    # Optional parameters
+    X_box       = 900.0
+    X_voxel     = 300.0
+    R_cell      = 15.0
+    target_geom = "circle"
+    calc_type   = "full"
+    type_AT     = "KC"
+    track_seg   = true
 
-#& Voxel size (µm)
-X_voxel  = 300.0      # voxel side = 300 µm
-println("X_voxel      :", X_voxel)
+    N_sideVox   = Int(floor(2 * X_box / X_voxel))
+    N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
 
-#& Number of voxels per side
-N_sideVox = Int(floor(2 * X_box / X_voxel))
-println("N_sideVox    :", N_sideVox)
+    setup_IonIrrad!(dose, E, particle)
 
-#& Cell nucleus radius (µm)
-r_nucleus = Rn       # typical mammalian nucleus ~7–10 µm 
-#! too many reduce to one
-#! prev. R = r_nucleus = r_nucl = 7.2      check if non defined and set unique r_nucleus
-println("R_nucleus    :", r_nucleus)
+    R_beam, x_beam, y_beam = calculate_beam_properties(
+        calc_type, target_geom, X_box, X_voxel, tumor_radius)
 
-#& Cell radius (µm)
-R_cell    = 15.0      # corresponds to ~30 µm diameter
-println("R_cell       :", R_cell)
+    Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
+    at_start   = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
 
-N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+    setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
+                        ParIrr="false", track_seg=track_seg)
+    setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
 
+    setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
 
-#~ ==========================================================================================
-#~ ========================== Ion and Irradiation Settings ==================================
-#~ ==========================================================================================
+    set_oxygen!(cell_df; plot_oxygen=false)
+    O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
 
-E        = 50.0         # Ion kinetic energy (MeV/u)
-particle = "1H"    
-dose = 1.
-setup_IonIrrad!(dose, E, particle)
+    F    = irrad.dose / (1.602e-9 * LET)
+    Npar = round(Int, F * π * R_beam^2 * 1e-8)
+    zF   = irrad.dose / Npar
+    D    = irrad.doserate / zF
+    T    = irrad.dose / (zF * D) * 3600
 
-#~ ==========================================================================================
-#~ ============================= Simulation Configuration ===================================
-#~ ==========================================================================================
+    println("Npar   : $Npar")
+    println("R_beam : $(round(R_beam, digits=2))")
+    println("O2     : $(round(O2_mean, digits=3))")
+end
 
-#& Geometry of the target region
-target_geom = "circle"        # Options: "square", "circle"
-
-#& Calculation mode
-calc_type   = "full"          # Options: "full" -> all layers, "fast" -> only first layer
-
-#& Tumor or target radius (µm)
-tumor_radius = 850.0
-
-#& Compute beam parameters based on geometry and calculation mode
-#! check description on inputs
-R_beam, x_beam, y_beam = calculate_beam_properties(
-    calc_type,
-    target_geom,
-    X_box,
-    X_voxel,
-    tumor_radius
-);
-
-
-#~ ==========================================================================================
-#~ =========================== Amorphous Track Structure ====================================
-#~ ==========================================================================================
-
-#& Compute the amorphous track structure radii and dose normalization
-type_AT = "KC"
-Rc, Rp, Kp = ATRadius(ion, irrad, type_AT);
-
-#& In this model, Rk is taken equal to the penumbra radius Rp
-Rk = Rp  #! remove Rk
-
-#& Construct the initial AT (track structure) object
-at_start = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rk, Kp);
-
-
-#~ ==========================================================================================
-#~ ===================== Partial Irradiation & Cell Lattice Initialization ==================
-#~ ==========================================================================================
-
-#& Partial irradiation flag ("true" / "false" as strings to match existing APIs)
-ParIrr = "false"  # use "true" to enable partial irradiation
-track_seg = true  # use "true" to enable track segmentation
-setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide; ParIrr="false", track_seg = track_seg)
-setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
-println("Number of cells = ", sum(cell_df.is_cell .== 1))
-
-setup_irrad_conditions!(
-    ion, irrad, type_AT,
-    cell_df,
-    track_seg
-)
-
-#~ ==========================================================================================
-#~ ===================================== set O2 =============================================
-#~ ==========================================================================================
-
-set_oxygen!(cell_df; plot_oxygen = false)
-O2_mean = mean(cell_df.O[cell_df.is_cell.==1])
-
-#~ ==========================================================================================
-#~ ================================== compute dose ==========================================
-#~ ==========================================================================================
 
 cell_df_copy = deepcopy(cell_df)
-
-F = irrad.dose / (1.602 * 10^(-9) * LET)
-Npar = round(Int, F * (pi * (R_beam)^2 * 10^(-8)))
-zF = irrad.dose / Npar
-D = irrad.doserate / zF
-T = irrad.dose / (zF * D) * 3600
-
-@time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
+@time MC_dose!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
 plot_dose_cell(cell_df_copy, layer_plot = false)
 
 #~ ==========================================================================================
@@ -215,8 +153,7 @@ mean(cell_df_copy[cell_df_copy.is_cell .== 1, :sp])
 #~ =================================== compute ABM ==========================================
 #~ ==========================================================================================
 
-nat_apo = 10^-10
-compute_times_domain!(cell_df_copy, gsm2_cycle, nat_apo)
+compute_times_domain!(cell_df_copy, gsm2_cycle)
 plot_times(cell_df_copy)
 cell_df_ = deepcopy(cell_df_copy) 
 

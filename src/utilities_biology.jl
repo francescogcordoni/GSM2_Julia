@@ -45,10 +45,10 @@
 #! ============================================================================
 
 const PHASE_DURATIONS = Dict(
-    "G1" => (shape=0.5*12, scale=2.0),
-    "S"  => (shape=0.5*8,  scale=2.0),
-    "G2" => (shape=0.5*3,  scale=2.0),
-    "M"  => (shape=0.5,    scale=2.0),
+    "G1" => (shape=0.5*11, scale=2.0),
+    "S"  => (shape=0.5*7,  scale=2.0),
+    "G2" => (shape=0.5*5,  scale=2.0),
+    "M"  => (shape=0.5*1,  scale=2.0),
     "G0" => (shape=Inf,    scale=Inf)  # G0 has no intrinsic duration
 )
 
@@ -838,9 +838,9 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
             ru = rand() * 24
             if ru <= 1
                 cell_cycle = "M"
-            elseif ru <= 4
+            elseif ru <= 6
                 cell_cycle = "G2"
-            elseif ru <= 12
+            elseif ru <= 13
                 cell_cycle = "S"
             elseif ru <= 24
                 cell_cycle = "G1"
