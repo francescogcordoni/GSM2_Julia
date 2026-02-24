@@ -86,8 +86,8 @@ plot_phase_dynamics(ts)
 """
 function plot_phase_dynamics(ts::SimulationTimeSeries)
     p = plot(xlabel="Time (h)", ylabel="Number of Cells",
-             title="Cell Cycle Phase Distribution",
-             legend=:best, size=(800, 400))
+                title="Cell Cycle Phase Distribution",
+                legend=:best, size=(800, 400))
     plot!(p, ts.time, ts.g0_cells, label="G0", linewidth=2, color=:black)
     plot!(p, ts.time, ts.g1_cells, label="G1", linewidth=2, color=:green)
     plot!(p, ts.time, ts.s_cells,  label="S",  linewidth=2, color=:orange)
@@ -112,7 +112,7 @@ function plot_phase_proportions(ts::SimulationTimeSeries)
     pct(v) = ifelse.(total .> 0, 100 .* v ./ total, 0.0)
 
     p = plot(xlabel="Time (h)", ylabel="Percentage (%)",
-             title="Cell Phase Distribution (%)", legend=:best)
+                title="Cell Phase Distribution (%)", legend=:best)
     plot!(p, ts.time, pct(ts.g0_cells), label="G0", linewidth=2, color=:black)
     plot!(p, ts.time, pct(ts.g1_cells), label="G1", linewidth=2, color=:green)
     plot!(p, ts.time, pct(ts.s_cells),  label="S",  linewidth=2, color=:orange)
@@ -153,7 +153,7 @@ plot_cycling_vs_quiescent(ts)
 function plot_cycling_vs_quiescent(ts::SimulationTimeSeries)
     cycling = ts.g1_cells .+ ts.s_cells .+ ts.g2_cells .+ ts.m_cells
     p = plot(xlabel="Time (h)", ylabel="Number of Cells",
-             title="Cycling vs Quiescent Cells", legend=:best, linewidth=2)
+                title="Cycling vs Quiescent Cells", legend=:best, linewidth=2)
     plot!(p, ts.time, cycling,      label="Cycling (G1/S/G2/M)", color=:blue)
     plot!(p, ts.time, ts.g0_cells,  label="Quiescent (G0)",      color=:black)
     return p
@@ -186,9 +186,9 @@ function plot_growth_rate(ts::SimulationTimeSeries; window_size::Int = 10)
     end
 
     p = plot(t_pts, rates;
-             xlabel="Time (h)", ylabel="Growth Rate (cells/h)",
-             title="Population Growth Rate",
-             label="Growth Rate", linewidth=2, color=:darkblue)
+                xlabel="Time (h)", ylabel="Growth Rate (cells/h)",
+                title="Population Growth Rate",
+                label="Growth Rate", linewidth=2, color=:darkblue)
     hline!([0]; linestyle=:dash, color=:black, label="", alpha=0.5)
     return p
 end
@@ -207,7 +207,7 @@ plot_phase_duration_distribution(ts)
 """
 function plot_phase_duration_distribution(ts::SimulationTimeSeries)
     avgs   = [mean(ts.g0_cells), mean(ts.g1_cells), mean(ts.s_cells),
-              mean(ts.g2_cells), mean(ts.m_cells)]
+                mean(ts.g2_cells), mean(ts.m_cells)]
     p = bar(["G0","G1","S","G2","M"], avgs;
             title="Cell Phase Distribution Over Simulation",
             xlabel="Cell Cycle Phase", ylabel="Average Cell Count",
@@ -229,7 +229,7 @@ plot_doubling_time(ts)
 """
 function plot_doubling_time(ts::SimulationTimeSeries)
     length(ts.time) >= 10 || return plot(title="Insufficient data for doubling time",
-                                          grid=false, showaxis=false)
+                                            grid=false, showaxis=false)
 
     N0       = ts.total_cells[1]
     d_times  = Float64[]
@@ -248,11 +248,11 @@ function plot_doubling_time(ts::SimulationTimeSeries)
                                     grid=false, showaxis=false)
 
     return scatter(d_mult, d_times;
-                   xlabel="Population Multiple", ylabel="Time (h)",
-                   title="Population Doubling Times",
-                   label="Doubling Events", markersize=8, color=:blue,
-                   xscale=:log2,
-                   xticks=(d_mult, string.(d_mult) .* "×"))
+                    xlabel="Population Multiple", ylabel="Time (h)",
+                    title="Population Doubling Times",
+                    label="Doubling Events", markersize=8, color=:blue,
+                    xscale=:log2,
+                    xticks=(d_mult, string.(d_mult) .* "×"))
 end
 
 """
@@ -271,7 +271,7 @@ function plot_stem_dynamics(ts::SimulationTimeSeries)
         return plot(title="No stem cell data available", grid=false, showaxis=false)
     end
     p = plot(xlabel="Time (h)", ylabel="Number of Cells",
-             title="Stem vs Non-Stem Cell Dynamics", legend=:best, linewidth=2)
+                title="Stem vs Non-Stem Cell Dynamics", legend=:best, linewidth=2)
     plot!(p, ts.time, ts.stem_cells,     label="Stem Cells",     color=:green)
     plot!(p, ts.time, ts.non_stem_cells, label="Non-Stem Cells", color=:orange)
     return p

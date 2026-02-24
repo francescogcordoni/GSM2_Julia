@@ -96,7 +96,7 @@ setup_GSM2!(r, a, b, rd, Rn)
 
 #& Box size (µm)
 #& A square box with half‑side X_box → full side = 2*X_box
-X_box    = 900.0      # corresponds to a full 1.8 mm box
+X_box    = 600.0      # corresponds to a full 1.8 mm box
 println("X_box        :", X_box)
 
 #& Voxel size (µm)
@@ -235,7 +235,6 @@ Ntot = size(cell_df_original[cell_df_original.is_cell .== 1, :], 1)
 print_phase_distribution(cell_df_original)
 plot_phase_proportions_alive(cell_df_original)
 
-surv_prob = Array{Float64, 1}()
 #~ ==========================================================================================
 #~ compute istantenous irradiation 5Gy
 #~ ==========================================================================================
@@ -254,10 +253,13 @@ mean(cell_df_istant[cell_df_istant.is_cell .== 1, :sp])
 mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])
 mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])^2
 
-nat_apo = 10^-10
+Nsplit = mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])^2
+
+surv_prob = Array{Float64, 1}()
 compute_times_domain!(cell_df_istant, gsm2_cycle)
 cell_df_istant_ = cell_df_istant[cell_df_istant.is_cell .== 1, :]
 push!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/Ntot)
+plot_times(cell_df_istant)
 
 tumor_radius = 500.0
 ParIrr = "false"  # use "true" to enable partial irradiation
@@ -270,6 +272,17 @@ setup_irrad_conditions!(
     cell_df,
     track_seg
 )
+R_beam, x_beam, y_beam = calculate_beam_properties(
+    calc_type,
+    target_geom,
+    X_box,
+    X_voxel,
+    tumor_radius
+);
+Rc, Rp, Kp = ATRadius(ion, irrad, type_AT);
+Rk = Rp  #! remove Rk
+at_start = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rk, Kp);
+
 set_oxygen!(cell_df; plot_oxygen = false)
 O2_mean = mean(cell_df.O[cell_df.is_cell.==1])
 cell_df.O .= 21.
@@ -279,97 +292,182 @@ zF = irrad.dose / Npar
 D = irrad.doserate / zF
 T = irrad.dose / (zF * D) * 3600
 cell_df_second = deepcopy(cell_df)
+
+mean(cell_df_second.dose_cell[cell_df_second.is_cell .== 1])
 @time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_second, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
 MC_loop_damage!(ion, cell_df_second, irrad_cond, gsm2_cycle)
+mean(cell_df_second.dose_cell[cell_df_second.is_cell .== 1])
 
-phase_times = DataFrame(time = Float64[], Nalive = Int[],
-                        G0 = Int[], G1 = Int[], S = Int[], G2 = Int[], M = Int[])
 
-phase_times_pre = DataFrame(time = Float64[], Nalive = Int[],
-                        G0 = Int[], G1 = Int[], S = Int[], G2 = Int[], M = Int[])
-times_split = [0.1, 0.2, 0.5, 6.0, 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0]
-for t in times_split
-    println(t)
-    cell_ = deepcopy(cell_df_copy)
+# ── Setup ─────────────────────────────────────────────────────────────────────
+times_split = [0.01, 0.1, 0.2, 0.5, 6.0, 8., 10., 12.0, 14., 16., 18., 19., 20., 21., 22., 23., 24.0, 25., 26., 27., 30., 48.0]
+#times_split = [0.01, 0.1, 0.2, 0.5, 6.0, 8., 10., 12.0]
 
-    X_prev = cell_.dam_X_total
-    compute_times_domain!(cell_, gsm2_cycle; terminal_time = t)
-    cell_.is_cell[isfinite.(cell_.death_time)] .= 0
-    run_simulation_abm!(cell_; terminal_time = t)
+nsim        = 100
+phase_keys  = ("G0", "G1", "S", "G2", "M")
 
-    counts_pre = count_phase_alive(cell_; phase_col=:cell_cycle)
-    alive_mask = (cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)
-    Nalive_pre = count(alive_mask)
+# Freeze reference — never touched again
+const cell_df_ref = deepcopy(cell_df_copy)
 
-    push!(phase_times_pre, (
-        t,
-        Nalive_pre,
-        counts_pre["G0"], counts_pre["G1"], counts_pre["S"],
-        counts_pre["G2"], counts_pre["M"]
-    ))
 
-    #cell_irrad = deepcopy(cell_)
-    #MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_irrad, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
-    #MC_loop_damage!(ion, cell_irrad, irrad_cond, gsm2_cycle)
-    X_new = cell_df_second.dam_X_total
-
-    cell_.dam_X_dom .+= cell_df_second.dam_X_dom
-    cell_.dam_Y_dom .+= cell_df_second.dam_Y_dom
-    X_post = cell_.dam_X_total + cell_df_second.dam_X_total
-
-    # Let the model update phases and fates after damage
-    compute_times_domain!(cell_, gsm2_cycle)
-
-    # final counts at time t (post-irradiation step)
-    counts_post = count_phase_alive(cell_; phase_col=:cell_cycle)
-    alive_mask_post = (cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)
-    Nalive_post = count(alive_mask_post)
-
-    push!(phase_times, (
-        t,
-        Nalive_post,
-        counts_post["G0"], counts_post["G1"], counts_post["S"],
-        counts_post["G2"], counts_post["M"]
-    ))
-
-    cell_df_split_ = cell_[cell_.is_cell .== 1, :]
-    push!(surv_prob, size(cell_df_split_[.!isfinite.(cell_df_split_.death_time),:], 1)/Ntot)
+function reset_cell!(dst, src)
+    for col in names(src)
+        S = src[!, col]
+        D = dst[!, col]
+        if eltype(S) <: Vector
+            @inbounds for i in eachindex(S)
+                copyto!(D[i], S[i])
+            end
+        else
+            copyto!(D, S)
+        end
+    end
 end
+
+# Rebuild pool with clean deep copies
+while isready(pool)
+    take!(pool)
+end
+for _ in 1:n_workers
+    put!(pool, deepcopy(cell_df_ref))
+end
+
+phase_times     = DataFrame(time=Float64[], Nalive=Float64[], G0=Float64[], G1=Float64[], S=Float64[], G2=Float64[], M=Float64[])
+phase_times_pre = DataFrame(time=Float64[], Nalive=Float64[], G0=Float64[], G1=Float64[], S=Float64[], G2=Float64[], M=Float64[])
+#surv_prob       = Vector{Float64}()
+surv_prob_noabm = Vector{Float64}(undef, length(times_split))
+
+# ── Loop 1: ABM ───────────────────────────────────────────────────────────────
+for t in times_split
+    println("ABM t = $t")
+
+    results = Channel{NamedTuple}(nsim)
+
+    @sync for _ in 1:nsim
+        Threads.@spawn begin
+            cell_ = take!(pool)                    # borrow a copy
+            try
+                reset_cell!(cell_, cell_df_ref)
+
+                compute_times_domain!(cell_, gsm2_cycle; terminal_time=t)
+                run_simulation_abm!(cell_; terminal_time=t)
+
+                counts_pre = count_phase_alive(cell_; phase_col=:cell_cycle)
+                alive_pre  = (cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)
+
+                is_cell_mask = cell_.is_cell .== 1
+                cell_.dam_X_dom[is_cell_mask] .+= cell_df_second.dam_X_dom[is_cell_mask]
+                cell_.dam_Y_dom[is_cell_mask] .+= cell_df_second.dam_Y_dom[is_cell_mask]
+
+                compute_times_domain!(cell_, gsm2_cycle)
+
+                counts_post = count_phase_alive(cell_; phase_col=:cell_cycle)
+                alive_post  = (cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)
+
+                put!(results, (
+                    alive_pre  = count(alive_pre),
+                    alive_post = count(alive_post),
+                    counts_pre = counts_pre,
+                    counts_post = counts_post,
+                    surv       = count(alive_post) / Ntot
+                ))
+            finally
+                put!(pool, cell_)                  # always return the copy
+            end
+        end
+    end
+    close(results)
+
+    # Reduce — single-threaded, no races
+    inv_n           = 1.0 / nsim
+    Nalive_pre_acc  = 0.0
+    Nalive_post_acc = 0.0
+    phase_pre_acc   = zeros(5)
+    phase_post_acc  = zeros(5)
+    surv_acc        = 0.0
+
+    for r in results
+        Nalive_pre_acc  += r.alive_pre
+        Nalive_post_acc += r.alive_post
+        surv_acc        += r.surv
+        for (i, k) in enumerate(phase_keys)
+            phase_pre_acc[i]  += r.counts_pre[k]
+            phase_post_acc[i] += r.counts_post[k]
+        end
+    end
+
+    pre  = phase_pre_acc  .* inv_n
+    post = phase_post_acc .* inv_n
+    push!(phase_times_pre, (t, Nalive_pre_acc*inv_n,  pre[1],  pre[2],  pre[3],  pre[4],  pre[5]))
+    push!(phase_times,     (t, Nalive_post_acc*inv_n, post[1], post[2], post[3], post[4], post[5]))
+    push!(surv_prob, surv_acc * inv_n)
+end
+
+# ── Loop 2: no ABM ────────────────────────────────────────────────────────────
+for (ti, t) in enumerate(times_split)
+    println("noABM t = $t")
+
+    results = Channel{Float64}(nsim)
+
+    @sync for _ in 1:nsim
+        Threads.@spawn begin
+            cell_ = take!(pool)
+            try
+                reset_cell!(cell_, cell_df_ref)
+
+                # First shot repair up to time t
+                compute_times_domain!(cell_, gsm2_cycle; terminal_time=t)
+
+                # Kill cells with scheduled death, keep survivors and timeouts
+                cell_.is_cell[isfinite.(cell_.death_time)] .= 0
+
+                # Add second shot damage only to still-alive cells
+                for i in findall(cell_.is_cell .== 1)
+                    cell_.dam_X_dom[i] .+= cell_df_second.dam_X_dom[i]
+                    cell_.dam_Y_dom[i] .+= cell_df_second.dam_Y_dom[i]
+                end
+
+                # Force all alive cells to G1 (no ABM, no division)
+                for i in findall(cell_.is_cell .== 1)
+                    cell_.cell_cycle[i] = "G1"
+                end
+
+                # Second shot repair, no terminal_time limit
+                compute_times_domain!(cell_, gsm2_cycle)
+
+                # Kill cells that die from combined damage
+                cell_.is_cell[isfinite.(cell_.death_time)] .= 0
+
+                surv = count((cell_.is_cell .== 1) .& .!isfinite.(cell_.death_time)) / Ntot
+                put!(results, surv)
+            finally
+                put!(pool, cell_)
+            end
+        end
+    end
+    close(results)
+
+    surv_prob_noabm[ti] = sum(results) / nsim
+end
+
+Plots.plot(times_split, surv_prob_noabm)
+
 pushfirst!(times_split, 0.0)
-Plots.plot(times_split, surv_prob)
+#pushfirst!(surv_prob, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/Ntot)
+pushfirst!(surv_prob_noabm, size(cell_df_istant_[.!isfinite.(cell_df_istant_.death_time),:], 1)/Ntot)
+
+p1 = Plots.plot(times_split, surv_prob[2:end])
+p1 = Plots.plot!(times_split, surv_prob_noabm[2:end])
+
+p2 = Plots.plot(phase_times_pre.time, phase_times_pre.Nalive, label = "Alive Cells")
+p2 = Plots.plot!(phase_times.time, phase_times.G1, label = "G1")
+p2 = Plots.plot!(phase_times.time, phase_times.S, label = "S")
+p2 = Plots.plot!(phase_times.time, phase_times.G2, label = "G2")
+p2 = Plots.plot!(phase_times.time, phase_times.M, label = "M")
+p2 = Plots.plot!(phase_times.time, phase_times.G0, label = "G0")
+
+plot(p1, p2, layout=(2, 1), size=(1000, 800))
 
 
 
-Plots.plot(X_prev)
-Plots.plot!(X_new)
-Plots.plot!(X_post)
 
-
-
-
-
-
-df_sub = filter(:is_cell => ==(1), cell_)
-
-# Optionally drop missing labels
-df_sub = dropmissing(df_sub, :cell_cycle)
-
-# Count per category and convert to proportions
-counts = countmap(df_sub.cell_cycle)        
-cats   = collect(keys(counts))
-vals   = collect(values(counts))
-props  = vals 
-
-# Bar plot of proportions
-default(fontfamily = "sans")
-bar(
-    cats, props;
-    legend = false,
-    xlabel = "cell_cycle",
-    ylabel = "Proportion (within is_cell == 1)",
-    title  = "Cell cycle proportions among is_cell == 1",
-    bar_width = 0.8,
-    color = "#D55E00",  
-    framestyle = :box,
-    yticks = 0:0.1:1.0,
-)
