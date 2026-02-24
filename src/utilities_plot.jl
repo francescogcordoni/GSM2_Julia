@@ -61,8 +61,8 @@ using DataFrames
 
 Generic two-panel figure for any per-cell scalar column `col`.
 - Panel 1: density of `col` for active cells (`is_cell==1`, positive values only).
-  `layer_plot=false` → single density + mean line.
-  `layer_plot=true`  → one curve per `energy_step`.
+    `layer_plot=false` → single density + mean line.
+    `layer_plot=true`  → one curve per `energy_step`.
 - Panel 2: 3D scatter of `(x, y, z)` colored by `col` (half-sphere `x≥0`).
 
 Returns `nothing` if no active cells or no positive values.
@@ -92,9 +92,9 @@ function plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot::Bool = 
     # Panel 1 — density
     if !layer_plot
         p1 = density(active_vals;
-                     title="$col_str Density (all active cells)",
-                     xlabel=col_str, ylabel="Density",
-                     linewidth=2, legend=false)
+                        title="$col_str Density (all active cells)",
+                        xlabel=col_str, ylabel="Density",
+                        linewidth=2, legend=false)
         vline!(p1, [mean(active_vals)], color=:red, linestyle=:dash)
     else
         hasproperty(cell_df, :energy_step) ||
@@ -112,12 +112,12 @@ function plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot::Bool = 
     # Panel 2 — 3D scatter (half-sphere x≥0)
     df3 = df_active[df_active.x .>= 0, :]
     p2 = scatter(df3.x, df3.y, df3.z;
-                 markersize=4, markerstrokewidth=0.1,
-                 marker_z=df3[!, col], colorbar=true,
-                 xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
-                 title="3D $col_str Distribution", legend=false,
-                 aspect_ratio=:equal, seriescolor=:viridis,
-                 size=(900, 700), camera=(320, 30))
+                    markersize=4, markerstrokewidth=0.1,
+                    marker_z=df3[!, col], colorbar=true,
+                    xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
+                    title="3D $col_str Distribution", legend=false,
+                    aspect_ratio=:equal, seriescolor=:viridis,
+                    size=(900, 700), camera=(320, 30))
 
     return plot(p1, p2, layout=(1, 2), size=(1200, 500))
 end
@@ -147,16 +147,16 @@ function plot_damage(cell_df::DataFrame; layer_plot::Bool = false)
         end
 
         plt = plot(title="X-Damage Distribution Grouped by energy_step",
-                   xlabel="Total X-Damage", ylabel="Density",
-                   legend=:topright, linewidth=2)
+                    xlabel="Total X-Damage", ylabel="Density",
+                    legend=:topright, linewidth=2)
 
         for E in sort(unique(cell_df.energy_step))
             idx = findall(i -> cell_df.is_cell[i] == 1 && cell_df.energy_step[i] == E,
-                          1:nrow(cell_df))
+                            1:nrow(cell_df))
             isempty(idx) && (@warn "energy_step $E has no active cells."; continue)
 
             damage_vals = [sum(cell_df.dam_X_dom[i])
-                           for i in idx if cell_df.dam_X_dom[i] isa AbstractVector]
+                            for i in idx if cell_df.dam_X_dom[i] isa AbstractVector]
             isempty(damage_vals) && (@warn "energy_step $E has no valid damage vectors."; continue)
 
             density!(plt, damage_vals, label="energy_step $E")
