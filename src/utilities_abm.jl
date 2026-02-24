@@ -188,7 +188,7 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
             continue
         end
 
-        # ── Radiogenic death scheduled ───────────────────────────────────────
+        # ── Radiation death scheduled ───────────────────────────────────────
         if isfinite(death_time)
             cell_df.recover_time[i] = Inf
             cell_df.cycle_time[i]   = Inf
@@ -224,13 +224,13 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
                         cell_df.cycle_time[i] = ct
                     end
                 elseif phase == "G2"
-                    ct = rand(Gamma(2*3, 0.5))
+                    ct = rand(Gamma(2*5, 0.5))
                     cell_df.cycle_time[i]   = max(ct, recover_time_sample)
                 elseif phase == "S"
-                    ct = rand(Gamma(2*8, 0.5))
+                    ct = rand(Gamma(2*7, 0.5))
                     cell_df.cycle_time[i]   = max(ct, recover_time_sample)
                 elseif phase == "G1"
-                    ct = rand(Gamma(2*12, 0.5))
+                    ct = rand(Gamma(2*11, 0.5))
                     cell_df.cycle_time[i]   = max(ct, recover_time_sample)
                 end
             else
