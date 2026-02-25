@@ -238,11 +238,9 @@ function setup_cell_population!(
     )
     @eval Main cell_df = $cell_df_local
 
-    # Domain-center template (relative coordinates)
     rel_center_x_local, rel_center_y_local = calculate_centers(0.0, 0.0, gsm2.rd, gsm2.Rn)
     num_cols_local = length(rel_center_x_local)
 
-    # Absolute domain-center DataFrames for all cells
     df_center_x_local, df_center_y_local, at_local =
         create_domain_dataframes(cell_df_local, rel_center_x_local, rel_center_y_local)
 
@@ -450,4 +448,104 @@ function compute_possible_division_df!(cell_df::DataFrame)
     cell_df.number_nei = number_nei_vec
 
     return nothing
+end
+
+
+macro setup_simulation(E, particle, dose, tumor_radius, kwargs...)
+    quote
+        # Required
+        E            = $(esc(E))
+        particle     = $(esc(particle))
+        dose         = $(esc(dose))
+        tumor_radius = $(esc(tumor_radius))
+
+        # Defaults (overridable via kwargs)
+        X_box       = 900.0
+        X_voxel     = 300.0
+        R_cell      = 15.0
+        target_geom = "circle"
+        calc_type   = "full"
+        type_AT     = "KC"
+        track_seg   = true
+
+        # Parse keyword overrides
+        $(map(kw -> :($(esc(kw.args[1])) = $(esc(kw.args[2]))), kwargs)...)
+
+        N_sideVox   = Int(floor(2 * X_box / X_voxel))
+        N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+
+        setup_IonIrrad!(dose, E, particle)
+        R_beam, x_beam, y_beam = calculate_beam_properties(calc_type, target_geom, X_box, X_voxel, tumor_radius)
+        Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
+        at_start   = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
+        setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide; ParIrr="false", track_seg=track_seg)
+        setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
+        setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+        set_oxygen!(cell_df; plot_oxygen=false)
+        O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
+        F    = irrad.dose / (1.602e-9 * LET)
+        Npar = round(Int, F * π * R_beam^2 * 1e-8)
+        zF   = irrad.dose / Npar
+        D    = irrad.doserate / zF
+        T    = irrad.dose / (zF * D) * 3600
+    end
+end
+
+macro setup_simulation(E, particle, dose, tumor_radius, kwargs...)
+    kw_assignments = map(kwargs) do kw
+        :($(esc(kw.args[1])) = $(esc(kw.args[2])))
+    end
+
+    quote
+        local _E            = Float64($(esc(E)))
+        local _particle     = $(esc(particle))
+        local _dose         = Float64($(esc(dose)))
+        local _tumor_radius = Float64($(esc(tumor_radius)))
+        local _X_box        = 900.0
+        local _X_voxel      = 300.0
+        local _R_cell       = 15.0
+        local _target_geom  = "circle"
+        local _calc_type    = "full"
+        local _type_AT      = "KC"
+        local _track_seg    = true
+        local _plot_oxygen  = false
+
+        $(kw_assignments...)
+
+        # Inject ALL variables into Main BEFORE any setup function runs
+        E            = _E
+        particle     = _particle
+        dose         = _dose
+        tumor_radius = _tumor_radius
+        X_box        = _X_box
+        X_voxel      = _X_voxel
+        R_cell       = _R_cell
+        target_geom  = _target_geom
+        calc_type    = _calc_type
+        type_AT      = _type_AT
+        track_seg    = _track_seg
+
+        N_sideVox   = Int(floor(2 * X_box / X_voxel))
+        N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+
+        setup_IonIrrad!(dose, E, particle)
+        R_beam, x_beam, y_beam = calculate_beam_properties(calc_type, target_geom, X_box, X_voxel, tumor_radius)
+        Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
+        at_start   = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
+        setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide; ParIrr="false", track_seg=track_seg)
+        setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
+        setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+        set_oxygen!(cell_df; plot_oxygen=_plot_oxygen)
+        O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
+
+        F    = irrad.dose / (1.602e-9 * LET)
+        Npar = round(Int, F * π * R_beam^2 * 1e-8)
+        zF   = irrad.dose / Npar
+        D    = irrad.doserate / zF
+        T    = irrad.dose / (zF * D) * 3600
+
+        println("Npar   : $Npar")
+        println("R_beam : $(round(R_beam, digits=2))")
+        println("O2     : $(round(O2_mean, digits=3))")
+    end
 end
