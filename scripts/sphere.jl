@@ -95,8 +95,8 @@ tumor_radius = 300.
     tumor_radius = 300.0
 
     # Optional parameters
-    X_box       = 600.0
-    X_voxel     = 300.0
+    X_box       = 300.0
+    X_voxel     = 800.0
     R_cell      = 15.0
     target_geom = "circle"
     calc_type   = "full"
@@ -132,7 +132,6 @@ tumor_radius = 300.
     println("Npar   : $Npar")
     println("R_beam : $(round(R_beam, digits=2))")
     println("O2     : $(round(O2_mean, digits=3))")
-
 
 cell_df_copy = deepcopy(cell_df)
 cell_df.O .= 21.

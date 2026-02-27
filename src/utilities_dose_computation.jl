@@ -1,5 +1,5 @@
 #! ============================================================================
-#! utilities_MC_dose.jl
+#! utilities_dose_computation.jl
 #!
 #! FUNCTIONS
 #! ---------
@@ -9,6 +9,7 @@
 #       Top-level MC wrapper. Dispatches to TSC (track_seg=true) or layered
 #       (track_seg=false) matrix kernels. Handles representative cell selection,
 #       DataFrame↔matrix conversion, and dose copy-back to full domain.
+#       If single_particle = true then it computes the dose for a single particle.
 #
 #~ DataFrame ↔ Matrix Conversion
 #?   dataframes_to_matrices(df_x, df_y, df_at) -> (mat_x, mat_y, mat_at)
@@ -50,19 +51,177 @@
 #! ============================================================================
 
 """
-    MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy,
-                    df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg;
-                    x_cb=0.0, y_cb=0.0)
+    MC_dose_CPU!(
+        ion::Ion, Npar::Int64, R_beam::Float64,
+        irrad_cond::Vector{AT}, cell_df_copy::DataFrame,
+        df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+        gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool;
+        x_cb::Float64 = 0.0, y_cb::Float64 = 0.0, single_particle::Bool = false
+    ) -> Nothing
 
-Top-level MC wrapper. Dispatches to TSC (`track_seg=true`) or layered
-(`track_seg=false`) matrix kernels. Handles representative cell selection,
-DataFrame↔matrix conversion, and dose copy-back to the full domain.
-No physical or mathematical changes from the original implementation.
+CPU Monte Carlo (MC) dose-deposition driver with two execution modes:
+1) **Track-Segment (TSC) matrix optimization** (`track_seg = true`)
+2) **Layered (non‑TSC) matrix optimization** (`track_seg = false`)
+
+The routine orchestrates sampling of particle impact points, reduction of the
+cell domain to representative indices, matrix assembly for geometry/AT state,
+MC transport/update loops, and scatter of the updated dose/AT fields back to
+the full-resolution DataFrames.
+
+It **mutates** `cell_df_copy` (dose/energy fields) and `at` (AT state) in place
+and prints progress/timing info.
+
+# Arguments
+
+## Positional
+- `ion::Ion`  
+  Ion species descriptor for the transport kernels.
+
+- `Npar::Int64`  
+  Expected number of primaries crossing the target (mean for Poisson sampling
+  in layered mode).
+
+- `R_beam::Float64`  
+  Beam radius for sampling impact coordinates on a circle (2D domain).
+
+- `irrad_cond::Vector{AT}`  
+  Irradiation / AT-condition objects.  
+  *TSC mode*: a vector of length 1 is expected (`[irrad_cond[1]]` is used).  
+  *Layered mode*: one element per energy layer (indexed by `energy_step`).
+
+- `cell_df_copy::DataFrame`  
+  Working copy of the cell lattice & dose table. Must include (at minimum)
+  the following columns:
+  - `:index::Int`: unique cell/voxel identifier
+  - `:x, :y::Float64`: planar coordinates
+  - `:is_cell::Int`: 1 for cell voxels, 0 otherwise
+  - `:energy_step::Int`: layer identifier used in layered mode
+  Additional dose/track/AT fields required by your downstream kernels.
+
+- `df_center_x::DataFrame`, `df_center_y::DataFrame`  
+  DataFrames aligned by `:index` that contain geometry center information for
+  x and y respectively. They are reduced to representative subsets and then
+  converted into matrices for fast kernels.
+
+- `at::DataFrame`  
+  AT-state table aligned by `:index`. Updated in place based on transport.
+
+- `gsm2_cycle::Vector{GSM2}`  
+  Cycle of GSM2 models/settings. This routine uses `gsm2_cycle[1]`.
+
+- `type_AT::String`  
+  Identifier of the AT model used by matrix kernels (e.g., `"KC"`).
+
+- `track_seg::Bool`  
+  Selects execution mode.
+  - `true`  → TSC matrix optimization (`MC_loop_ions_domain_tsc_matrix!`)
+  - `false` → layered domain matrix optimization (`MC_loop_ions_domain_matrix!`)
+
+## Keywords
+- `x_cb::Float64 = 0.0`, `y_cb::Float64 = 0.0`  
+  Beam center coordinates used when sampling particle impacts.
+
+- `single_particle::Bool = false`  
+  If `true`, forces a single primary (`Np = 1`) in layered mode (useful for
+  debugging/diagnostics). Otherwise, `Np ~ Poisson(Npar)`.
+
+# Workflow
+## Common
+- Start timer and pick `gsm2 = gsm2_cycle[1]`.
+- Print a concise header and mode.
+## Track-Segment mode (`track_seg = true`)
+1. Filter active cells: `is_cell == 1`. If none, warns and returns early.
+2. Group by `(:x, :y)` to determine **representative indices**, reducing the
+   domain (one index per unique `(x,y)` pair).
+3. Filter `df_center_x`, `df_center_y`, and `at` to these representative indices
+   and convert to matrices via `dataframes_to_matrices(...)` → `(mat_x, mat_y, mat_at)`.
+4. Run the TSC kernel:
+MC_loop_ions_domain_tsc_matrix!(
+Npar, x_cb, y_cb, [irrad_cond[1]], gsm2,
+mat_x, mat_y, mat_at, R_beam, type_AT, ion,
+single_particle
+)
+5. Propagate matrix updates back to DataFrames (`matrix_to_dataframe!`) and copy
+dose onto the full `cell_df_copy` (`MC_loop_copy_dose_domain_fast!`).
+## Layered mode (`track_seg = false`)
+1. Determine number of primaries:
+- `Np = 1` if `single_particle = true`
+- else `Np ~ Poisson(Npar)`
+2. Sample `Np` impact points `(x_list, y_list)` on the circle with center
+`(x_cb, y_cb)` and radius `R_beam` using `GenerateHit_Circle`.
+3. For each `id` in `unique(cell_df_copy.energy_step)`:
+- Filter active cells in that layer (`is_cell == 1 && energy_step == id`),
+  skip empty layers.
+- Determine representative indices by grouping `(:x, :y)` and select the
+  reduced `df_center_x`, `df_center_y`, and `at` slices.
+- Convert to matrices and call the layered kernel:
+  MC_loop_ions_domain_matrix!(
+      x_list, y_list, [irrad_cond[id]], gsm2,
+      mat_x, mat_y, mat_at, type_AT, ion
+  )
+  ```
+- Scatter back matrix → DataFrame (`matrix_to_dataframe!`) and copy layer
+  dose into `cell_df_copy` via
+  `MC_loop_copy_dose_domain_layer_fast_notsc!(..., id)`.
+## Finalization
+- Print total elapsed time (s) and return `nothing`.
+
+# Returns
+`nothing` — results are written in place to:
+- `cell_df_copy` (dose/energy accumulation)
+- `at` (updated AT state)
+
+# Side Effects
+- Mutates `cell_df_copy` and `at`.
+- Allocates temporary reduced DataFrames and matrices.
+- Prints progress and timing information.
+- Not thread‑safe w.r.t. shared DataFrames unless externally synchronized.
+
+# Assumptions / Requirements
+- `df_center_x`, `df_center_y`, and `at` are **aligned by `:index`** with
+`cell_df_copy`.
+- `irrad_cond` is indexed consistently with `energy_step` in layered mode, and
+has length 1 in TSC mode.
+- Helper functions are available in scope:
+- `dataframes_to_matrices`, `matrix_to_dataframe!`
+- `MC_loop_ions_domain_tsc_matrix!`, `MC_loop_ions_domain_matrix!`
+- `MC_loop_copy_dose_domain_fast!`,
+ `MC_loop_copy_dose_domain_layer_fast_notsc!`
+- `GenerateHit_Circle`
+- `Poisson` distribution is available (e.g., `using Distributions`).
+
+# Errors / Early exits
+- TSC mode: if no rows with `is_cell == 1`, logs a warning and returns early.
+- Layered mode: layers with no active cells are skipped with a message.
+
+# Notes
+- In layered mode, the log line “Sampling Np particle hits...” prints the
+actual sampled `Np`.
+- Group‑by reduction on `(:x, :y)` can significantly decrease matrix sizes and
+speed up the kernels; ensure coordinates are properly discretized to avoid
+spurious uniqueness from floating‑point noise.
+- For reproducibility, seed the RNG before Poisson sampling and hit generation
+if needed (e.g., `Random.seed!(...)`).
 
 # Example
 ```julia
-MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df,
-                df_center_x, df_center_y, at, gsm2_cycle, "KC", true)
+# Assuming all inputs are prepared and aligned by :index
+MC_dose_CPU!(
+ ion, Npar, R_beam,
+ irrad_cond, cell_df_copy,
+ df_center_x, df_center_y, at,
+ gsm2_cycle, "KC", true;       # track_seg = true (TSC)
+ x_cb=0.0, y_cb=0.0, single_particle=false
+)
+
+# Layered (non-TSC) mode
+MC_dose_CPU!(
+ ion, Npar, R_beam,
+ irrad_cond, cell_df_copy,
+ df_center_x, df_center_y, at,
+ gsm2_cycle, "KC", false;      # track_seg = false (layered)
+ x_cb=0.0, y_cb=0.0, single_particle=true
+)
 ```
 """
 function MC_dose_CPU!(
@@ -70,8 +229,8 @@ function MC_dose_CPU!(
     irrad_cond::Vector{AT}, cell_df_copy::DataFrame,
     df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
     gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool;
-    x_cb::Float64 = 0., y_cb::Float64 = 0.
-)
+    x_cb::Float64 = 0., y_cb::Float64 = 0., single_particle = false
+    )
     println("\n───────────────────────────────────────────────")
     println("🔧  Running MC_dose_fast!   (track_seg = $track_seg)")
     println("───────────────────────────────────────────────")
@@ -98,7 +257,8 @@ function MC_dose_CPU!(
 
         MC_loop_ions_domain_tsc_matrix!(
             Npar, x_cb, y_cb, [irrad_cond[1]], gsm2,
-            mat_x, mat_y, mat_at, R_beam, type_AT, ion
+            mat_x, mat_y, mat_at, R_beam, type_AT, ion,
+            single_particle
         )
 
         matrix_to_dataframe!(at_single, mat_at)
@@ -107,7 +267,7 @@ function MC_dose_CPU!(
     else
         println("• Mode: Layered (non-TSC) Matrix Optimization")
 
-        Np = rand(Poisson(Npar))
+        Np::Int = single_particle ? 1 : rand(Poisson(Npar))
         println("• Sampling $Np particle hits...")
 
         x_list = Vector{Float64}(undef, Np)
@@ -146,7 +306,7 @@ function MC_dose_CPU!(
 
     dt = round(time() - t_start; digits=3)
     println("───────────────────────────────────────────────")
-    println("🎉 MC_dose_fast! finished. Total time: $(dt)s")
+    println("🎉 MC_dose! finished. Total time: $(dt)s")
     println("───────────────────────────────────────────────\n")
 end
 
@@ -199,7 +359,7 @@ end
 """
     MC_loop_ions_domain_tsc_matrix!(Npar, x_cb, y_cb, irrad_cond, gsm2,
                                     mat_x, mat_y, mat_at,
-                                    R_beam, type_AT, ion)
+                                    R_beam, type_AT, ion, single_particle)
 
 TSC Monte Carlo on a flattened matrix domain.
 Builds a radial dose lookup table, samples N~Poisson(Npar) particles,
@@ -221,7 +381,7 @@ function MC_loop_ions_domain_tsc_matrix!(
     Npar::Int, x_cb::Float64, y_cb::Float64,
     irrad_cond::Vector{AT}, gsm2::GSM2,
     mat_x::Matrix{Float64}, mat_y::Matrix{Float64}, mat_at::Matrix{Float64},
-    R_beam::Float64, type_AT::String, ion::Ion
+    R_beam::Float64, type_AT::String, ion::Ion, single_particle::Bool
 )
     println("\n============================================================")
     println(" MC Loop - TSC Matrix")
@@ -259,7 +419,7 @@ function MC_loop_ions_domain_tsc_matrix!(
 
     at_acc = [zeros(Float64, total_domains) for _ in 1:Threads.maxthreadid()]
 
-    Np = rand(Poisson(Npar))
+    Np::Int = single_particle ? 1 : rand(Poisson(Npar))
     println("Expected: $Npar  |  Sampled: $Np  |  Threads: $(Threads.maxthreadid())")
 
     Threads.@threads for _ in 1:Np
@@ -792,3 +952,6 @@ function MC_loop_copy_dose_domain_layer_fast_notsc!(
     println("\n✔ Copy complete for energy_step $energy_step_to_match.")
     println("Elapsed: $(round(time() - t_start, digits=3)) s\n")
 end
+
+#
+

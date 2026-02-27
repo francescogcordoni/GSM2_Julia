@@ -873,7 +873,7 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
         i_voxel_z_vec[i] = i_vz
 
         # Check if the cell is inside the tumor
-        is_inside_tumor = sqrt(x^2 + y^2 + z^2) < tumor_radius
+        is_inside_tumor = sqrt(x^2 + y^2 + z^2) <= tumor_radius
         O2_TNT = 5.0 # Fixed value from original code
         O_vec[i] = O2_TNT
 
