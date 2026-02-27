@@ -22,7 +22,8 @@
 #?   setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg) -> Nothing
 #       Computes per-layer AT conditions, assigns energy steps, builds reduced
 #       irrad_cond array; injects irrad_cond, lets, energies, num_energy_steps into Main.
-#?   setup(E, particle, dose, tumor_radius; X_box, X_voxel, R_cell, target_geom, calc_type, Type_AT, track_seg) -> ion, irrad, cell_df, at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T
+#?   setup(E, particle, dose, tumor_radius; X_box, X_voxel, R_cell, target_geom, calc_type, Type_AT, track_seg) 
+#?   -> ion, irrad, cell_df, at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T
 #      Setup the whole envirnment: calls setup_GSM2!, setup_IonIrrad!, setup_cell_lattice!,
 #      setup_cell_population!, setup_irrad_conditions!; injects ion, irrad, cell_df,
 #      at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T into Main.

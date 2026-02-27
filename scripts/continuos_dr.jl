@@ -18,7 +18,7 @@ using InlineStrings
 using InlineStrings
 using CUDA
 using Statistics: mean
-
+using SparseArrays
 nthreads()
 
 #*Nd is the dimension fo the space, the nucleus of the cell is assumed to be a cylinder. 
@@ -83,21 +83,73 @@ setup_GSM2!(r, a, b, rd, Rn)
 #~ =================== Simulation Parameters ==================
 #~ ============================================================
 
-E            = 200.0
+E            = 50.0
 particle     = "1H"
-dose         = 1.5
+dose         = 1.
 tumor_radius = 300.0
-setup(E, particle, dose, tumor_radius)
+X_box = 310.
+setup(E, particle, dose, tumor_radius, X_box = X_box)
 cell_df_copy = deepcopy(cell_df)
 @time MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg, single_particle = true)
-#plot_scalar_cell(cell_df_copy, :dose_cell, layer_plot = true)
+plot_scalar_cell(cell_df_copy, :dose_cell, layer_plot = true)
+MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
+plot_damage(cell_df_copy, layer_plot = true)
+
+
+lut = Vector{Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}}(undef, 10)
+#for p in 1:10
+
+    # Reset cell_df_copy for this particle
+    cell_df_copy = deepcopy(cell_df)
+
+    # Run simulation for single particle
+    MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y,
+                    at, gsm2_cycle, type_AT, track_seg, single_particle = true)
+    MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
+
+    # Store only non-zero rows for this particle
+    particle_damage = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+
+    for row in eachrow(cell_df_copy)
+        x = row.dam_X_dom
+        y = row.dam_Y_dom
+
+        if all(iszero, x) && all(iszero, y)
+            continue
+        end
+    end
+
+    lut[p] = particle_damage
+end
+
+au = 4.
+doses_to_run = [0.1, 0.5, 1.0, 1.5, 2., 2.5, 3., 4.] # Doses from 1 to 5 Gy
+doserates_to_run_Gys = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 1e-2, 1e-1] # These values are in Gy/s
+doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au # Converted to Gy/h for the simulation
+
+
+    R_beam = at_start.Rp + Rn
+    F = irrad.dose / (1.602e-9 * ion.LET)
+    Npar = round(Int, F * (pi * (R_beam)^2 * 1e-8))
+    if Npar == 0
+        Npar = 1 # Ensure at least one particle to avoid division by zero
+    end
+    zF = irrad.dose / Npar
+    dr = irrad.doserate / zF
+
+
+
+
+
+
+
+
 
 #~ ==========================================================================================
 #~ ================================== compute damage ========================================
 #~ ==========================================================================================
 
 MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
-plot_damage(cell_df_copy, layer_plot = true)
 
 cell_df_copy.cell_cycle .= "G1"
 cell_df_copy.can_divide .= 0
