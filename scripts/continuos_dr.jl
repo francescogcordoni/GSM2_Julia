@@ -19,6 +19,7 @@ using InlineStrings
 using CUDA
 using Statistics: mean
 using SparseArrays
+
 nthreads()
 
 #*Nd is the dimension fo the space, the nucleus of the cell is assumed to be a cylinder. 
@@ -96,18 +97,16 @@ MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
 plot_damage(cell_df_copy, layer_plot = true)
 
 
-lut = Vector{Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}}(undef, 10)
-#for p in 1:10
+lut = Vector{Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}}(undef, Npar)
+@time @threads for p in 1:Npar
 
-    # Reset cell_df_copy for this particle
+    # Each thread gets its OWN copy — this is key
     cell_df_copy = deepcopy(cell_df)
 
-    # Run simulation for single particle
     MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y,
                     at, gsm2_cycle, type_AT, track_seg, single_particle = true)
     MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
 
-    # Store only non-zero rows for this particle
     particle_damage = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
 
     for row in eachrow(cell_df_copy)
@@ -117,10 +116,56 @@ lut = Vector{Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}}(undef, 10)
         if all(iszero, x) && all(iszero, y)
             continue
         end
+
+        particle_damage[row.index] = (copy(x), copy(y))
+    end
+
+    lut[p] = particle_damage  # safe: each thread writes to a different index p
+end
+
+result_df = deepcopy(cell_df)
+for p in 1:100
+    for (idx, (x, y)) in lut[p]
+        result_df[idx, :dam_X_dom] .+= x
+        result_df[idx, :dam_Y_dom] .+= y
+    end
+end
+plot_damage(result_df, layer_plot = true)
+
+jldsave("lut_1H_1Gy_50MeV.jld2"; lut)
+#lut = load("lut.jld2", "lut")
+
+
+
+lut = Vector{Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}}(undef, 10)
+@time for p in 1:10
+
+    # Reset cell_df_copy for this particle
+    cell_df_copy = deepcopy(cell_df)
+
+    # Run simulation for single particle
+    MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y,
+                    at, gsm2_cycle, type_AT, track_seg, single_particle = true)
+    MC_loop_damage!(ion, cell_df_copy, irrad_cond, gsm2_cycle)
+
+    particle_damage = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+
+    for row in eachrow(cell_df_copy)
+        x = row.dam_X_dom
+        y = row.dam_Y_dom
+
+        if all(iszero, x) && all(iszero, y)
+            continue
+        end
+
+        particle_damage[row.index] = (copy(x), copy(y))
     end
 
     lut[p] = particle_damage
 end
+
+cell_df_copy[idx, :dam_X_dom] .+= x
+cell_df_copy[idx, :dam_Y_dom] .+= y
 
 au = 4.
 doses_to_run = [0.1, 0.5, 1.0, 1.5, 2., 2.5, 3., 4.] # Doses from 1 to 5 Gy
