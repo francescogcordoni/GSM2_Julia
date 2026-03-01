@@ -10,6 +10,7 @@
 #       (track_seg=false) matrix kernels. Handles representative cell selection,
 #       DataFrame↔matrix conversion, and dose copy-back to full domain.
 #       If single_particle = true then it computes the dose for a single particle.
+#?   MC_precompute_lut!(ion, , irrad_cond, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg) -> Dict
 #
 #~ DataFrame ↔ Matrix Conversion
 #?   dataframes_to_matrices(df_x, df_y, df_at) -> (mat_x, mat_y, mat_at)
@@ -953,5 +954,242 @@ function MC_loop_copy_dose_domain_layer_fast_notsc!(
     println("Elapsed: $(round(time() - t_start, digits=3)) s\n")
 end
 
-#
+"""
+    MC_precompute_lut!(
+        ion::Ion, Npar::Int, R_beam::Float64,
+        irrad_cond::Vector{AT}, cell_df::DataFrame,
+        df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+        gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool;
+        x_cb::Float64 = 0.0, y_cb::Float64 = 0.0,
+        chunk_size::Int = 10_000
+    ) where {AT}
+
+Construct a **Monte Carlo lookup table (LUT)** for **continuous dose‑rate irradiation** by
+sampling particle impact positions in the beam field and computing the **per-domain dose**
+induced on all representative cell domains.  
+The function returns a vector `lut` such that:
+    lut[p][rep_idx] = dose_vector::Vector{Float64}
+where each `dose_vector` contains the **raw absorbed dose per domain** for particle `p` at the
+representative cell index `rep_idx`.  
+Subsequent radiobiology steps (e.g., `MC_loop_damage!`) will consume this LUT.
+
+# Overview
+
+1. **Geometry assembly (done once):**
+   - Extracts all *representative indices* for distinct `(x,y)` positions (one per column of
+     domains).
+   - Loads domain center coordinates from `df_center_x` / `df_center_y`.
+   - Flattens domain coordinates so each particle can compute dose on all domains by a single
+     loop over `total_domains`.
+
+2. **Radial dose lookup table (done once):**
+   - Builds a high-resolution 1D table of `dose(dist)` by calling
+     `distribute_dose_domain` inside a threaded loop.
+   - Covers three regions:
+       - **Core** (very small radius): constant `core_dose`.
+       - **Mid / in-target region**: bilinear interpolation on the pre-tabulated vector.
+       - **Penumbra**: falloff ∝ `Kp / dist²`.
+   - This lookup considerably speeds up per-particle dose deposition.
+
+3. **Monte Carlo particle loop (chunked):**
+   - The particle hits `(x, y)` are randomly sampled in a disk of radius `R_beam`.
+   - For each particle:
+       - Compute squared distances to all domain centers (flat arrays `dom_x`, `dom_y`).
+       - Convert each distance into dose using:
+         - core value,
+         - table interpolation,
+         - or penumbra formula.
+   - Domains are then **grouped by representative cell index** and only the non-zero segments
+     are stored.
+
+4. **Chunking and threading:**
+   - Particles are processed in chunks (`chunk_size`) to control peak memory usage.
+   - Each chunk is threaded over particles.
+   - The function provides progress prints and performs GC per chunk.
+
+# Arguments
+
+- `ion::Ion`: Particle species information (not directly used here but consistent with the
+  larger simulation pipeline).
+- `Npar::Int`: Number of incident particles to simulate.
+- `R_beam::Float64`: Beam radius (for uniform circular particle sampling).
+- `irrad_cond::Vector{AT}`: Irradiation physics settings (first element used for
+  Rp, Rc, Kp, etc.).
+- `cell_df::DataFrame`: Full cell geometry; used to extract which grid sites contain cells.
+- `df_center_x`, `df_center_y`: DataFrames containing domain center coordinates
+  (one row per representative index).
+- `at::DataFrame`: Additional parameters (passed for consistency; not used here directly).
+- `gsm2_cycle::Vector{GSM2}`: Only the first entry is used for geometric radii computations.
+- `type_AT::String`: Specifies the radial dose distribution model for `distribute_dose_domain`.
+- `track_seg::Bool`: Unused flag, but preserved for interface compatibility.
+- `x_cb`, `y_cb`: Beam center coordinates.
+- `chunk_size::Int`: Number of particles processed per batch.
+
+# Returned value
+
+- `lut::Vector{Dict{Int, Vector{Float64}}}` of length `Npar`.  
+  For each particle `p`, `lut[p]` maps:
+  rep_idx  →  dose_per_domain::Vector{Float64}
+Only representative indices with at least one non-zero domain are kept to reduce memory use.
+
+# Notes and assumptions
+
+- All geometry matrices (`dom_x`, `dom_y`, representative index vector) are built only once.
+- Radial dose is tabulated using `sim_ = 1000` logarithmically spaced distances.
+- Dose interpolation is linear between adjacent table points.
+- Particles are independent, so the inner loops are safely threaded.
+- A domain's absorbed dose depends solely on its distance to the particle impact position.
+- Because this function computes *raw per-domain dose*, downstream functions must perform
+  the biological damage conversion.
+- Removes all-zero domain groups per particle to reduce storage footprint.
+- `GC.gc()` is explicitly called after each chunk to bound memory spikes.
+
+# Example
+
+```julia
+lut = MC_precompute_lut!(
+    ion, 100_000, 50.0,
+    irrad_cond, cell_df,
+    df_center_x, df_center_y, at,
+    gsm2_cycle, "AT_Katz", false;
+    x_cb = 0.0, y_cb = 0.0,
+    chunk_size = 20_000
+)
+```
+"""
+function MC_precompute_lut!(
+    ion::Ion, Npar::Int, R_beam::Float64,
+    irrad_cond::Vector{AT}, cell_df::DataFrame,
+    df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+    gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool;
+    x_cb::Float64 = 0.0, y_cb::Float64 = 0.0,
+    chunk_size::Int = 10_000  # process in chunks to avoid memory explosion
+)
+    println("\n══════════════════════════════════════════════════════")
+    println(" MC_precompute_lut!  —  building per-particle LUT")
+    println(" Npar = $Npar  |  chunk_size = $chunk_size")
+    println("══════════════════════════════════════════════════════")
+
+    gsm2 = gsm2_cycle[1]
+
+    # ── 1. Build geometry (once) ──────────────────────────────────────────────
+    cell_df_is = filter(row -> row.is_cell == 1, cell_df)
+    grouped_df = combine(groupby(cell_df_is, [:x, :y]),
+                            :index => first => :representative_index)
+    rep_indices_set = Set(grouped_df.representative_index)
+
+    cell_df_sx = filter(row -> row.index in rep_indices_set, df_center_x)
+    cell_df_sy = filter(row -> row.index in rep_indices_set, df_center_y)
+
+    domain_cols          = names(cell_df_sx, Not(:index))
+    num_cells            = nrow(cell_df_sx)
+    num_domains_per_cell = length(domain_cols)
+    total_domains        = num_cells * num_domains_per_cell
+
+    # Flatten geometry vectors (once)
+    mat_x = Matrix{Float64}(cell_df_sx[:, domain_cols])
+    mat_y = Matrix{Float64}(cell_df_sy[:, domain_cols])
+    dom_x = vec(mat_x')   # length = total_domains
+    dom_y = vec(mat_y')
+
+    # Representative index for each domain position
+    rep_indices_vec = repeat(cell_df_sx.index, inner = num_domains_per_cell)
+
+    # ── 2. Build radial dose lookup table (once) ──────────────────────────────
+    Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
+    Kp = irrad_cond[1].Kp; Rk = Rp
+
+    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    mid_radius_sq      = (gsm2.rd + 150Rc)^2
+    penumbra_radius_sq = Rp^2
+
+    sim_ = 1000
+    impact_vec = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150Rc), length=sim_)
+    lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
+
+    Threads.@threads for i in 1:sim_
+        tid   = Threads.threadid()
+        track = Track(impact_vec[i], 0.0, Rk)
+        _, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
+        lookup_threads[tid][i] = Gyr
+    end
+    dose_vec  = sum(lookup_threads)
+    core_dose = dose_vec[1]
+
+    println("✔ Lookup table built. Geometry: $num_cells cells × $num_domains_per_cell domains")
+
+    lut = Vector{Dict{Int, Vector{Float64}}}(undef, Npar)
+
+    n_chunks = ceil(Int, Npar / chunk_size)
+
+    for chunk in 1:n_chunks
+        p_start = (chunk - 1) * chunk_size + 1
+        p_end   = min(chunk * chunk_size, Npar)
+        Np_chunk = p_end - p_start + 1
+
+        println("  Chunk $chunk / $n_chunks  (particles $p_start:$p_end)")
+
+        # Sample hit positions for this chunk
+        x_hits = Vector{Float64}(undef, Np_chunk)
+        y_hits = Vector{Float64}(undef, Np_chunk)
+        Threads.@threads for i in 1:Np_chunk
+            x_hits[i], y_hits[i] = GenerateHit_Circle(x_cb, y_cb, R_beam)
+        end
+
+        # Per-particle dose accumulation (thread-safe: each particle is independent)
+        chunk_results = Vector{Dict{Int, Vector{Float64}}}(undef, Np_chunk)
+
+        Threads.@threads for i in 1:Np_chunk
+            x = x_hits[i]; y = y_hits[i]
+            dose_p = zeros(Float64, total_domains)
+
+            @inbounds for k in 1:total_domains
+                dx = dom_x[k] - x; dy = dom_y[k] - y
+                dist_sq = dx*dx + dy*dy
+
+                if dist_sq <= core_radius_sq
+                    dose_p[k] = core_dose
+                elseif dist_sq <= mid_radius_sq
+                    dist  = sqrt(dist_sq)
+                    idx_l = searchsortedfirst(impact_vec, dist)
+                    if idx_l == 1
+                        dose_p[k] = core_dose
+                    elseif idx_l > sim_
+                        dose_p[k] = dose_vec[end]
+                    else
+                        x1, x2 = impact_vec[idx_l-1], impact_vec[idx_l]
+                        y1, y2 = dose_vec[idx_l-1], dose_vec[idx_l]
+                        dose_p[k] = y1 + (y2-y1)*(dist-x1)/(x2-x1)
+                    end
+                elseif dist_sq < penumbra_radius_sq
+                    dose_p[k] = Kp / dist_sq
+                end
+            end
+
+            # Group by representative index, skip all-zero groups
+            d = Dict{Int, Vector{Float64}}()
+            for j in 1:num_cells
+                seg = dose_p[(j-1)*num_domains_per_cell+1 : j*num_domains_per_cell]
+                if any(!iszero, seg)
+                    d[cell_df_sx.index[j]] = seg
+                end
+            end
+            chunk_results[i] = d
+        end
+
+        # Write chunk into lut
+        for i in 1:Np_chunk
+            lut[p_start + i - 1] = chunk_results[i]
+        end
+
+        # Free chunk memory
+        chunk_results = nothing
+        GC.gc()
+    end
+
+    println("\n✔ LUT complete. $(Npar) particles stored.")
+    println("══════════════════════════════════════════════════════\n")
+    return lut
+end
 

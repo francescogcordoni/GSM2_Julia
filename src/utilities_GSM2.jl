@@ -19,6 +19,7 @@
 #       Oxygen Enhancement Ratio from LET and oxygenation level O.
 #?   calculate_kappa(ion_name, LET, O; OER_bool) -> Float64
 #       Damage yield per Gy, ion-species dependent, with optional OER correction.
+#?   precompute_damage_lut!(lut, cell_df, irrad_cond, gsm2_cycle, ion, chunk_size) -> Dict
 #
 #~ Survival
 #?   compute_cell_survival_GSM2!(cell_df, gsm2_cycle; NFrac) -> Nothing
@@ -231,7 +232,7 @@ function MC_loop_damage!(
         cell_df.dam_Y_total[i] = sum(Yrow)
 
         vprintln("  dam_X_total=", cell_df.dam_X_total[i],
-                 "  dam_Y_total=", cell_df.dam_Y_total[i])
+                    "  dam_Y_total=", cell_df.dam_Y_total[i])
     end
 
     println("\n✔ Finished damage computation.")
@@ -241,6 +242,244 @@ function MC_loop_damage!(
 
     return nothing
 end
+
+"""
+    precompute_damage_lut!(
+        lut::Vector{Dict{Int, Vector{Float64}}},
+        cell_df::DataFrame,
+        irrad_cond::Vector{AT},
+        gsm2_cycle::Vector{GSM2},
+        ion::Ion;
+        chunk_size::Int = 10_000
+    ) where {AT}
+
+Build a **particle-wise damage lookup table** (LUT) for a **continuous dose-rate** irradiation,
+re-using per-(x,y) dose vectors across all z-layers and sampling **stochastic damage events**
+(X, Y) per cell and per domain repetition.
+
+# Summary
+
+- **Input**: `lut[p][rep_idx] => dose_vector::Vector{Float64}` gives the per-domain dose time
+  series for particle `p` at a *representative* cell index `rep_idx` (one per unique `(x,y)`).
+- **Output**: `Vector{Dict{Int, Tuple{Vector{Int}, Vector{Int}}}}` of length `Npar`, where
+  each entry `damage_lut[p][cell_idx] = (Xrow, Yrow)` stores the **sampled counts** of two
+  lesion types (e.g., complex/simple) along the repeated dose timeline for **all cells**
+  sharing the representative `(x,y)`.
+
+# What it does
+
+1. **(x,y) → indices mapping**: Groups all cell indices that lie on the same `(x,y)` in the
+   z-stack so that a single `dose_vector` per `(x,y)` can be broadcast to all z-layers.
+
+2. **Kinetic parameters per cell**:
+   - Derives `n_repeat = floor(Int, gsm2.Rn / gsm2.rd)` from the GSM2 cycle (number of domain
+     repetitions in the full irradiation).
+   - Computes `κ` (scaled lesion-rate factor) from `LET` through `calculate_kappa`, normalized
+     by `n_repeat * num_domains_per_cell`. Also sets `λ = κ * 1e-3` (second lesion class).
+   - Stores `(energy_step, O)` and the derived `κ`, `λ` per cell.
+
+3. **Chunked, threaded sampling**:
+   - Processes particles in chunks (`chunk_size`) to control memory pressure.
+   - For each particle and each representative cell index `rep_idx`:
+     - Retrieves all cells sharing `(x,y)`, copies the same `dose_vector`.
+     - For every dose point `d` and each repetition, samples
+       `X ~ Poisson(max(0, κ*d))`, `Y ~ Poisson(max(0, λ*d))` into `Xrow`, `Yrow`.
+     - If any counts are non-zero for a cell, records `(Xrow, Yrow)`.
+
+4. **Returns** the full `damage_lut`, along with console summaries of coverage.
+
+# Arguments
+
+- `lut::Vector{Dict{Int, Vector{Float64}}}`:
+  For each particle `p = 1:Npar`, a dictionary from **representative** cell index `rep_idx`
+  (unique per `(x,y)`) to a **dose time series** `dose_vector`. All z-layers at the same
+  `(x,y)` will re-use this dose vector.
+
+- `cell_df::DataFrame`:
+  Must contain at least the columns:
+  - `:index::Int` (unique cell index),
+  - `:x, :y::Real` (planar coordinates),
+  - `:is_cell::Int` (1 if a cell; 0 otherwise),
+  - `:energy_step::Int` (indexing `irrad_cond`),
+  - `:O::Real` (oxygenation or other scalar affecting κ).
+
+- `irrad_cond::Vector{AT}`:
+  Per-energy-step irradiation conditions. Each `irrad_cond[energy_step]` must provide `LET`.
+
+- `gsm2_cycle::Vector{GSM2}`:
+  Only the first element is used (`gsm2 = gsm2_cycle[1]`) to derive
+  `n_repeat = floor(Int, gsm2.Rn / gsm2.rd)`.
+
+- `ion::Ion`:
+  Particle species info; passed to `calculate_kappa(ion.ion, LET, O)`.
+
+- `chunk_size::Int=10_000`:
+  Number of particles to process per chunk. Increase to reduce overhead; decrease to limit RAM.
+
+# Returns
+- `damage_lut::Vector{Dict{Int, Tuple{Vector{Int}, Vector{Int}}}}`:
+  For each particle `p`, maps `cell_idx` to `(Xrow, Yrow)`, the time-expanded lesion counts.
+  The length of `Xrow`/`Yrow` equals `length(dose_vector) * n_repeat`. Cells with all-zero
+  counts are omitted to save memory.
+
+# Assumptions & Notes
+
+- **Continuous dose-rate** handling is achieved by repeating each `dose_vector` `n_repeat` times
+  to match the GSM2 cycle duration.
+- `num_domains_per_cell` is inferred from the first **non-empty** LUT entry and used to scale κ.
+- `λ = κ * 1e-3` is a fixed proportional relation; adjust as needed for your model.
+- Only rows with `row.is_cell == 1` are considered as biological targets.
+- Uses `Threads.@threads` over particles within each chunk; ensure RNG behavior is acceptable
+  for your reproducibility needs (e.g., set thread-safe seeds if required).
+- Skips storing `(Xrow, Yrow)` if both are all zeros for a given cell and particle—this keeps
+  memory bounded when events are rare.
+- Console prints summarize progress and the fraction of particles producing non-zero damage.
+
+# Performance tips
+
+- Choose `chunk_size` to balance throughput and memory. Larger chunks reduce dispatch/GC
+  overhead but may peak RAM.
+- Pre-allocations (`buf_X`, `buf_Y`) amortize Poisson sampling costs across repetitions.
+- If `lut` is very sparse, you benefit from the all-zero suppression per cell.
+
+# Example
+
+```julia
+damage_lut = precompute_damage_lut!(
+    lut,            # Vector{Dict{Int, Vector{Float64}}}
+    cell_df,        # DataFrame with :index, :x, :y, :is_cell, :energy_step, :O
+    irrad_cond,     # Vector{AT} where AT has field LET
+    gsm2_cycle,     # Vector{GSM2} where first element has fields Rn, rd
+    ion;            # Ion with field `ion`, used by calculate_kappa
+    chunk_size = 20_000
+)
+```
+"""
+function precompute_damage_lut!(
+    lut::Vector{Dict{Int, Vector{Float64}}},
+    cell_df::DataFrame,
+    irrad_cond::Vector{AT},
+    gsm2_cycle::Vector{GSM2},
+    ion::Ion;
+    chunk_size::Int = 10_000
+) where {AT}
+
+    println("\n══════════════════════════════════════════════════════")
+    println(" precompute_damage_lut!")
+    println(" Npar = $(length(lut))  |  chunk_size = $chunk_size")
+    println("══════════════════════════════════════════════════════")
+
+    gsm2     = gsm2_cycle[1]
+    n_repeat = floor(Int, gsm2.Rn / gsm2.rd)
+    Npar     = length(lut)
+
+    # ── 1. Build (x,y) → all cell indices map (z-layer copy) ─────────────────
+    xy_to_indices = Dict{Tuple{Float64,Float64}, Vector{Int}}()
+    for row in eachrow(cell_df)
+        row.is_cell != 1 && continue
+        key = (Float64(row.x), Float64(row.y))
+        push!(get!(xy_to_indices, key, Int[]), row.index)
+    end
+
+    # Map representative index → all cell indices sharing same (x,y)
+    index_to_row = Dict(idx => r for (r, idx) in enumerate(cell_df.index))
+    rep_to_all_indices = Dict{Int, Vector{Int}}()
+    for (p, dose_dict) in enumerate(lut)
+        for rep_idx in keys(dose_dict)
+            haskey(rep_to_all_indices, rep_idx) && continue
+            row = get(index_to_row, rep_idx, nothing)
+            row === nothing && continue
+            key = (Float64(cell_df.x[row]), Float64(cell_df.y[row]))
+            rep_to_all_indices[rep_idx] = get(xy_to_indices, key, Int[])
+        end
+    end
+
+    # ── 2. Build cell info + kappa/lambda per cell index ──────────────────────
+    num_domains_per_cell = length(first(values(first(filter(p -> !isempty(p), lut)))))
+
+    cell_info  = Dict{Int, Tuple{Int, Float64}}()  # index => (energy_step, O)
+    kappa_map  = Dict{Int, Float64}()
+    lambda_map = Dict{Int, Float64}()
+
+    for row in eachrow(cell_df)
+        row.is_cell != 1 && continue
+        LET = irrad_cond[row.energy_step].LET
+        κ   = 9.0 * calculate_kappa(ion.ion, LET, Float64(row.O)) / (n_repeat * num_domains_per_cell)
+        cell_info[row.index]  = (row.energy_step, Float64(row.O))
+        kappa_map[row.index]  = κ
+        lambda_map[row.index] = κ * 1e-3
+    end
+
+    println("✔ Built z-layer map: $(length(rep_to_all_indices)) representative cells")
+
+    # ── 3. Chunked damage computation ─────────────────────────────────────────
+    damage_lut = Vector{Dict{Int, Tuple{Vector{Int}, Vector{Int}}}}(undef, Npar)
+    n_chunks   = ceil(Int, Npar / chunk_size)
+
+    for chunk in 1:n_chunks
+        p_start  = (chunk - 1) * chunk_size + 1
+        p_end    = min(chunk * chunk_size, Npar)
+        Np_chunk = p_end - p_start + 1
+        println("  Chunk $chunk / $n_chunks  (particles $p_start:$p_end)")
+
+        chunk_damage = Vector{Dict{Int, Tuple{Vector{Int}, Vector{Int}}}}(undef, Np_chunk)
+
+        Threads.@threads for i in 1:Np_chunk
+            p           = p_start + i - 1
+            dose_dict   = lut[p]
+            particle_damage = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}()
+
+            for (rep_idx, dose_vector) in dose_dict
+
+                # Copy dose to all z-layers and compute damage for each
+                all_indices = get(rep_to_all_indices, rep_idx, Int[])
+
+                for cell_idx in all_indices
+                    κ = get(kappa_map,  cell_idx, 0.0)
+                    λ = get(lambda_map, cell_idx, 0.0)
+
+                    row_len = length(dose_vector) * n_repeat
+                    Xrow    = zeros(Int, row_len)
+                    Yrow    = zeros(Int, row_len)
+                    buf_X   = Vector{Int}(undef, n_repeat)
+                    buf_Y   = Vector{Int}(undef, n_repeat)
+
+                    pos = 1
+                    @inbounds for d in dose_vector
+                        λX = max(0.0, κ * d)
+                        λY = max(0.0, λ * d)
+                        λX > 0.0 ? rand!(Poisson(λX), buf_X) : fill!(buf_X, 0)
+                        λY > 0.0 ? rand!(Poisson(λY), buf_Y) : fill!(buf_Y, 0)
+                        copyto!(Xrow, pos, buf_X, 1, n_repeat)
+                        copyto!(Yrow, pos, buf_Y, 1, n_repeat)
+                        pos += n_repeat
+                    end
+
+                    if any(!iszero, Xrow) || any(!iszero, Yrow)
+                        particle_damage[cell_idx] = (Xrow, Yrow)
+                    end
+                end
+            end
+
+            chunk_damage[i] = particle_damage
+        end
+
+        for i in 1:Np_chunk
+            damage_lut[p_start + i - 1] = chunk_damage[i]
+        end
+
+        chunk_damage = nothing
+        GC.gc()
+    end
+
+    println("\n✔ damage_lut complete.")
+    n_nonzero = count(p -> !isempty(p), damage_lut)
+    println("  Non-zero particles: $n_nonzero / $Npar ($(round(100*n_nonzero/Npar, digits=1))%)")
+    println("══════════════════════════════════════════════════════\n")
+
+    return damage_lut
+end
+
 
 """
     calculate_OER(LET::Float64, O::Float64) -> Float64
