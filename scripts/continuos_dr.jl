@@ -87,8 +87,8 @@ setup_GSM2!(r, a, b, rd, Rn)
 E            = 50.0
 particle     = "1H"
 dose         = 1.
-tumor_radius = 300.0
-X_box = 310.
+tumor_radius = 100.0
+X_box = 110.
 setup(E, particle, dose, tumor_radius, X_box = X_box)
 cell_df_copy = deepcopy(cell_df)
 @time MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg, single_particle = true)
@@ -105,7 +105,6 @@ cell_df_copy.dam_X_total .= 0
 cell_df_copy.dam_Y_total .= 0
 #cell_df_copy = deepcopy(cell_df)
 
-# Step 1 — fast, parallel dose LUT
 @time lut = MC_precompute_lut!(
     ion, Npar, R_beam, irrad_cond, cell_df,
     df_center_x, df_center_y, at,
@@ -151,16 +150,15 @@ doserates_to_run_Gyh  = doserates_to_run_Gys .* 3600.0 .* au
 
 survival_results = zeros(length(doses_to_run), length(doserates_to_run_Gyh))
 Npar_effect      = length(damage_lut)
+gsm2             = gsm2_cycle[1]
 
-# Pre-extract vectors once — avoid repeated DataFrame access
-is_cell_base  = copy(cell_df_copy.is_cell)
-dam_X_base    = deepcopy(cell_df_copy.dam_X_dom)
-dam_Y_base    = deepcopy(cell_df_copy.dam_Y_dom)
-death_time_base = copy(cell_df_copy.death_time)
-Ntot          = count(==(1), is_cell_base)
-
-# Pre-build index → row map once
-index_to_row = Dict(idx => r for (r, idx) in enumerate(cell_df_copy.index))
+# Pre-build initial active cells template (read only, never modified)
+active_cells_base = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}()
+for row in eachrow(cell_df_copy)
+    row.is_cell != 1 && continue
+    active_cells_base[row.index] = (copy(row.dam_X_dom), copy(row.dam_Y_dom))
+end
+Ntot = length(active_cells_base)
 
 for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
     println("Running dose rate: $dose_rate_gyh Gy/h")
@@ -170,56 +168,73 @@ for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
         println("  Running dose: $dose Gy")
 
         N_dose = round(Int, dose * Npar_effect)
-        times_ = rand(Exponential(1/dr), N_dose)
 
-        # Reset from base vectors — much faster than deepcopy of full df
-        is_cell    = copy(is_cell_base)
-        dam_X_dom  = deepcopy(dam_X_base)
-        dam_Y_dom  = deepcopy(dam_Y_base)
-        death_time = copy(death_time_base)
+        # ── Generate inter-arrival times for this dose rate ───────────────
+        times_full = rand(Exponential(1/dr), N_dose)
 
-        # Write back to df once before loop
-        cell_df_dr = cell_df_copy
-        cell_df_dr[!, :is_cell]    = is_cell
-        cell_df_dr[!, :dam_X_dom]  = dam_X_dom
-        cell_df_dr[!, :dam_Y_dom]  = dam_Y_dom
-        cell_df_dr[!, :death_time] = death_time
+        # ── Filter out null damage entries, accumulate their times ────────
+        # damage_lut is never modified — read only
+        times_filtered = Float64[]
+        lut_indices    = Int[]
+        accumulated_time = 0.0
 
         for i in 1:N_dose
             lut_idx = mod1(i, Npar_effect)
+            accumulated_time += times_full[i]
 
-            # Direct vector access — no DataFrame overhead
-            @inbounds for (idx, (x, y)) in damage_lut[lut_idx]
-                row = index_to_row[idx]
-                is_cell[row] == 0 && continue  # skip dead cells
-                dam_X_dom[row] .+= x
-                dam_Y_dom[row] .+= y
-            end
-
-            # Sync to df only for compute_times_domain!
-            cell_df_dr[!, :dam_X_dom]  = dam_X_dom
-            cell_df_dr[!, :dam_Y_dom]  = dam_Y_dom
-            cell_df_dr[!, :is_cell]    = is_cell
-
-            compute_times_domain!(cell_df_dr, gsm2_cycle; terminal_time = times_[i])
-
-            # Pull death_time back and update is_cell/damage in vectors
-            death_time = cell_df_dr.death_time
-            @inbounds for r in 1:length(is_cell)
-                if isfinite(death_time[r])
-                    is_cell[r] = 0
-                    fill!(dam_X_dom[r], 0)
-                    fill!(dam_Y_dom[r], 0)
-                end
+            if !isempty(damage_lut[lut_idx])
+                push!(times_filtered, accumulated_time)
+                push!(lut_indices, lut_idx)
+                accumulated_time = 0.0
             end
         end
 
-        survival_results[k, j] = count(r -> !isfinite(death_time[r]) && is_cell[r] == 1,
-                                        1:length(is_cell)) / Ntot
+        println("    Effective particles: $(length(lut_indices)) / $N_dose")
 
-        println("    Survival: $(survival_results[k,j])")
+        # ── Reset active cells from base (deep copy of base vectors) ──────
+        active_cells = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}(
+            idx => (copy(X), copy(Y))
+            for (idx, (X, Y)) in active_cells_base
+        )
+
+        # ── Main loop ─────────────────────────────────────────────────────
+        @time for i in 1:length(lut_indices)
+            lut_idx = lut_indices[i]
+            t       = times_filtered[i]
+
+            # Add damage — skip dead cells
+            @inbounds for (idx, (x, y)) in damage_lut[lut_idx]
+                !haskey(active_cells, idx) && continue
+                active_cells[idx][1] .+= x
+                active_cells[idx][2] .+= y
+            end
+
+            # Run repair for each active cell
+            to_delete = Int[]
+            for (cell_idx, (X, Y)) in active_cells
+                death_time, _, _, X_new, Y_new =
+                    compute_repair_domain(X, Y, gsm2; terminal_time = t, au = au)
+
+                if isfinite(death_time)
+                    push!(to_delete, cell_idx)
+                else
+                    active_cells[cell_idx] = (X_new, Y_new)
+                end
+            end
+
+            # Remove dead cells
+            for idx in to_delete
+                delete!(active_cells, idx)
+            end
+        end
+
+        survival_results[k, j] = length(active_cells) / Ntot
+        println("    Survival: $(round(survival_results[k,j], digits=4))")
     end
 end
+
+
+
 
 using Plots
 
