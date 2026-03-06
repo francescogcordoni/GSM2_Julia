@@ -533,6 +533,8 @@ function calculate_kappa(ion_name::String, LET::Float64, O::Float64; OER_bool::B
     return yield
 end
 
+8. * calculate_kappa("12C", 150., 21.)
+
 """
     compute_cell_survival_GSM2!(cell_df, gsm2_cycle; NFrac=1) -> Nothing
 

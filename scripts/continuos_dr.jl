@@ -84,11 +84,11 @@ setup_GSM2!(r, a, b, rd, Rn)
 #~ =================== Simulation Parameters ==================
 #~ ============================================================
 
-E            = 50.0
-particle     = "1H"
-dose         = 1.
-tumor_radius = 100.0
-X_box = 110.
+E            = 10.0
+particle     = "12C"
+dose         = 4.
+tumor_radius = 450.0
+X_box = 560.
 setup(E, particle, dose, tumor_radius, X_box = X_box)
 cell_df_copy = deepcopy(cell_df)
 @time MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg, single_particle = true)
@@ -140,12 +140,12 @@ for i in 1:nrow(cell_df_copy)
 end
 cell_df_copy.dam_X_total .= 0
 cell_df_copy.dam_Y_total .= 0
-#jldsave("lut_1H_1Gy_50MeV.jld2"; damage_lut)
+jldsave("lut_12C_1Gy_10MeV.jld2"; damage_lut)
 #lut = load("lut.jld2", "lut")
 
 au = 4.
-doses_to_run          = [0.1, 0.5, 1.0, 1.5, 2., 2.5, 3., 4.]
-doserates_to_run_Gys  = [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 1e-2, 1e-1]
+doses_to_run          = [0.1, 0.5, 1.0, 1.5, 2., 3., 4.]
+doserates_to_run_Gys  = [1e-5, 1e-4, 1e-3, 1e-2]
 doserates_to_run_Gyh  = doserates_to_run_Gys .* 3600.0 .* au
 
 survival_results = zeros(length(doses_to_run), length(doserates_to_run_Gyh))
@@ -156,7 +156,8 @@ gsm2             = gsm2_cycle[1]
 active_cells_base = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}()
 for row in eachrow(cell_df_copy)
     row.is_cell != 1 && continue
-    active_cells_base[row.index] = (copy(row.dam_X_dom), copy(row.dam_Y_dom))
+    active_cells_base[row.index] = (zeros(Int, length(row.dam_X_dom)),
+                                    zeros(Int, length(row.dam_Y_dom)))
 end
 Ntot = length(active_cells_base)
 
@@ -165,23 +166,17 @@ for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
     dr = dose_rate_gyh / zF
 
     for (k, dose) in enumerate(doses_to_run)
-        println("  Running dose: $dose Gy")
-
-        N_dose = round(Int, dose * Npar_effect)
-
-        # ── Generate inter-arrival times for this dose rate ───────────────
+        N_dose = round(Int, dose * Npar_effect / 4)
         times_full = rand(Exponential(1/dr), N_dose)
-
-        # ── Filter out null damage entries, accumulate their times ────────
-        # damage_lut is never modified — read only
-        times_filtered = Float64[]
-        lut_indices    = Int[]
+        lut_order = mod1.(randperm(N_dose), Npar_effect)  # random permutation with wrap
+        times_filtered   = Float64[]
+        lut_indices      = Int[]
         accumulated_time = 0.0
 
         for i in 1:N_dose
-            lut_idx = mod1(i, Npar_effect)
+            lut_idx = lut_order[i]          # use shuffled order
             accumulated_time += times_full[i]
-
+        
             if !isempty(damage_lut[lut_idx])
                 push!(times_filtered, accumulated_time)
                 push!(lut_indices, lut_idx)
@@ -198,45 +193,45 @@ for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
         )
 
         # ── Main loop ─────────────────────────────────────────────────────
-        @time for i in 1:length(lut_indices)
+        for i in 1:length(lut_indices)
             lut_idx = lut_indices[i]
-            t       = times_filtered[i]
 
-            # Add damage — skip dead cells
+            # Add damage first
             @inbounds for (idx, (x, y)) in damage_lut[lut_idx]
                 !haskey(active_cells, idx) && continue
                 active_cells[idx][1] .+= x
                 active_cells[idx][2] .+= y
             end
-
-            # Run repair for each active cell
+        
+            # Repair time is the interval UNTIL THE NEXT hit, not the current one
+            t = i < length(lut_indices) ? times_filtered[i+1] : Inf
+        
             to_delete = Int[]
             for (cell_idx, (X, Y)) in active_cells
+                if all(iszero, X) && all(iszero, Y)
+                    continue
+                end
+            
                 death_time, _, _, X_new, Y_new =
                     compute_repair_domain(X, Y, gsm2; terminal_time = t, au = au)
-
+            
                 if isfinite(death_time)
                     push!(to_delete, cell_idx)
                 else
                     active_cells[cell_idx] = (X_new, Y_new)
                 end
             end
-
-            # Remove dead cells
+        
             for idx in to_delete
                 delete!(active_cells, idx)
             end
         end
 
+        # Final repair already handled by t = Inf for last particle
         survival_results[k, j] = length(active_cells) / Ntot
         println("    Survival: $(round(survival_results[k,j], digits=4))")
     end
 end
-
-
-
-
-using Plots
 
 p = plot(
     xlabel  = "Dose (Gy)",
@@ -254,4 +249,7 @@ for (j, dr) in enumerate(doserates_to_run_Gys)
 end
 
 display(p)
+
+survival_results = DataFrame(survival_results, :auto)
+CSV.write("survival_results_12C_10MeV.csv", survival_results)
 
