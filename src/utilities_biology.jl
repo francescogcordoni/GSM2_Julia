@@ -1123,92 +1123,110 @@ This approximates the classical experimental observation that spheroids have:
 set_oxygen!(cell_df; rim_ox=7.0, core_ox=0.1, max_dist_ref=450.0, plot_oxygen=true)
 ```
 """
+
 function set_oxygen!(
     cell_df::DataFrame;
-    rim_ox=7.0,
-    core_ox=0.1,
-    max_dist_ref=400.0,
-    plot_oxygen::Bool=false
+    rim_ox::Float64       = 7.0,
+    core_ox::Float64      = 0.1,
+    max_dist_ref::Float64 = 400.0,
+    plot_oxygen::Bool     = false
 )
-    # ------------------------------------------------------------
-    # 1) Compute distance from spheroid center (0,0,0)
-    # ------------------------------------------------------------
-    cell_df.distance = sqrt.((cell_df.x).^2 .+ (cell_df.y).^2 .+ (cell_df.z).^2)
+    # ── sanity checks ────────────────────────────────────────────────────────
+    rim_ox  >= core_ox  || error("rim_ox must be ≥ core_ox (surface is more oxygenated than core)")
+    max_dist_ref > 0    || error("max_dist_ref (penetration depth) must be positive")
 
-    # Maximum spheroid radius using only real cells
+    # ── 1. Radial distance from spheroid centre (0, 0, 0) ───────────────────
+    cell_df.distance = sqrt.(cell_df.x .^ 2 .+ cell_df.y .^ 2 .+ cell_df.z .^ 2)
+
+    # Outer radius = furthest alive cell
     max_dist = maximum(cell_df.distance[cell_df.is_cell .== 1])
 
     # Allocate oxygen column
     cell_df.O = similar(cell_df.distance)
 
-    # ------------------------------------------------------------
-    # 2) Oxygen assignment (linear scaling from rim to core)
-    # ------------------------------------------------------------
+    # ── 2. Oxygen assignment ─────────────────────────────────────────────────
+    #
+    #   dist_from_rim  = depth below the outer surface  =  max_dist − r
+    #
+    #   Zone A (normoxic outer shell):   dist_from_rim ≤ 0    → O2 = rim_ox
+    #   Zone B (hypoxic viable rim):     0 < dist_from_rim < max_dist_ref
+    #                                    → linear interpolation rim_ox → core_ox
+    #   Zone C (necrotic core):          dist_from_rim ≥ max_dist_ref → O2 = core_ox
+    #
     for i in 1:nrow(cell_df)
+
         if cell_df.is_cell[i] == 0
             cell_df.O[i] = 0.0
             continue
         end
 
-        # Distance from outer rim
-        dist_from_rim = max_dist - cell_df.distance[i]
+        dist_from_rim = max_dist - cell_df.distance[i]   # ≥ 0 for inner cells
 
-        if dist_from_rim <= 0
-            # At the outermost rim
+        if dist_from_rim <= 0.0
+            # ── Zone A: outermost cells (≈ at surface) ───────────────────────
             cell_df.O[i] = rim_ox
+
         elseif dist_from_rim < max_dist_ref
-            # Linear interpolation from rim_ox → core_ox over 0 → max_dist_ref
+            # ── Zone B: linear drop from rim_ox → core_ox ────────────────────
+            #   frac = 0 at surface → O2 = rim_ox
+            #   frac = 1 at depth λ → O2 = core_ox
             frac = dist_from_rim / max_dist_ref
             cell_df.O[i] = rim_ox - (rim_ox - core_ox) * frac
+
         else
-            # Deeper than 450 µm from rim → core oxygen
+            # ── Zone C: deep core – clamp at core_ox ─────────────────────────
             cell_df.O[i] = core_ox
         end
     end
 
-    # ------------------------------------------------------------
-    # 3) Optional 2-panel visualization
-    # ------------------------------------------------------------
+    # ── 3. Optional visualisation ────────────────────────────────────────────
     if plot_oxygen
-        # Only real cells
-        df_cells_den = cell_df[cell_df.is_cell .== 1, :]
-        df_cells_3d  = df_cells_den[df_cells_den.x .>= 0, :]  # half-sphere view
+        df_alive = cell_df[cell_df.is_cell .== 1, :]
+        df_half  = df_alive[df_alive.x .>= 0, :]    # half-sphere for clarity
 
-        # 3D scatter
         p1 = scatter(
-            df_cells_3d.x, df_cells_3d.y, df_cells_3d.z;
-            markersize = 4,
+            df_half.x, df_half.y, df_half.z;
+            markersize        = 4,
             markerstrokewidth = 0.1,
-            marker_z = df_cells_3d.O,
-            colorbar = true,
-            xlabel = "x (µm)",
-            ylabel = "y (µm)",
-            zlabel = "z (µm)",
-            title = "3D Oxygen Distribution",
+            marker_z          = df_half.O,
+            colorbar          = true,
+            xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
+            title  = "3-D oxygen distribution  [%]",
             legend = false,
-            aspect_ratio = :equal,
-            seriescolor = :viridis,
-            size = (900, 700),
-            camera = (320, 30)  # adjust view if needed
+            seriescolor  = :viridis,
+            size         = (900, 700),
+            camera       = (320, 30)
         )
 
-        # Oxygen density histogram
-        p2 = density(
-            df_cells_den.O;
-            xlabel = "Oxygen concentration",
+        # Annotate zone boundaries on a 1-D radial plot for sanity check
+        r_vals = sort(df_alive.distance)
+        o_vals = rim_ox .- (rim_ox .- core_ox) .*
+                    clamp.((max_dist .- r_vals) ./ max_dist_ref, 0.0, 1.0)
+        p2 = Plots.plot(
+            max_dist .- r_vals, o_vals;
+            xlabel = "Depth from surface (µm)",
+            ylabel = "O₂  [%]",
+            title  = "Radial O₂ profile",
+            lw = 2, c = :blue, legend = false
+        )
+        vline!(p2, [max_dist_ref];
+                ls = :dash, c = :red,
+                label = "penetration depth λ = $(max_dist_ref) µm")
+
+        p3 = density(
+            df_alive.O;
+            xlabel = "O₂ concentration  [%]",
             ylabel = "Density",
-            title = "Oxygen Density Distribution",
-            legend = false,
-            lw = 2,
-            c = :blue
+            title  = "O₂ distribution across cells",
+            legend = false, lw = 2, c = :blue
         )
 
-        # Combine plots
-        display(plot(p1, p2; layout = (1, 2), size = (1400, 600)))
+        display(plot(p1, p2, p3; layout = (1, 3), size = (1800, 600)))
     end
 
     return nothing
 end
+
 
 """
 Initialize cells to G0 if they have no space to divide (number_nei == 0)
