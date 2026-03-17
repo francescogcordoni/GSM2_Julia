@@ -43,13 +43,14 @@ p1 = plot(df_12C_15.time, df_12C_15.surv_prob;
     xlabel="Time [h]", ylabel="Survival probability")
 
 p2 = plot(df_12C_15.time, df_12C_15.Nalive;
-    lw=2, color=:black, label="G1",
+    lw=2, color=:black,
     xlabel="Survival probability", ylabel="N alive")
 plot!(df_12C_15.time, df_12C_15.G1;
     lw=2, color=:steelblue, label="G1")
 plot!(df_12C_15.time, df_12C_15.S;  lw=2, color="#D55E00", label="S")
 plot!(df_12C_15.time, df_12C_15.G2; lw=2, color=:forestgreen, label="G2")
 plot!(df_12C_15.time, df_12C_15.M;  lw=2, color=:purple, label="M")
+plot!(df_12C_15.time, df_12C_15.G0;  lw=2, label="G0")
 
 p_12C_15 = plot(p1, p2; layout=@layout([a; b]), size=(900,700),
         title="12C 15 MeV/u")
@@ -141,7 +142,8 @@ p_1H_2 = plot(p1, p2; layout=@layout([a; b]), size=(900,700),
 
 
 p1 = plot(df_1H_100.time, df_1H_100.surv_prob;
-    lw=2, label="1H 100 MeV/u") 
+    lw=2, label="1H 100 MeV/u",
+        xlabel="Time split [h]", ylabel="Survival probability") 
 plot!(df_1H_10.time, df_1H_10.surv_prob;
     lw=2, label="1H 10 MeV/u")
 plot!(df_1H_2.time, df_1H_2.surv_prob;
@@ -155,10 +157,6 @@ plot!(df_12C_15.time, df_12C_15.surv_prob;
 
 
 #####histograms
-using DataFrames
-using Plots
-
-# Colors (S in your rust-orange #D55E00)
 phase_colors = Dict(
     "G1" => :steelblue,
     "S"  => "#D55E00",
@@ -186,11 +184,11 @@ function phase_fraction_bar(df::DataFrame, target_time::Real, label::String)
 
     # Aggregate if multiple rows exist for that time
     agg = combine(groupby(df_t, :time),
-                  :Nalive => sum => :Nalive_sum,
-                  :G1     => sum => :G1_sum,
-                  :S      => sum => :S_sum,
-                  :G2     => sum => :G2_sum,
-                  :M      => sum => :M_sum)
+                    :Nalive => sum => :Nalive_sum,
+                    :G1     => sum => :G1_sum,
+                    :S      => sum => :S_sum,
+                    :G2     => sum => :G2_sum,
+                    :M      => sum => :M_sum)
 
     N = agg.Nalive_sum[1]
 
@@ -216,7 +214,7 @@ function phase_fraction_bar(df::DataFrame, target_time::Real, label::String)
         size=(500,400))
 end
 
-target_time = 10.0  
+target_time = 0.5  
 
 p_12C_15_10h  = phase_fraction_bar(df_12C_15,  target_time, "12C_15")
 p_12C_20_10h  = phase_fraction_bar(df_12C_20,  target_time, "12C_20")
@@ -231,7 +229,7 @@ p_10h = plot(p_12C_15_10h, p_12C_20_10h, p_12C_80_10h,
     layout=(2,3), size=(1800,1000))
 
 
-target_time = 24.0  
+target_time = 20.0  
 
 p_12C_15_24h  = phase_fraction_bar(df_12C_15,  target_time, "12C_15")
 p_12C_20_24h  = phase_fraction_bar(df_12C_20,  target_time, "12C_20")
