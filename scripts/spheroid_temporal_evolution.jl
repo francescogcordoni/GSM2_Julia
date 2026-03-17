@@ -3,10 +3,8 @@ using Distributed
 using CSV, DataFrames
 using Distributions
 using Random
-using Plots
 using JLD2
 using DelimitedFiles
-using StatsPlots
 using Statistics
 using StatsBase
 using InlineStrings
@@ -44,8 +42,8 @@ setup_GSM2!(r, a, b, rd, Rn)
 # Shared geometry — fixed once for all three conditions
 # ============================================================
 dose         = 2.0
-tumor_radius = 450.0
-X_box        = 600.0
+tumor_radius = 300.0
+X_box        = 300.0
 X_voxel      = 800.0
 R_cell       = 15.0
 target_geom  = "circle"
@@ -57,7 +55,7 @@ terminal_time = 72.0   # hours post-irradiation ABM window
 N_sideVox   = Int(floor(2 * X_box / X_voxel))
 N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
 
-snapshot_hours = [0, 12, 24, 48, 72]   # hours at which 3-D plots are made
+snapshot_hours = [0, 12, 24, 48, 72]   # hours at which snapshots are saved
 
 mkpath("results")
 
@@ -89,93 +87,6 @@ function reset_cell!(dst::DataFrame, src::DataFrame)
             copyto!(D_, S)
         end
     end
-end
-
-# ============================================================
-# Helper: 3-D half-sphere scatter coloured by cell cycle
-#
-# Uses scatter() with marker_z mapped to a numeric phase code so
-# the colorbar matches a discrete categorical colormap, exactly
-# following the style of the oxygen plot reference code.
-#
-# Phase → integer mapping (for marker_z):
-#   G0=0  G1=1  S=2  G2=3  M=4
-#
-# Accepts a DataFrame with :is_cell, :cell_cycle, :x, :y, :z.
-# z must be present — use snapshot_to_plot_df() to add it from
-# cell_df_pristine when working with CellPopulation snapshots.
-# ============================================================
-
-# Discrete colormap: gray, steelblue, green, orange, red  (G0→M)
-const PHASE_CMAP = cgrad([:gray, :steelblue, :green, :orange, :red],
-                          5; categorical=true)
-const PHASE_CODE = Dict("G0" => 0.0, "G1" => 1.0,
-                        "S"  => 2.0, "G2" => 3.0, "M" => 4.0)
-
-function plot_spheroid_halfcut(df::DataFrame, title_str::String)
-    # alive cells on x≥0 half only
-    alive = df[(df.is_cell .== 1) .& (df.x .>= 0), :]
-    phase_num = [get(PHASE_CODE, p, 0.0) for p in alive.cell_cycle]
-
-    p = scatter(
-        alive.x, alive.y, alive.z;
-        markersize        = 4,
-        markerstrokewidth = 0.1,
-        marker_z          = phase_num,
-        colorbar          = true,
-        colorbar_title    = "Phase",
-        clims             = (-0.5, 4.5),
-        seriescolor       = PHASE_CMAP,
-        xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
-        title  = title_str,
-        legend = false,
-        size   = (900, 700),
-        camera = (320, 30)
-    )
-
-    # Overlay invisible dummy series for a readable legend
-    for (phase, code) in sort(collect(PHASE_CODE), by=x->x[2])
-        sub = alive[alive.cell_cycle .== phase, :]
-        nrow(sub) == 0 && continue
-        scatter!(p, [sub.x[1]], [sub.y[1]], [sub.z[1]];
-                 markersize=4, markerstrokewidth=0.1,
-                 marker_z=[code], seriescolor=PHASE_CMAP,
-                 clims=(-0.5,4.5), label=phase, colorbar=false)
-    end
-    return p
-end
-
-"""
-    snapshot_to_plot_df(pop_snap, cell_df_pristine) -> DataFrame
-
-Convert a CellPopulation snapshot to a plottable DataFrame with x, y, z.
-CellPopulation does not carry z coordinates in snapshots — they are
-looked up from cell_df_pristine by cell index.
-"""
-function snapshot_to_plot_df(pop_snap::CellPopulation,
-                               cell_df_pristine::DataFrame)::DataFrame
-    snap_df = to_dataframe(pop_snap; alive_only=false)
-    z_lookup = Dict{Int32, Int32}(zip(cell_df_pristine.index,
-                                       cell_df_pristine.z))
-    snap_df[!, :z] = Int32[get(z_lookup, idx, Int32(0))
-                           for idx in snap_df.index]
-    return snap_df
-end
-
-# ============================================================
-# Helper: phase-proportion plot
-# ============================================================
-function plot_phases(ts_df::DataFrame, label::String)
-    t = ts_df.time
-    p = plot(t, ts_df.total_cells; label="Alive", lw=2, color=:black,
-             xlabel="Time (h)", ylabel="Cell count", title=label)
-    plot!(p, t, ts_df.g1_cells; label="G1", lw=1.5, color=:steelblue)
-    plot!(p, t, ts_df.s_cells;  label="S",  lw=1.5, color=:green)
-    plot!(p, t, ts_df.g2_cells; label="G2", lw=1.5, color=:orange)
-    plot!(p, t, ts_df.m_cells;  label="M",  lw=1.5, color=:red)
-    plot!(p, t, ts_df.g0_cells; label="G0", lw=1.5, color=:gray,
-          linestyle=:dash)
-    return p
 end
 
 # ============================================================
@@ -291,30 +202,33 @@ end
 CSV.write("results/cell_df_pristine.csv", cell_df_pristine)
 
 # ── Helper: irradiate a copy of the pristine population ──────────────────────
+# CRITICAL: does NOT call setup_cell_lattice! or setup_cell_population!
+# Those calls overwrite the global cell_df with a new random population,
+# destroying the shared pristine geometry and making all conditions identical.
+# Only setup_IonIrrad! (updates ion/irrad/LET) and setup_irrad_conditions!
+# (rebuilds irrad_cond/df_center_x/df_center_y/at for the new particle) are
+# called here. Cell positions and cycle phases come from deepcopy(cell_df_pristine).
 function irradiate_copy(E::Float64, particle::String,
                          cell_df_pristine::DataFrame,
                          gsm2_cycle::Vector{GSM2};
-                         dose::Float64        = 2.0,
-                         tumor_radius::Float64 = 300.0,
-                         X_box::Float64       = 300.0,
-                         X_voxel::Float64     = 800.0,
-                         R_cell::Float64      = 15.0,
-                         target_geom::String  = "circle",
-                         calc_type::String    = "full",
-                         type_AT::String      = "KC",
-                         track_seg::Bool      = true)
+                         dose::Float64         = 2.0,
+                         tumor_radius::Float64  = 300.0,
+                         X_box::Float64        = 300.0,
+                         X_voxel::Float64      = 800.0,
+                         R_cell::Float64       = 15.0,
+                         target_geom::String   = "circle",
+                         calc_type::String     = "full",
+                         type_AT::String       = "KC",
+                         track_seg::Bool       = true)
 
-    N_sideVox_   = Int(floor(2 * X_box / X_voxel))
-    N_CellsSide_ = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
-
+    # Update ion/irrad/LET for this particle — does NOT touch cell_df
     setup_IonIrrad!(dose, E, particle)
     R_beam_, _, _ = calculate_beam_properties(calc_type, target_geom,
                                                X_box, X_voxel, tumor_radius)
-    setup_cell_lattice!(target_geom, X_box, R_cell,
-                        N_sideVox_, N_CellsSide_;
-                        ParIrr="false", track_seg=track_seg)
-    setup_cell_population!(target_geom, X_box, R_cell,
-                           N_sideVox_, N_CellsSide_, gsm2_cycle[4])
+
+    # Rebuild irrad_cond, df_center_x, df_center_y, at for the new particle.
+    # cell_df (global) was built during the initial geometry setup and must
+    # remain unchanged — it is the geometry reference for df_center_x/at.
     setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
 
     # Start from the pristine geometry
@@ -344,10 +258,10 @@ end
 # IRRADIATE: 3 conditions
 # ============================================================
 println("\n--- Irradiating: 1H 80 MeV ---")
-cell_1H_80  = irradiate_copy(150.0,  "1H",  cell_df_pristine, gsm2_cycle)
+cell_1H_80  = irradiate_copy(80.0,  "1H",  cell_df_pristine, gsm2_cycle)
 
 println("\n--- Irradiating: 1H 30 MeV ---")
-cell_1H_30  = irradiate_copy(10.0,  "1H",  cell_df_pristine, gsm2_cycle)
+cell_1H_30  = irradiate_copy(30.0,  "1H",  cell_df_pristine, gsm2_cycle)
 
 println("\n--- Irradiating: 12C 80 MeV/u ---")
 cell_12C_80 = irradiate_copy(80.0,  "12C", cell_df_pristine, gsm2_cycle)
@@ -360,12 +274,12 @@ CSV.write("results/cell_irrad_12C_80.csv", cell_12C_80)
 # ============================================================
 # RUN ABM FOR EACH CONDITION
 # ============================================================
-res_1H_80  = run_condition("1H_80MeV",   150.0, "1H",
+res_1H_80  = run_condition("1H_80MeV",   80.0, "1H",
                             cell_1H_80,  gsm2_cycle;
                             terminal_time=terminal_time,
                             snapshot_hours=snapshot_hours)
 
-res_1H_30  = run_condition("1H_30MeV",   10.0, "1H",
+res_1H_30  = run_condition("1H_30MeV",   30.0, "1H",
                             cell_1H_30,  gsm2_cycle;
                             terminal_time=terminal_time,
                             snapshot_hours=snapshot_hours)
@@ -387,8 +301,8 @@ summary_df = DataFrame(
     final_alive       = Int[])
 
 for (res, part, E_val) in [
-        (res_1H_80,  "1H",  150.0),
-        (res_1H_30,  "1H",  10.0),
+        (res_1H_80,  "1H",  80.0),
+        (res_1H_30,  "1H",  30.0),
         (res_12C_80, "12C", 80.0)]
     push!(summary_df, (res.label, part, E_val, res.Ntot, res.sf,
                        count(res.cell_df.is_cell .== 1)))
@@ -396,117 +310,6 @@ end
 CSV.write("results/summary.csv", summary_df)
 println("\nSummary:")
 println(summary_df)
-
-# ============================================================
-# PLOT 1: Temporal evolution of total cell count
-# ============================================================
-p_total = plot(;
-    xlabel="Time (h)", ylabel="Alive cells",
-    title="Spheroid response — 2 Gy",
-    legend=:topright, size=(900, 500), dpi=150)
-
-for (res, col, ls) in [
-        (res_1H_80,  :steelblue, :solid),
-        (res_1H_30,  :darkorange, :solid),
-        (res_12C_80, :red,       :solid)]
-    plot!(p_total, res.ts_df.time, res.ts_df.total_cells;
-          label="$(res.label)  (SF=$(round(res.sf,digits=3)))",
-          lw=2, color=col, linestyle=ls)
-end
-display(p_total)
-savefig(p_total, "results/total_cells.png")
-
-# ============================================================
-# PLOT 2: Phase breakdown — one panel per condition
-# ============================================================
-p_ph_1H_80  = plot_phases(res_1H_80.ts_df,  "1H 80 MeV — 2 Gy")
-p_ph_1H_30  = plot_phases(res_1H_30.ts_df,  "1H 30 MeV — 2 Gy")
-p_ph_12C_80 = plot_phases(res_12C_80.ts_df, "12C 80 MeV/u — 2 Gy")
-
-display(plot(p_ph_1H_80, p_ph_1H_30, p_ph_12C_80;
-             layout=(1,3), size=(1400,450), dpi=150))
-savefig(plot(p_ph_1H_80, p_ph_1H_30, p_ph_12C_80;
-             layout=(1,3), size=(1400,450), dpi=150),
-        "results/phase_breakdown.png")
-
-# ============================================================
-# PLOT 3: Survival fraction over time (normalised)
-# ============================================================
-p_sf = plot(;
-    xlabel="Time (h)", ylabel="Relative cell number (N/N₀)",
-    title="Normalised survival — 2 Gy",
-    legend=:topright, size=(900,500), dpi=150)
-
-for (res, col) in [
-        (res_1H_80,  :steelblue),
-        (res_1H_30,  :darkorange),
-        (res_12C_80, :red)]
-    norm = res.ts_df.total_cells ./ res.Ntot
-    plot!(p_sf, res.ts_df.time, norm;
-          label=res.label, lw=2, color=col)
-end
-hline!(p_sf, [1.0]; color=:black, ls=:dash, lw=1, label="N₀")
-display(p_sf)
-savefig(p_sf, "results/normalised_survival.png")
-
-# ============================================================
-# PLOT 4: 3-D half-sphere snapshots
-#   4 time points × 3 conditions
-#   z coords are joined from cell_df_pristine because
-#   CellPopulation snapshots do not carry the z field.
-# ============================================================
-for (res, part_label) in [
-        (res_1H_80,  "1H_80"),
-        (res_1H_30,  "1H_30"),
-        (res_12C_80, "12C_80")]
-
-    panels = []
-    for hr in snapshot_hours
-        if haskey(res.snaps, hr)
-            # Convert snapshot → DataFrame, join z from pristine geometry
-            plot_df = snapshot_to_plot_df(res.snaps[hr], cell_df_pristine)
-            push!(panels,
-                  plot_spheroid_halfcut(plot_df, "$(part_label) t=$(hr)h"))
-        else
-            println("  [warn] no snapshot at t=$(hr)h for $(res.label), skipping panel")
-        end
-    end
-
-    isempty(panels) && continue
-    n_panels = length(panels)
-    p_3d = plot(panels...;
-                layout=(1, n_panels),
-                size=(700 * n_panels, 650),
-                dpi=100)
-    display(p_3d)
-    savefig(p_3d, "results/spheroid_3d_$(res.label).png")
-    println("Saved: results/spheroid_3d_$(res.label).png")
-end
-
-# ============================================================
-# PLOT 5: Phase proportions over time (stacked area)
-# ============================================================
-function plot_phase_fractions(ts_df::DataFrame, label::String)
-    t = ts_df.time
-    tot = max.(ts_df.total_cells, 1)
-    p = plot(;
-        xlabel="Time (h)", ylabel="Phase fraction",
-        title=label, legend=:topright, ylims=(0,1))
-    plot!(p, t, ts_df.g1_cells ./ tot; label="G1", lw=2, color=:steelblue, fill=(0,:steelblue,0.3))
-    plot!(p, t, ts_df.s_cells  ./ tot; label="S",  lw=2, color=:green,     fill=(0,:green,    0.3))
-    plot!(p, t, ts_df.g2_cells ./ tot; label="G2", lw=2, color=:orange,    fill=(0,:orange,   0.3))
-    plot!(p, t, ts_df.m_cells  ./ tot; label="M",  lw=2, color=:red,       fill=(0,:red,      0.3))
-    plot!(p, t, ts_df.g0_cells ./ tot; label="G0", lw=2, color=:gray,      fill=(0,:gray,     0.3))
-    return p
-end
-
-p_frac = plot(
-    plot_phase_fractions(res_1H_80.ts_df,  "1H 80 MeV"),
-    plot_phase_fractions(res_1H_30.ts_df,  "1H 30 MeV"),
-    plot_phase_fractions(res_12C_80.ts_df, "12C 80 MeV/u");
-    layout=(1,3), size=(1400,450), dpi=150)
-display(p_frac)
-savefig(p_frac, "results/phase_fractions.png")
 
 # ============================================================
 # FINAL PRINT

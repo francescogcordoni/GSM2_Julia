@@ -1,3 +1,49 @@
+#! ============================================================================
+#! mc_dose_fast_gpu.jl
+#!
+#! FUNCTIONS
+#! ---------
+#~ GPU Kernel Utilities
+#?   _log_index(x, log_vmin, log_vmax, n) -> Int32
+#       Log-spaced bin index for `x` in [10^log_vmin, 10^log_vmax] divided into
+#       `n` bins. Clamped to [1, n]. Inline helper callable from GPU device code.
+#?   _build_lookup(irrad_cond, gsm2, type_AT)
+#           -> (dose_vec, core_dose, core_radius_sq, mid_radius_sq,
+#               penumbra_radius_sq, Kp, log_impact_min, log_impact_max)
+#       Builds a CPU-side log-spaced radial dose lookup table (1000 samples)
+#       covering core, mid, and penumbra regions. Used to initialise GPU runs.
+#
+#~ CUDA Kernels
+#?   _mc_dose_kernel_fast!(out, dom_x, dom_y, px, py, Np, dose_vec, sim_,
+#                          log_impact_min, log_impact_max,
+#                          core_radius_sq, mid_radius_sq, penumbra_radius_sq,
+#                          core_dose, Kp)
+#       CUDA kernel — one thread per domain point. Accumulates dose from Np
+#       primary particles using core / mid (log-interpolated lookup) / penumbra
+#       (Kp/dist²) regions. Mutates `out` in-place on device.
+#
+#~ GPU Dispatch
+#?   _gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
+#                     core_radius_sq, mid_radius_sq, penumbra_radius_sq,
+#                     core_dose, Kp, log_impact_min, log_impact_max)
+#       Uploads particle coordinates to the GPU, launches `_mc_dose_kernel_fast!`,
+#       synchronises, and frees temporary device arrays. Single-batch wrapper
+#       around the CUDA kernel.
+#
+#~ High-Level MC Wrapper (auto CPU/GPU dispatch)
+#?   MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy,
+#                  df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg;
+#                  x_cb, y_cb)
+#       Top-level Monte Carlo dose-deposition driver with automatic CPU/GPU
+#       dispatch. Selects GPU when CUDA is functional and Npar ≥
+#       GPU_PARTICLE_THRESHOLD; falls back to CPU otherwise.
+#       Supports two execution modes:
+#         • track_seg = true  → TSC (Track-Segment) matrix optimisation
+#         • track_seg = false → Layered (non-TSC) energy-step loop
+#       Handles representative cell selection, DataFrame↔matrix conversion,
+#       particle sampling (Poisson), kernel dispatch, and dose copy-back.
+#       Mutates `cell_df_copy` (dose/energy fields) and `at` (AT state) in place.
+#! ============================================================================
 
 const BLOCK_SIZE             = 256
 const GPU_PARTICLE_THRESHOLD = 1_000_000

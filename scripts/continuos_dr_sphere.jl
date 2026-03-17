@@ -3,12 +3,9 @@ using Distributed
 using CSV, DataFrames
 using Distributions
 using Random
-using Plots
 using ProgressBars
-using GLM
 using JLD2
 using DelimitedFiles
-using StatsPlots
 using Statistics
 using StatsBase
 using Optim
@@ -54,7 +51,7 @@ setup_GSM2!(r, a, b, rd, Rn)
 # ============================================================
 E            = 50.0
 particle     = "1H"
-dose         = 1.5          # ← changed from 1.0
+dose         = 1.5
 tumor_radius = 150.0
 X_box        = 260.0
 au           = 4.0
@@ -110,7 +107,6 @@ jldsave("results/damage_lut.jld2";      damage_lut)
 # ============================================================
 # Helpers
 # ============================================================
-
 function ts_to_df(ts::SimulationTimeSeries)
     DataFrame(
         time           = ts.time,
@@ -336,65 +332,18 @@ function run_doserate_scenario(
 end
 
 # ============================================================
-# Plot helpers
+# RUN: 1.5 Gy  with dose rates 1e-6, 1e-5, 1e-2 Gy/s
 # ============================================================
-function plot_doserate_comparison(abm_results, dose_label; au = 4.0)
-    dr_colors = Dict(
-        1e-6 * 3600.0 * au => :green,       # ← new
-        1e-7 * 3600.0 * au => :purple,
-        1e-5 * 3600.0 * au => :steelblue,
-        1e-2 * 3600.0 * au => :darkorange)
+abm_results_1p5Gy = run_doserate_scenario(
+    "1p5Gy", 1.5,
+    [1e-6, 1e-5, 1e-2],
+    damage_lut, cell_df_copy, gsm2_cycle, gsm2_cycle[1], zF, Ntot,
+    active_cells_base;
+    au = au, outdir = "results")
 
-    sorted = sort(collect(abm_results), by = x -> x[1])
-    first_res = sorted[1][2]
-
-    p = plot(;
-        xlabel = "Time (h)", ylabel = "Total cells",
-        title  = "$dose_label  |  Dose-rate comparison",
-        legend = :topright, size = (900, 550), dpi = 150)
-
-    for (dr_gyh, col) in sort(collect(dr_colors), by = x -> x[1])
-        haskey(abm_results, dr_gyh) || continue
-        res   = abm_results[dr_gyh]
-        t_all = vcat(res.ts_irrad.time,         res.ts_post.time)
-        c_all = vcat(res.ts_irrad.total_cells,   res.ts_post.total_cells)
-        plot!(p, t_all, c_all;
-              label = "$(res.dose_rate_gys) Gy/s  (SF=$(round(res.survival_fraction, digits=3)))",
-              lw    = 2,
-              color = col)
-        vline!(p, [res.abm_wall_time];
-               label = "", color = col, lw = 1.5, linestyle = :dot)
-    end
-    return p
-end
-
-function plot_phase_breakdown(abm_results, dose_label; au = 4.0)
-    sorted = sort(collect(abm_results), by = x -> x[1])
-    n      = length(sorted)
-    phase_colors = [:gray :steelblue :green :orange :red]
-    phase_labels = ["G0" "G1" "S" "G2" "M"]
-    phase_fields = [:g0_cells :g1_cells :s_cells :g2_cells :m_cells]
-
-    p = plot(layout = (1, n), size = (420n, 420), dpi = 150)
-    for (pi, (_, res)) in enumerate(sorted)
-        t_all = vcat(res.ts_irrad.time, res.ts_post.time)
-        for (fi, fld) in enumerate(phase_fields)
-            y_all = vcat(getfield(res.ts_irrad, fld), getfield(res.ts_post, fld))
-            plot!(p, t_all, y_all;
-                  subplot = pi,
-                  label   = phase_labels[fi],
-                  color   = phase_colors[fi],
-                  lw      = 1.5,
-                  title   = "$(round(res.dose_rate_gys, sigdigits=2)) Gy/s",
-                  xlabel  = pi == ceil(Int, n/2) ? "Time (h)" : "",
-                  ylabel  = pi == 1 ? "Cells" : "")
-        end
-        vline!(p, [res.abm_wall_time];
-               subplot = pi, label = "", color = :black, lw = 1, linestyle = :dot)
-    end
-    return p
-end
-
+# ============================================================
+# SUMMARY CSV
+# ============================================================
 function summary_csv(abm_results, dose_label, outdir)
     df = DataFrame(
         dose_rate_gys     = Float64[],
@@ -413,35 +362,12 @@ function summary_csv(abm_results, dose_label, outdir)
     return df
 end
 
-# ============================================================
-# RUN: 1.5 Gy  with dose rates 1e-7, 1e-6, 1e-5, 1e-2 Gy/s
-# ============================================================
-abm_results_1p5Gy = run_doserate_scenario(
-    "1p5Gy", 1.5,
-    [1e-6, 1e-5, 1e-2],   # ← 1e-6 added
-    damage_lut, cell_df_copy, gsm2_cycle, gsm2_cycle[1], zF, Ntot,
-    active_cells_base;
-    au = au, outdir = "results")
-
-# ============================================================
-# PLOTS
-# ============================================================
-p_1p5Gy = plot_doserate_comparison(abm_results_1p5Gy, "1.5 Gy"; au = au)
-display(p_1p5Gy)
-savefig(p_1p5Gy, "results/survival_1p5Gy.png")
-println("Saved: results/survival_1p5Gy.png")
-
-p_phase_1p5Gy = plot_phase_breakdown(abm_results_1p5Gy, "1.5 Gy"; au = au)
-display(p_phase_1p5Gy)
-savefig(p_phase_1p5Gy, "results/phases_1p5Gy.png")
-println("Saved: results/phases_1p5Gy.png")
-
 summary_csv(abm_results_1p5Gy, "1p5Gy", "results")
 
 # ============================================================
 # SANITY CHECK
 # Expected: lower dose rate → more repair time → higher survival
-# Order: 1e-7 > 1e-6 > 1e-5 > 1e-2 Gy/s
+# Order: 1e-6 > 1e-5 > 1e-2 Gy/s
 # ============================================================
 println("\n", "="^60)
 println("SANITY CHECK — expected: lower dose rate → higher SF")
@@ -451,3 +377,13 @@ for (_, res) in sort(collect(abm_results_1p5Gy), by = x -> x[1])
             res.dose_rate_gys, res.survival_fraction, res.abm_wall_time)
 end
 
+# ============================================================
+# FINAL PRINT
+# ============================================================
+println("\n", "="^60)
+println("ALL RESULTS SAVED TO results/")
+println("="^60)
+println("Files written:")
+for f in sort(readdir("results"))
+    println("  results/$f")
+end
