@@ -573,6 +573,21 @@ function compute_cell_survival_GSM2!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2
     end
 end
 
+function compute_cell_survival_GSM2_NTCP!(cell_df::DataFrame, gsm2::GSM2; NFrac::Int64 = 1)
+    cell_df.sp          .= 1.
+    cell_df.apo_time    .= Inf
+    cell_df.death_time  .= Inf
+    cell_df.recover_time .= Inf
+    cell_df.cycle_time  .= Inf
+    cell_df.is_death_rad .= 0
+    cell_df.death_type  .= -1
+
+    for i in cell_df.index[cell_df.is_cell .== 1]
+        SP_cell = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
+        cell_df.sp[i] = SP_cell ^ NFrac
+    end
+end
+
 """
     domain_GSM2(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2) -> Float64
 
