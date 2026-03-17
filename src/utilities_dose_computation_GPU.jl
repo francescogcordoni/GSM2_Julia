@@ -1,14 +1,3 @@
-#! ============================================================================
-#! utilities_MC_gpu.jl  (patched — track_seg passed to MC_loop_ions_domain_tsc_matrix!)
-#!
-#! FIX: CPU TSC branch of MC_dose_fast! was missing `track_seg` as the 12th
-#!      argument to MC_loop_ions_domain_tsc_matrix!.
-#!      Closest candidate signature:
-#!        MC_loop_ions_domain_tsc_matrix!(::Int64, ::Float64, ::Float64,
-#!          ::Vector{AT}, ::GSM2, ::Matrix{Float64}, ::Matrix{Float64},
-#!          ::Matrix{Float64}, ::Float64, ::String, ::Ion, ::Bool)
-#!      The Bool is track_seg.
-#! ============================================================================
 
 const BLOCK_SIZE             = 256
 const GPU_PARTICLE_THRESHOLD = 1_000_000
