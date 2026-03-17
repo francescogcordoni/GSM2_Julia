@@ -22,6 +22,11 @@
 #?   setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg) -> Nothing
 #       Computes per-layer AT conditions, assigns energy steps, builds reduced
 #       irrad_cond array; injects irrad_cond, lets, energies, num_energy_steps into Main.
+#?   setup(E, particle, dose, tumor_radius; X_box, X_voxel, R_cell, target_geom, calc_type, Type_AT, track_seg) 
+#?   -> ion, irrad, cell_df, at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T
+#      Setup the whole envirnment: calls setup_GSM2!, setup_IonIrrad!, setup_cell_lattice!,
+#      setup_cell_population!, setup_irrad_conditions!; injects ion, irrad, cell_df,
+#      at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T into Main.
 #
 #~ Energy Binning
 #?   set_energy_steps!(cell_df, irrad_cond) -> Nothing
@@ -152,12 +157,12 @@ setup_cell_lattice!("square", 900.0, 15.0, 12, 60; ParIrr="true")
 ```
 """
 function setup_cell_lattice!(target_geom::String,
-                              X_box::Float64,
-                              R_cell::Float64,
-                              N_sideVox::Int,
-                              N_CellsSide::Int;
-                              ParIrr::String  = "false",
-                              track_seg::Bool = true)
+                                X_box::Float64,
+                                R_cell::Float64,
+                                N_sideVox::Int,
+                                N_CellsSide::Int;
+                                ParIrr::String  = "false",
+                                track_seg::Bool = true)
 
     N_local, nodes_positions_local, N_CellsSide_local =
         generate_cells_positions_selector(target_geom, ParIrr,
@@ -198,7 +203,7 @@ end
 
 """
     setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2;
-                           ParIrr="false") -> Nothing
+                            ParIrr="false") -> Nothing
 
 Full population setup pipeline:
 1. `setup_cell_lattice!` — spatial layout
@@ -450,102 +455,230 @@ function compute_possible_division_df!(cell_df::DataFrame)
     return nothing
 end
 
+"""
+    setup(
+        E::Float64,
+        particle::String,
+        dose::Float64,
+        tumor_radius::Float64;
+        X_box::Float64      = 600.0,
+        X_voxel::Float64    = 300.0,
+        R_cell::Float64     = 15.0,
+        target_geom::String = "circle",
+        calc_type::String   = "full",
+        type_AT::String     = "KC",
+        track_seg::Bool     = true
+    ) -> NamedTuple
 
-macro setup_simulation(E, particle, dose, tumor_radius, kwargs...)
-    quote
-        # Required
-        E            = $(esc(E))
-        particle     = $(esc(particle))
-        dose         = $(esc(dose))
-        tumor_radius = $(esc(tumor_radius))
+High-level wrapper that orchestrates the full irradiation preparation pipeline
+(starting from beam/ion setup through cell lattice, population, irradiation
+conditions, oxygenation, and quick fluence/time summaries), while making legacy
+APIs usable in notebook/async contexts.
 
-        # Defaults (overridable via kwargs)
-        X_box       = 900.0
-        X_voxel     = 300.0
-        R_cell      = 15.0
-        target_geom = "circle"
-        calc_type   = "full"
-        type_AT     = "KC"
-        track_seg   = true
+This function accepts **four required inputs** (`E`, `particle`, `dose`,
+`tumor_radius`) and exposes **keyword arguments** for geometry and model
+settings. Internally, it adapts to legacy "bang" functions that set global
+variables (e.g. `ion`, `irrad`, `cell_df`) by:
 
-        # Parse keyword overrides
-        $(map(kw -> :($(esc(kw.args[1])) = $(esc(kw.args[2]))), kwargs)...)
+1. Injecting required parameters into `Main` (so functions that read globals
+    can find them), and
+2. Using `Base.invokelatest` to avoid "world age" errors in IJulia/Pluto or
+    async execution.
 
-        N_sideVox   = Int(floor(2 * X_box / X_voxel))
-        N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+# Arguments
 
-        setup_IonIrrad!(dose, E, particle)
-        R_beam, x_beam, y_beam = calculate_beam_properties(calc_type, target_geom, X_box, X_voxel, tumor_radius)
-        Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
-        at_start   = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
-        setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide; ParIrr="false", track_seg=track_seg)
-        setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
-        setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
-        set_oxygen!(cell_df; plot_oxygen=false)
-        O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
-        F    = irrad.dose / (1.602e-9 * LET)
-        Npar = round(Int, F * π * R_beam^2 * 1e-8)
-        zF   = irrad.dose / Npar
-        D    = irrad.doserate / zF
-        T    = irrad.dose / (zF * D) * 3600
+**Positional**
+- `E::Float64`: Particle energy per nucleon (units per your domain convention).
+- `particle::String`: Ion species identifier (e.g., `"1H"`, `"4He"`, `"12C"`).
+- `dose::Float64`: Prescribed dose (Gy).
+- `tumor_radius::Float64`: Target/tumor radius (µm or your chosen unit).
+
+**Keywords (with defaults)**
+- `X_box::Float64=600.0`: Size of the simulation box (same units as `R_cell`).
+- `X_voxel::Float64=300.0`: Voxel side length used in beam geometry.
+- `R_cell::Float64=15.0`: Cell radius used for lattice/population geometry.
+- `target_geom::String="circle"`: Target geometry label consumed by the setup functions.
+- `calc_type::String="full"`: Beam/geometry calculation mode.
+- `type_AT::String="KC"`: AT (radiobiological) model identifier passed to `ATRadius` and `setup_irrad_conditions!`.
+- `track_seg::Bool=true`: Whether to enable track segmentation in downstream setup.
+
+# Behavior / Pipeline
+
+1. **Derived geometry**  
+    Computes:
+    - `N_sideVox = floor(Int, 2*X_box/X_voxel)`
+    - `N_CellsSide = 2*floor(Int, X_box/(2*R_cell))`
+
+2. **Global injection for legacy APIs**  
+    Injects the following bindings into `Main` (shadowing any existing values):
+    `tumor_radius`, `X_voxel`, `X_box`, `R_cell`, `type_AT`, `target_geom`,
+    `track_seg`, `N_sideVox`, `N_CellsSide`.
+
+3. **Ion & irradiation setup**  
+    Calls `setup_IonIrrad!(dose, E, particle)` (via `Base.invokelatest`) and
+    retrieves `ion`, `irrad`, and other globals such as `A`, `Z`, `LET` from `Main`.
+
+4. **Beam geometry**  
+    Calls `calculate_beam_properties(calc_type, target_geom, X_box, X_voxel, tumor_radius)`
+    to get `(R_beam, x_beam, y_beam)`.
+
+5. **AT initialization**  
+    Computes `(Rc, Rp, Kp) = ATRadius(ion, irrad, type_AT)` and builds
+    `at_start = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)`.
+
+6. **Cell lattice & population**  
+    - `setup_cell_lattice!(...)` populates `Main.cell_df`.
+    - `setup_cell_population!(...)` updates `Main.cell_df`, using `Main.gsm2` if present.
+
+7. **Irradiation conditions & oxygenation**  
+    - `setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)` updates `cell_df`.
+    - `set_oxygen!(cell_df; plot_oxygen=false)` updates oxygenation fields.
+
+8. **Summary metrics**  
+    Using `irrad.dose`, `irrad.doserate`, and `LET`, computes:
+   - `F    = irrad.dose / (1.602e-9 * LET)`
+   - `Npar = round(Int, F * π * R_beam^2 * 1e-8)`
+    - `zF   = irrad.dose / Npar`
+    - `D    = irrad.doserate / zF`
+   - `T    = irrad.dose / (zF * D) * 3600`
+    and reports a concise textual summary.
+
+# Returns
+
+A `NamedTuple` with:
+- `ion`: Ion descriptor (as defined by your domain code).
+- `irrad`: Irradiation descriptor (dose, dose rate, LET, etc.).
+- `cell_df`: The final cell table/structure after population, conditions, and oxygenation.
+- `at_start`: Initial AT state constructed from `(particle, E, A, Z, LET, Rc, Rp, Kp)`.
+- `R_beam`, `x_beam`, `y_beam`: Beam radius and centroid coordinates.
+- `O2_mean`: Mean oxygen level over `cell_df` where `is_cell == 1`.
+- `Npar`, `zF`, `D`, `T`: Particle count estimate, fluence-per-particle, dose-rate-per-particle, and estimated irradiation time (s).
+
+# Side Effects
+
+- **Global state**: Overwrites/injects several bindings in `Main` and relies on
+    legacy functions that set global variables (`ion`, `irrad`, `cell_df`, `gsm2`,
+    etc.). Avoid calling concurrently in multi-task/threaded workflows unless
+    appropriately synchronized.
+- **World age handling**: Uses `Base.invokelatest` to ensure the newest method
+    definitions are called in notebook/async environments.
+
+# Requirements & Assumptions
+
+- The following functions exist and either return or mutate globals as shown:
+    `setup_IonIrrad!`, `calculate_beam_properties`, `ATRadius`, `AT`,
+    `setup_cell_lattice!`, `setup_cell_population!`, `setup_irrad_conditions!`,
+    `set_oxygen!`.
+- The following globals are created by the legacy functions: `ion`, `irrad`,
+    (optionally) `A`, `Z`, `LET`, `cell_df`, `gsm2`.
+- `cell_df` exposes columns/fields `.O` and `.is_cell`, and supports
+    boolean indexing as used in `mean(cell_df.O[cell_df.is_cell .== 1])`.
+
+# Units Notes
+
+- The constant `1.602e-9` and the `1e-8` geometric factor must match your LET and
+    length units (e.g., LET in keV/µm, lengths in µm vs cm). Verify consistency
+    throughout the codebase to avoid silent unit errors.
+
+# Examples
+
+```julia
+# Minimal call with defaults
+out = setup(2.0, "1H", 1.5, 300.0)
+
+# Customized geometry and AT model
+out = setup(2.0, "12C", 2.0, 250.0;
+            X_box=800.0, X_voxel=200.0, R_cell=12.5,
+            target_geom="circle", calc_type="full",
+            type_AT="KC", track_seg=true)
+```
+"""
+function setup(
+    E::Float64,
+    particle::String,
+    dose::Float64,
+    tumor_radius::Float64;
+    X_box::Float64      = 600.0,
+    X_voxel::Float64    = 300.0,
+    R_cell::Float64     = 15.0,
+    target_geom::String = "circle",
+    calc_type::String   = "full",
+    type_AT::String     = "KC",
+    track_seg::Bool     = true
+)
+    N_sideVox   = Int(floor(2 * X_box / X_voxel))
+    N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+
+    # Inject all variables that setup functions read directly from Main
+    @eval Main begin
+        tumor_radius = $tumor_radius
+        X_voxel      = $X_voxel
+        X_box        = $X_box
+        R_cell       = $R_cell
+        type_AT      = $type_AT
+        target_geom  = $target_geom
+        calc_type    = $calc_type
+        track_seg    = $track_seg
+        N_sideVox    = $N_sideVox
+        N_CellsSide  = $N_CellsSide
     end
-end
 
-macro setup_simulation(E, particle, dose, tumor_radius, kwargs...)
-    kw_assignments = map(kwargs) do kw
-        :($(esc(kw.args[1])) = $(esc(kw.args[2])))
+    Base.invokelatest(setup_IonIrrad!, dose, E, particle)
+    ion   = Base.invokelatest(getfield, Main, :ion)
+    irrad = Base.invokelatest(getfield, Main, :irrad)
+    A     = Base.invokelatest(getfield, Main, :A)
+    Z     = Base.invokelatest(getfield, Main, :Z)
+    LET   = Base.invokelatest(getfield, Main, :LET)
+
+    R_beam, x_beam, y_beam = Base.invokelatest(
+        calculate_beam_properties, calc_type, target_geom, X_box, X_voxel, tumor_radius)
+
+    Rc, Rp, Kp = Base.invokelatest(ATRadius, ion, irrad, type_AT)
+    at_start   = Base.invokelatest(AT, particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
+
+    Base.invokelatest(setup_cell_lattice!, target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
+                        ParIrr="false", track_seg=track_seg)
+    cell_df = Base.invokelatest(getfield, Main, :cell_df)
+
+    gsm2 = Base.invokelatest(getfield, Main, :gsm2)
+    Base.invokelatest(setup_cell_population!, target_geom, X_box, R_cell,
+                        N_sideVox, N_CellsSide, gsm2)
+    cell_df = Base.invokelatest(getfield, Main, :cell_df)
+
+    ion   = Base.invokelatest(getfield, Main, :ion)
+    irrad = Base.invokelatest(getfield, Main, :irrad)
+    Base.invokelatest(setup_irrad_conditions!, ion, irrad, type_AT, cell_df, track_seg)
+    cell_df = Base.invokelatest(getfield, Main, :cell_df)
+
+    Base.invokelatest(set_oxygen!, cell_df; plot_oxygen=false)
+    O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
+
+    irrad = Base.invokelatest(getfield, Main, :irrad)
+    LET   = Base.invokelatest(getfield, Main, :LET)
+    F    = irrad.dose / (1.602e-9 * LET)
+    Npar = round(Int, F * π * R_beam^2 * 1e-8)
+    zF   = irrad.dose / Npar
+    D    = irrad.doserate / zF
+    T    = irrad.dose / (zF * D) * 3600
+
+    @eval Main begin
+        R_beam = $R_beam
+        x_beam = $x_beam
+        y_beam = $y_beam
+        F      = $F
+        Npar   = $Npar
+        zF     = $zF
+        D      = $D
+        T      = $T
     end
 
-    quote
-        local _E            = Float64($(esc(E)))
-        local _particle     = $(esc(particle))
-        local _dose         = Float64($(esc(dose)))
-        local _tumor_radius = Float64($(esc(tumor_radius)))
-        local _X_box        = 900.0
-        local _X_voxel      = 300.0
-        local _R_cell       = 15.0
-        local _target_geom  = "circle"
-        local _calc_type    = "full"
-        local _type_AT      = "KC"
-        local _track_seg    = true
-        local _plot_oxygen  = false
+    println("Npar   : $Npar")
+    println("R_beam : $(round(R_beam, digits=2))")
+    println("O2     : $(round(O2_mean, digits=3))")
 
-        $(kw_assignments...)
-
-        # Inject ALL variables into Main BEFORE any setup function runs
-        E            = _E
-        particle     = _particle
-        dose         = _dose
-        tumor_radius = _tumor_radius
-        X_box        = _X_box
-        X_voxel      = _X_voxel
-        R_cell       = _R_cell
-        target_geom  = _target_geom
-        calc_type    = _calc_type
-        type_AT      = _type_AT
-        track_seg    = _track_seg
-
-        N_sideVox   = Int(floor(2 * X_box / X_voxel))
-        N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
-
-        setup_IonIrrad!(dose, E, particle)
-        R_beam, x_beam, y_beam = calculate_beam_properties(calc_type, target_geom, X_box, X_voxel, tumor_radius)
-        Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
-        at_start   = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
-        setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide; ParIrr="false", track_seg=track_seg)
-        setup_cell_population!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide, gsm2)
-        setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
-        set_oxygen!(cell_df; plot_oxygen=_plot_oxygen)
-        O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
-
-        F    = irrad.dose / (1.602e-9 * LET)
-        Npar = round(Int, F * π * R_beam^2 * 1e-8)
-        zF   = irrad.dose / Npar
-        D    = irrad.doserate / zF
-        T    = irrad.dose / (zF * D) * 3600
-
-        println("Npar   : $Npar")
-        println("R_beam : $(round(R_beam, digits=2))")
-        println("O2     : $(round(O2_mean, digits=3))")
-    end
+    return (
+        ion=ion, irrad=irrad, cell_df=cell_df, at_start=at_start,
+        R_beam=R_beam, x_beam=x_beam, y_beam=y_beam,
+        O2_mean=O2_mean, Npar=Npar, zF=zF, D=D, T=T
+    )
 end

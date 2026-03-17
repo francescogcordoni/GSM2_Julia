@@ -309,8 +309,8 @@ function compute_repair_domain(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
                                 terminal_time::Float64   = Inf,
                                 rng::AbstractRNG          = Random.default_rng(),
                                 verbose::Bool             = false,
-                                max_events_log::Int       = 0)
-    au = 4.0
+                                max_events_log::Int       = 0,
+                                au::Float64               = 4.0)
 
     if any(>(0), Y)
         verbose && println("[compute_repair_domain] Y-lesion detected → immediate lethal.")

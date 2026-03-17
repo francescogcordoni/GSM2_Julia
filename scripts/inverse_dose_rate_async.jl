@@ -82,6 +82,93 @@ setup_GSM2!(r, a, b, rd, Rn)
 #~ ============================================================
 #~ =================== Simulation Parameters ==================
 #~ ============================================================
+function setup(
+    E::Float64,
+    particle::String,
+    dose::Float64,
+    tumor_radius::Float64;
+    X_box::Float64      = 600.0,
+    X_voxel::Float64    = 300.0,
+    R_cell::Float64     = 15.0,
+    target_geom::String = "circle",
+    calc_type::String   = "full",
+    type_AT::String     = "KC",
+    track_seg::Bool     = true
+)
+    N_sideVox   = Int(floor(2 * X_box / X_voxel))
+    N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
+
+    # Inject all variables that setup functions read directly from Main
+    @eval Main begin
+        tumor_radius = $tumor_radius
+        X_voxel      = $X_voxel
+        X_box        = $X_box
+        R_cell       = $R_cell
+        type_AT      = $type_AT
+        target_geom  = $target_geom
+        track_seg    = $track_seg
+        N_sideVox    = $N_sideVox
+        N_CellsSide  = $N_CellsSide
+    end
+
+    Base.invokelatest(setup_IonIrrad!, dose, E, particle)
+    ion   = Base.invokelatest(getfield, Main, :ion)
+    irrad = Base.invokelatest(getfield, Main, :irrad)
+    A     = Base.invokelatest(getfield, Main, :A)
+    Z     = Base.invokelatest(getfield, Main, :Z)
+    LET   = Base.invokelatest(getfield, Main, :LET)
+
+    R_beam, x_beam, y_beam = Base.invokelatest(
+        calculate_beam_properties, calc_type, target_geom, X_box, X_voxel, tumor_radius)
+
+    Rc, Rp, Kp = Base.invokelatest(ATRadius, ion, irrad, type_AT)
+    at_start   = Base.invokelatest(AT, particle, E, A, Z, LET, 1.0, Rc, Rp, Rp, Kp)
+
+    Base.invokelatest(setup_cell_lattice!, target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
+                      ParIrr="false", track_seg=track_seg)
+    cell_df = Base.invokelatest(getfield, Main, :cell_df)
+
+    gsm2 = Base.invokelatest(getfield, Main, :gsm2)
+    Base.invokelatest(setup_cell_population!, target_geom, X_box, R_cell,
+                      N_sideVox, N_CellsSide, gsm2)
+    cell_df = Base.invokelatest(getfield, Main, :cell_df)
+
+    ion   = Base.invokelatest(getfield, Main, :ion)
+    irrad = Base.invokelatest(getfield, Main, :irrad)
+    Base.invokelatest(setup_irrad_conditions!, ion, irrad, type_AT, cell_df, track_seg)
+    cell_df = Base.invokelatest(getfield, Main, :cell_df)
+
+    Base.invokelatest(set_oxygen!, cell_df; plot_oxygen=false)
+    O2_mean = mean(cell_df.O[cell_df.is_cell .== 1])
+
+    irrad = Base.invokelatest(getfield, Main, :irrad)
+    LET   = Base.invokelatest(getfield, Main, :LET)
+    F    = irrad.dose / (1.602e-9 * LET)
+    Npar = round(Int, F * π * R_beam^2 * 1e-8)
+    zF   = irrad.dose / Npar
+    D    = irrad.doserate / zF
+    T    = irrad.dose / (zF * D) * 3600
+
+    println("Npar   : $Npar")
+    println("R_beam : $(round(R_beam, digits=2))")
+    println("O2     : $(round(O2_mean, digits=3))")
+
+    return (
+        ion=ion, irrad=irrad, cell_df=cell_df, at_start=at_start,
+        R_beam=R_beam, x_beam=x_beam, y_beam=y_beam,
+        O2_mean=O2_mean, Npar=Npar, zF=zF, D=D, T=T
+    )
+end
+
+E            = 2.0
+    particle     = "1H"
+    dose         = 1.5
+    tumor_radius = 300.0
+    run_ion_irradiation(
+    E,
+    particle,
+    dose,
+    tumor_radius)
 
 
 
@@ -204,7 +291,6 @@ mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])^2
 
 Nsplit_1H_50 = mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])^2
 Nsplit_2_1H_50 = mean(cell_df_copy[cell_df_copy.is_cell .== 1, :sp])*mean(cell_irrad[cell_irrad.is_cell .== 1, :sp])
-
 
 surv_prob = Array{Float64, 1}()
 compute_times_domain!(cell_df_istant, gsm2_cycle)
@@ -404,6 +490,7 @@ for i in 1:nrow(cell_df_copy)
 end
 
 cell_df_copy = deepcopy(cell_df_original)
+plot_phase_proportions_alive(cell_df_copy)
 @time MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg)
 #plot_scalar_cell(cell_df_copy, :dose_cell, layer_plot = true)
 
