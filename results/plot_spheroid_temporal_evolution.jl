@@ -7,8 +7,8 @@ using Statistics
 # Configuration — must match run_simulation.jl
 # ============================================================
 snapshot_hours = [0, 12, 24, 48, 72]
-indir  = "results"
-outdir = "results"
+indir  = joinpath(@__DIR__, "..", "data", "spheroid_temporal_evolution")
+outdir = @__DIR__
 
 # Condition metadata: (label, particle, energy, line_color)
 CONDITIONS = [

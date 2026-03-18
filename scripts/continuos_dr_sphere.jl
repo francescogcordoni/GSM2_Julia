@@ -100,9 +100,10 @@ end
 Ntot = length(active_cells_base)
 println("Total cells (Ntot) = $Ntot")
 
-mkpath("results")
-jldsave("results/initial_cell_df.jld2"; cell_df_copy)
-jldsave("results/damage_lut.jld2";      damage_lut)
+datadir = joinpath(@__DIR__, "..", "data", "continuous_doserate_sphere")
+mkpath(datadir)
+jldsave(joinpath(datadir, "initial_cell_df.jld2"); cell_df_copy)
+jldsave(joinpath(datadir, "damage_lut.jld2");      damage_lut)
 
 # ============================================================
 # Helpers
@@ -318,11 +319,14 @@ function run_doserate_scenario(
             abm_wall_time     = abm_wall_time)
 
         lbl = "$(label)_dr_$(dr_label(dr_gys))Gys"
-        CSV.write(joinpath(outdir, "$(lbl)_ts_irrad.csv"),   ts_to_df(ts_irrad))
-        CSV.write(joinpath(outdir, "$(lbl)_ts_post.csv"),    ts_to_df(ts_post))
-        CSV.write(joinpath(outdir, "$(lbl)_ts_combined.csv"),
+        outdir2 = joinpath(@__DIR__, "..", "data", "continuous_doserate_sphere")
+        mkpath(outdir2)
+
+        CSV.write(joinpath(outdir2, "$(lbl)_ts_irrad.csv"),   ts_to_df(ts_irrad))
+        CSV.write(joinpath(outdir2, "$(lbl)_ts_post.csv"),    ts_to_df(ts_post))
+        CSV.write(joinpath(outdir2, "$(lbl)_ts_combined.csv"),
             vcat(insertcols(ts_to_df(ts_irrad), :phase => "irradiation"),
-                 insertcols(ts_to_df(ts_post),  :phase => "post")))
+            insertcols(ts_to_df(ts_post),  :phase => "post")))
         println("  Saved → $outdir/$(lbl)*")
 
         GC.gc()
@@ -355,7 +359,7 @@ function summary_csv(abm_results, dose_label, outdir)
         push!(df, (res.dose_rate_gys, res.dose_rate_gyh, res.survival_fraction,
                    res.abm_wall_time, count(res.cell_df_final.is_cell .== 1)))
     end
-    path = joinpath(outdir, "summary_$(dose_label).csv")
+    path = joinpath(@__DIR__, "..", "data", "continuous_doserate_sphere", "summary_$(dose_label).csv")
     CSV.write(path, df)
     println("  Saved summary → $path")
     println(df)
@@ -380,10 +384,10 @@ end
 # ============================================================
 # FINAL PRINT
 # ============================================================
-println("\n", "="^60)
-println("ALL RESULTS SAVED TO results/")
+
+println("ALL RESULTS SAVED TO $datadir/")
 println("="^60)
 println("Files written:")
-for f in sort(readdir("results"))
-    println("  results/$f")
+for f in sort(readdir(datadir))
+    println("  $datadir/$f")
 end

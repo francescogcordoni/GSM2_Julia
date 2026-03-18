@@ -5,8 +5,8 @@ using Statistics
 #~ ============================================================
 #~ Configuration — must match run_split_dose.jl
 #~ ============================================================
-indir  = "results"
-outdir = "results"
+indir  = joinpath(@__DIR__, "..", "data", "inverse_doserate")
+outdir = @__DIR__
 
 # Condition metadata: (label, display_name, color, linestyle)
 CONDITIONS = [

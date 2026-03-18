@@ -5,8 +5,8 @@ using Printf
 #~ ============================================================
 #~ Configuration — must match run_survival_curve.jl
 #~ ============================================================
-indir  = "results"
-outdir = "results"
+indir  = joinpath(@__DIR__, "..", "data", "continuous_dr")
+outdir = @__DIR__
 
 surv_file = joinpath(indir, "survival_results_12C_10MeV.csv")
 meta_file = joinpath(indir, "survival_meta_12C_10MeV.csv")

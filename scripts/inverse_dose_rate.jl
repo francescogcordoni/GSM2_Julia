@@ -62,7 +62,8 @@ times_split  = [0.01, 0.1, 0.2, 0.5, 1., 2., 3., 4., 5., 6.0, 8., 10.,
 nsim         = 10
 phase_keys   = ("G0", "G1", "S", "G2", "M")
 
-mkpath("results")
+datadir = joinpath(@__DIR__, "..", "data", "inverse_doserate")
+mkpath(datadir)
 
 #~ ============================================================
 #~ Helpers
@@ -228,7 +229,7 @@ for (label, E, particle, d, r) in CONDITIONS
     pt_pre, sp = run_split_condition(
         label, E, particle, d, r,
         gsm2_cycle, times_split;
-        nsim = nsim, phase_keys = phase_keys)
+        nsim = nsim, phase_keys = phase_keys, outdir = datadir)
     results[label] = (phase_times_pre = pt_pre, surv_prob = sp)
 end
 
@@ -237,8 +238,8 @@ end
 #~ ============================================================
 all_dfs = [results[lbl].phase_times_pre for (lbl, _, _, _, _) in CONDITIONS]
 phase_times_pre_all = vcat(all_dfs...; cols = :union)
-CSV.write("results/phase_times_all.csv", phase_times_pre_all)
-println("\nSaved: results/phase_times_all.csv")
+CSV.write(joinpath(datadir, "phase_times_all.csv"), phase_times_pre_all)
+println("\nSaved: $(joinpath(datadir, "phase_times_all.csv"))")
 
 #~ ============================================================
 #~ Assertions
@@ -253,9 +254,8 @@ println("All assertions passed.")
 #~ ============================================================
 #~ FINAL PRINT
 #~ ============================================================
-println("\n", "="^60)
-println("ALL RESULTS SAVED TO results/")
+println("ALL RESULTS SAVED TO $datadir/")
 println("="^60)
-for f in sort(readdir("results"))
-    println("  results/$f")
+for f in sort(readdir(datadir))
+    println("  $datadir/$f")
 end

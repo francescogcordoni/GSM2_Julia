@@ -106,7 +106,8 @@ end
 Ntot = length(active_cells_base)
 println("Total cells (Ntot) = $Ntot")
 
-mkpath("results")
+outdir = joinpath(@__DIR__, "..", "data", "continuous_dr")
+mkpath(outdir)
 
 #~ ============================================================
 #~ Survival vs dose loop
@@ -192,22 +193,22 @@ end
 col_names = [@sprintf("dr_%.0eGys", dr) for dr in doserates_to_run_Gys]
 surv_df   = DataFrame(survival_results, col_names)
 insertcols!(surv_df, 1, :dose_Gy => doses_to_run)
-CSV.write("results/survival_results_12C_10MeV.csv", surv_df)
-println("\nSaved: results/survival_results_12C_10MeV.csv")
+CSV.write(joinpath(outdir, "survival_results_12C_10MeV.csv"), surv_df)
+println("\nSaved: $(joinpath(outdir, "survival_results_12C_10MeV.csv"))")
 
 # Save metadata so the plot script knows the axes
 meta_df = DataFrame(
     dose_rate_Gys = doserates_to_run_Gys,
     dose_rate_Gyh = doserates_to_run_Gyh)
-CSV.write("results/survival_meta_12C_10MeV.csv", meta_df)
-println("Saved: results/survival_meta_12C_10MeV.csv")
+CSV.write(joinpath(outdir, "survival_meta_12C_10MeV.csv"), meta_df)
+println("Saved: $(joinpath(outdir, "survival_meta_12C_10MeV.csv"))")
 
 #~ ============================================================
 #~ FINAL PRINT
 #~ ============================================================
 println("\n", "="^60)
-println("ALL RESULTS SAVED TO results/")
+println("ALL RESULTS SAVED TO $outdir/")
 println("="^60)
-for f in sort(readdir("results"))
-    println("  results/$f")
+for f in sort(readdir(outdir))
+    println("  $outdir/$f")
 end

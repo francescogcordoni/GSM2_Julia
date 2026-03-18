@@ -4,10 +4,10 @@ using Statistics
 using Printf
 
 # ============================================================
-# Configuration — must match run_doserate.jl
+# Configuration — must match continuous_doserate_sphere.jl
 # ============================================================
-indir  = "results"
-outdir = "results"
+indir  = joinpath(@__DIR__, "..", "data", "continuous_doserate_sphere")
+outdir = @__DIR__
 au     = 4.0
 
 # Dose-rate conditions: (Gy/s value, display color)

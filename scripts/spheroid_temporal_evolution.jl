@@ -57,7 +57,8 @@ N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
 
 snapshot_hours = [0, 12, 24, 48, 72]   # hours at which snapshots are saved
 
-mkpath("results")
+datadir = joinpath(@__DIR__, "..", "data", "spheroid_temporal_evolution")
+mkpath(datadir)
 
 # ============================================================
 # Helper: ts → DataFrame
@@ -199,7 +200,7 @@ for phase in ["G0","G1","S","G2","M"]
     n = count(cell_df_pristine.cell_cycle[cell_df_pristine.is_cell .== 1] .== phase)
     println("  $phase : $n  ($(round(100n/Ntot_ref, digits=1))%)")
 end
-CSV.write("results/cell_df_pristine.csv", cell_df_pristine)
+CSV.write(joinpath(datadir, "cell_df_pristine.csv"), cell_df_pristine)
 
 # ── Helper: irradiate a copy of the pristine population ──────────────────────
 # CRITICAL: does NOT call setup_cell_lattice! or setup_cell_population!
@@ -267,9 +268,9 @@ println("\n--- Irradiating: 12C 80 MeV/u ---")
 cell_12C_80 = irradiate_copy(80.0,  "12C", cell_df_pristine, gsm2_cycle)
 
 # Save initial irradiated states
-CSV.write("results/cell_irrad_1H_80.csv",  cell_1H_80)
-CSV.write("results/cell_irrad_1H_30.csv",  cell_1H_30)
-CSV.write("results/cell_irrad_12C_80.csv", cell_12C_80)
+CSV.write(joinpath(datadir, "cell_irrad_1H_80.csv"),  cell_1H_80)
+CSV.write(joinpath(datadir, "cell_irrad_1H_30.csv"),  cell_1H_30)
+CSV.write(joinpath(datadir, "cell_irrad_12C_80.csv"), cell_12C_80)
 
 # ============================================================
 # RUN ABM FOR EACH CONDITION
@@ -277,17 +278,20 @@ CSV.write("results/cell_irrad_12C_80.csv", cell_12C_80)
 res_1H_80  = run_condition("1H_80MeV",   80.0, "1H",
                             cell_1H_80,  gsm2_cycle;
                             terminal_time=terminal_time,
-                            snapshot_hours=snapshot_hours)
+                            snapshot_hours=snapshot_hours,
+                            outdir=datadir)
 
 res_1H_30  = run_condition("1H_30MeV",   30.0, "1H",
                             cell_1H_30,  gsm2_cycle;
                             terminal_time=terminal_time,
-                            snapshot_hours=snapshot_hours)
+                            snapshot_hours=snapshot_hours,
+                            outdir=datadir)
 
 res_12C_80 = run_condition("12C_80MeVu", 80.0, "12C",
                             cell_12C_80, gsm2_cycle;
                             terminal_time=terminal_time,
-                            snapshot_hours=snapshot_hours)
+                            snapshot_hours=snapshot_hours,
+                            outdir=datadir)
 
 # ============================================================
 # SUMMARY CSV
@@ -307,17 +311,16 @@ for (res, part, E_val) in [
     push!(summary_df, (res.label, part, E_val, res.Ntot, res.sf,
                        count(res.cell_df.is_cell .== 1)))
 end
-CSV.write("results/summary.csv", summary_df)
+CSV.write(joinpath(datadir, "summary.csv"), summary_df)
 println("\nSummary:")
 println(summary_df)
 
 # ============================================================
 # FINAL PRINT
 # ============================================================
-println("\n", "="^60)
-println("ALL RESULTS SAVED TO results/")
+println("ALL RESULTS SAVED TO $datadir/")
 println("="^60)
 println("Files written:")
-for f in sort(readdir("results"))
-    println("  results/$f")
+for f in sort(readdir(datadir))
+    println("  $datadir/$f")
 end
