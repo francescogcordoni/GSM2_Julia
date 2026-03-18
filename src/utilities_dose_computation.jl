@@ -20,7 +20,7 @@
 #
 #~ MC Kernels — Matrix-Based (fast, no DataFrame overhead)
 #?   MC_loop_ions_domain_tsc_matrix!(Npar, x_cb, y_cb, irrad_cond, gsm2,
-#                                    mat_x, mat_y, mat_at, R_beam, type_AT, single_particle)
+#                                    mat_x, mat_y, mat_at, R_beam, type_AT, ion)
 #       TSC Monte Carlo on flattened matrix domain. Poisson-sampled particle
 #       count. Thread-local accumulators. Mutates mat_at in-place.
 #?   MC_loop_ions_domain_matrix!(x_list, y_list, irrad_cond, gsm2,
@@ -234,8 +234,7 @@ function MC_dose_CPU!(
     )
     println("\n───────────────────────────────────────────────")
     println("🔧  Running MC_dose_fast!   (track_seg = $track_seg)")
-    println("───
-    ────────────────────────────────────────────")
+    println("───────────────────────────────────────────────")
 
     t_start = time()
     gsm2 = gsm2_cycle[1]
@@ -361,7 +360,7 @@ end
 """
     MC_loop_ions_domain_tsc_matrix!(Npar, x_cb, y_cb, irrad_cond, gsm2,
                                     mat_x, mat_y, mat_at,
-                                    R_beam, type_AT, single_particle)
+                                    R_beam, type_AT, ion, single_particle)
 
 TSC Monte Carlo on a flattened matrix domain.
 Builds a radial dose lookup table, samples N~Poisson(Npar) particles,
@@ -376,14 +375,14 @@ Regions:
 # Example
 ```julia
 MC_loop_ions_domain_tsc_matrix!(Npar, 0.0, 0.0, irrad_cond, gsm2,
-                                    mat_x, mat_y, mat_at, R_beam, "KC", single_particle)
+                                    mat_x, mat_y, mat_at, R_beam, "KC", ion)
 ```
 """
 function MC_loop_ions_domain_tsc_matrix!(
     Npar::Int, x_cb::Float64, y_cb::Float64,
     irrad_cond::Vector{AT}, gsm2::GSM2,
     mat_x::Matrix{Float64}, mat_y::Matrix{Float64}, mat_at::Matrix{Float64},
-    R_beam::Float64, type_AT::String, single_particle::Bool = false
+    R_beam::Float64, type_AT::String, ion::Ion, single_particle::Bool
 )
     println("\n============================================================")
     println(" MC Loop - TSC Matrix")
