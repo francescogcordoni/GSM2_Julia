@@ -1,170 +1,220 @@
-using CSV, DataFrames, Plots, LsqFit, Statistics, Printf, Glob
+using CSV, DataFrames, Plots, Printf
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-data_dir    = joinpath(@__DIR__, "..", "data", "continuous_dr")
-results_dir = joinpath(@__DIR__, "..", "results")
-mkpath(results_dir)
+datadir = joinpath(@__DIR__, "..", "data", "continuous_dr")
 
-# ── LQ model: S = exp(-α·D - β·D²) ──────────────────────────────────────────
-lq_model(D, p) = exp.(-p[1] .* D .- p[2] .* D .^ 2)
-
-# ── Collect all survival CSV files ────────────────────────────────────────────
-surv_files = filter(f -> occursin("survival_results", f) && endswith(f, ".csv"),
-                    readdir(data_dir, join=true))
-
-println("Found $(length(surv_files)) survival files:")
-for f in surv_files; println("  ", basename(f)); end
-
-# ── Storage for all fits ──────────────────────────────────────────────────────
-all_fits = DataFrame(
-    file       = String[],
-    dose_rate  = String[],
-    alpha      = Float64[],
-    beta       = Float64[],
-    alpha_err  = Float64[],
-    beta_err   = Float64[],
-    alpha_beta = Float64[],
-    r2         = Float64[],
+const DEFAULTS = (
+    framestyle = :box,
+    grid       = true,
+    gridalpha  = 0.3,
+    dpi        = 600,
+    fontfamily = "Computer Modern",
+    margin     = 5Plots.mm,
 )
 
-# ── Process each file ─────────────────────────────────────────────────────────
-for fpath in surv_files
-    tag  = replace(basename(fpath), "survival_results_" => "", ".csv" => "")
-    df   = CSV.read(fpath, DataFrame)
+# ── Conditions to load ────────────────────────────────────────────────────────
+CONDITIONS = [
+    (tag="12C_10MeV",  label="¹²C  10 MeV/u",  color=:firebrick),
+    (tag="12C_100MeV", label="¹²C  100 MeV/u", color=:tomato),
+    (tag="1H_100MeV",  label="¹H  100 MeV/u",  color=:royalblue),
+]
 
-    doses     = df.dose_Gy
-    dr_cols   = setdiff(names(df), ["dose_Gy"])
+# Dose-rate palette (one color per dose rate, shared across conditions)
+dr_palette = [:navy, :steelblue, :seagreen, :darkorange]
 
-    println("\n", "="^60)
-    println("File: ", basename(fpath), "  →  tag: $tag")
-    println("Dose rates: ", dr_cols)
+lq(D, α, β) = exp.(-α .* D .- β .* D .^ 2)
 
-    # one plot per file — all dose rates overlaid
-    p_surv  = plot(title  = "Survival curves — $tag",
-                   xlabel = "Dose (Gy)",
-                   ylabel = "Survival fraction",
-                   yscale = :log10,
-                   legend = :topright,
-                   framestyle = :box,
-                   grid    = true,
-                   gridalpha = 0.3,
-                   size    = (700, 500),
-                   dpi     = 150)
+# ── PLOT 1: Dose-survival curves + LQ fit (one panel per condition) ───────────
+surv_panels = Plots.Plot[]
 
-    p_alpha = plot(title  = "LQ α — $tag",
-                   xlabel = "Dose rate",
-                   ylabel = "α (Gy⁻¹)",
-                   legend = false,
-                   framestyle = :box,
-                   size    = (500, 400),
-                   dpi     = 150)
+for cond in CONDITIONS
+    surv_path = joinpath(datadir, "survival_results_$(cond.tag).csv")
+    lq_path   = joinpath(datadir, "lq_params_$(cond.tag).csv")
+    isfile(surv_path) && isfile(lq_path) || (@warn "Missing files for $(cond.tag)"; continue)
 
-    p_beta  = plot(title  = "LQ β — $tag",
-                   xlabel = "Dose rate",
-                   ylabel = "β (Gy⁻²)",
-                   legend = false,
-                   framestyle = :box,
-                   size    = (500, 400),
-                   dpi     = 150)
+    surv_df = CSV.read(surv_path, DataFrame)
+    lq_df   = CSV.read(lq_path,   DataFrame)
 
-    alphas     = Float64[]
-    betas      = Float64[]
-    alpha_errs = Float64[]
-    beta_errs  = Float64[]
-    dr_labels  = String[]
+    doses   = surv_df.dose_Gy
+    dr_cols = setdiff(names(surv_df), ["dose_Gy"])
+    D_fine  = range(0, maximum(doses), length=300)
 
-    for col in dr_cols
-        surv = df[!, col]
+    p = plot(;
+        xlabel = "Dose (Gy)",
+        ylabel = "Survival fraction",
+        yscale = :log10,
+        legend = :topright,
+        size   = (650, 500),
+        DEFAULTS...,
+    )
 
-        # guard: clamp to avoid log(0) issues
-        surv_safe = clamp.(surv, 1e-10, 1.0)
+    for (k, col) in enumerate(dr_cols)
+        row = lq_df[lq_df.dose_rate_Gys .== lq_df.dose_rate_Gys[k], :]
+        isempty(row) && continue
+        α, β = row.alpha[1], row.beta[1]
 
-        # initial guess: α=0.1, β=0.05
-        p0 = [0.1, 0.05]
-        lb = [0.0,  0.0]
-        ub = [10.0, 10.0]
+        dr_val = lq_df.dose_rate_Gys[k]
+        lbl    = @sprintf("%.0e Gy/s", dr_val)
+        col_c  = dr_palette[min(k, length(dr_palette))]
 
-        fit_result = nothing
-        try
-            fit_result = curve_fit(lq_model, doses, surv_safe, p0;
-                                   lower = lb, upper = ub)
-        catch e
-            @warn "Fit failed for $col in $tag" exception = e
-            continue
+        scatter!(p, doses, surv_df[!, col];
+            label             = lbl,
+            color             = col_c,
+            markersize        = 5,
+            markerstrokewidth = 0.5,
+        )
+        plot!(p, collect(D_fine), lq(collect(D_fine), α, β);
+            label     = "",
+            color     = col_c,
+            linewidth = 1.8,
+            linestyle = :dash,
+        )
+    end
+
+    push!(surv_panels, p)
+end
+
+if !isempty(surv_panels)
+    ncols  = length(surv_panels)
+    p_surv = plot(surv_panels...;
+                  layout = (1, ncols),
+                  size   = (650 * ncols, 500),
+                  dpi    = 600)
+    display(p_surv)
+    savefig(p_surv, joinpath(datadir, "survival_curves_all.png"))
+    savefig(p_surv, joinpath(datadir, "survival_curves_all.pdf"))
+    println("Saved: survival_curves_all")
+
+    # Also save individual panels
+    for (cond, p) in zip(CONDITIONS, surv_panels)
+        savefig(p, joinpath(datadir, "survival_curves_$(cond.tag).png"))
+        savefig(p, joinpath(datadir, "survival_curves_$(cond.tag).pdf"))
+        println("Saved: survival_curves_$(cond.tag)")
+    end
+end
+
+# ── Load all LQ params ────────────────────────────────────────────────────────
+all_lq = DataFrame()
+for cond in CONDITIONS
+    path = joinpath(datadir, "lq_params_$(cond.tag).csv")
+    isfile(path) || continue
+    df = CSV.read(path, DataFrame)
+    append!(all_lq, df; cols=:union)
+end
+
+if isempty(all_lq)
+    println("No LQ parameter files found — skipping parameter plots.")
+else
+    # ── PLOT 2: Dose rate vs α ────────────────────────────────────────────────
+    p_alpha = plot(;
+        xlabel = "Dose rate (Gy/s)",
+        ylabel = "α (Gy⁻¹)",
+        xscale = :log10,
+        legend = :topright,
+        size   = (750, 500),
+        DEFAULTS...,
+    )
+
+    for cond in CONDITIONS
+        sub = all_lq[all_lq.tag .== cond.tag, :]
+        isempty(sub) && continue
+        sort!(sub, :dose_rate_Gys)
+        plot!(p_alpha, sub.dose_rate_Gys, sub.alpha;
+            label             = cond.label,
+            color             = cond.color,
+            linewidth         = 2,
+            marker            = :circle,
+            markersize        = 6,
+            markerstrokewidth = 0.5,
+        )
+        if !all(isnan.(sub.alpha_err))
+            plot!(p_alpha, sub.dose_rate_Gys,
+                  sub.alpha .+ sub.alpha_err;
+                fillrange         = sub.alpha .- sub.alpha_err,
+                fillalpha         = 0.15,
+                linealpha         = 0,
+                color             = cond.color,
+                label             = "",
+            )
         end
-
-        α, β    = coef(fit_result)
-        se      = try stderror(fit_result) catch; [NaN, NaN] end
-        α_err, β_err = se
-
-        # R²
-        surv_pred = lq_model(doses, [α, β])
-        ss_res    = sum((surv_safe .- surv_pred) .^ 2)
-        ss_tot    = sum((surv_safe .- mean(surv_safe)) .^ 2)
-        r2        = 1.0 - ss_res / ss_tot
-
-        println(@sprintf("  %-20s  α=%.4f±%.4f  β=%.4f±%.4f  α/β=%.2f  R²=%.4f",
-                         col, α, α_err, β, β_err, α/β, r2))
-
-        push!(alphas,     α)
-        push!(betas,      β)
-        push!(alpha_errs, α_err)
-        push!(beta_errs,  β_err)
-        push!(dr_labels,  col)
-
-        push!(all_fits, (tag, col, α, β, α_err, β_err, α/β, r2))
-
-        # smooth fit curve
-        D_fine    = range(0, maximum(doses), length=200)
-        surv_fit  = lq_model(collect(D_fine), [α, β])
-
-        label_str = replace(col, "dr_" => "", "Gys" => " Gy/s")
-        scatter!(p_surv, doses, surv_safe;
-                 label = label_str, markersize = 5, markerstrokewidth = 0.5)
-        plot!(p_surv, D_fine, surv_fit;
-              label = "", linestyle = :dash, linewidth = 1.5)
     end
 
-    # α and β vs dose rate bar plots
-    if !isempty(alphas)
-        bar!(p_alpha, dr_labels, alphas;
-             yerror = alpha_errs, color = :steelblue, alpha = 0.7,
-             xrotation = 30)
-        bar!(p_beta,  dr_labels, betas;
-             yerror = beta_errs,  color = :firebrick, alpha = 0.7,
-             xrotation = 30)
+    display(p_alpha)
+    savefig(p_alpha, joinpath(datadir, "alpha_vs_doserate.png"))
+    savefig(p_alpha, joinpath(datadir, "alpha_vs_doserate.pdf"))
+    println("Saved: alpha_vs_doserate")
+
+    # ── PLOT 3: Dose rate vs β ────────────────────────────────────────────────
+    p_beta = plot(;
+        xlabel = "Dose rate (Gy/s)",
+        ylabel = "β (Gy⁻²)",
+        xscale = :log10,
+        legend = :topright,
+        size   = (750, 500),
+        DEFAULTS...,
+    )
+
+    for cond in CONDITIONS
+        sub = all_lq[all_lq.tag .== cond.tag, :]
+        isempty(sub) && continue
+        sort!(sub, :dose_rate_Gys)
+        plot!(p_beta, sub.dose_rate_Gys, sub.beta;
+            label             = cond.label,
+            color             = cond.color,
+            linewidth         = 2,
+            marker            = :circle,
+            markersize        = 6,
+            markerstrokewidth = 0.5,
+        )
+        if !all(isnan.(sub.beta_err))
+            plot!(p_beta, sub.dose_rate_Gys,
+                  sub.beta .+ sub.beta_err;
+                fillrange         = sub.beta .- sub.beta_err,
+                fillalpha         = 0.15,
+                linealpha         = 0,
+                color             = cond.color,
+                label             = "",
+            )
+        end
     end
 
-    # save per-file plots
-    savefig(p_surv,  joinpath(results_dir, "survival_curves_$(tag).png"))
-    savefig(p_alpha, joinpath(results_dir, "alpha_$(tag).png"))
-    savefig(p_beta,  joinpath(results_dir, "beta_$(tag).png"))
-    println("  Saved plots for $tag")
+    display(p_beta)
+    savefig(p_beta, joinpath(datadir, "beta_vs_doserate.png"))
+    savefig(p_beta, joinpath(datadir, "beta_vs_doserate.pdf"))
+    println("Saved: beta_vs_doserate")
+
+    # ── PLOT 4: α/β ratio vs dose rate ───────────────────────────────────────
+    p_ab = plot(;
+        xlabel = "Dose rate (Gy/s)",
+        ylabel = "α/β (Gy)",
+        xscale = :log10,
+        legend = :topright,
+        size   = (750, 500),
+        DEFAULTS...,
+    )
+
+    for cond in CONDITIONS
+        sub = all_lq[all_lq.tag .== cond.tag, :]
+        isempty(sub) && continue
+        sort!(sub, :dose_rate_Gys)
+        plot!(p_ab, sub.dose_rate_Gys, sub.alpha_beta;
+            label             = cond.label,
+            color             = cond.color,
+            linewidth         = 2,
+            marker            = :circle,
+            markersize        = 6,
+            markerstrokewidth = 0.5,
+        )
+    end
+
+    display(p_ab)
+    savefig(p_ab, joinpath(datadir, "alpha_beta_vs_doserate.png"))
+    savefig(p_ab, joinpath(datadir, "alpha_beta_vs_doserate.pdf"))
+    println("Saved: alpha_beta_vs_doserate")
+
+    # Save combined LQ table
+    CSV.write(joinpath(datadir, "lq_params_all.csv"), all_lq)
+    println("Saved: lq_params_all.csv")
 end
 
-# ── Save fit table ────────────────────────────────────────────────────────────
-fits_path = joinpath(results_dir, "lq_fits_all.csv")
-CSV.write(fits_path, all_fits)
-println("\nSaved fit table: $fits_path")
-
-# ── Summary plot: α/β ratio across all conditions ────────────────────────────
-if nrow(all_fits) > 0
-    p_ab = plot(title     = "α/β ratio across conditions",
-                xlabel    = "Condition",
-                ylabel    = "α/β (Gy)",
-                legend    = false,
-                framestyle = :box,
-                size      = (max(600, 80*nrow(all_fits)), 450),
-                dpi       = 150,
-                bottom_margin = 10Plots.mm)
-
-    labels = all_fits.file .* "\n" .* all_fits.dose_rate
-    bar!(p_ab, labels, all_fits.alpha_beta;
-         color = :mediumpurple, alpha = 0.8, xrotation = 45)
-
-    savefig(p_ab, joinpath(results_dir, "alpha_beta_summary.png"))
-    println("Saved summary plot: alpha_beta_summary.png")
-end
-
-println("\nDone. All results in: $results_dir")
-println(all_fits)
+println("\nAll plots saved to $datadir")

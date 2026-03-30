@@ -53,6 +53,43 @@ gsm2_cycle[4] = GSM2(r,    a,    b,    rd, Rn)    #! mixed
 
 setup_GSM2!(r, a, b, rd, Rn)
 
+# ── LQ fitting helper ─────────────────────────────────────────────────────────
+function fit_lq_survival(doses, surv_df, doserates_Gys; tag="")
+    lq(D, p) = exp.(-p[1] .* D .- p[2] .* D .^ 2)
+    dr_cols   = setdiff(names(surv_df), ["dose_Gy"])
+    params_df = DataFrame(
+        tag           = String[],
+        dose_rate_Gys = Float64[],
+        alpha         = Float64[],
+        beta          = Float64[],
+        alpha_err     = Float64[],
+        beta_err      = Float64[],
+        alpha_beta    = Float64[],
+        r2            = Float64[],
+    )
+    for (j, col) in enumerate(dr_cols)
+        surv = clamp.(surv_df[!, col], 1e-10, 1.0)
+        local fit_res
+        try
+            fit_res = curve_fit(lq, doses, surv, [0.1, 0.05];
+                                lower=[0.0, 0.0], upper=[10.0, 10.0])
+        catch e
+            @warn "LQ fit failed for $col ($tag)" exception=e
+            continue
+        end
+        α, β   = coef(fit_res)
+        se     = try stderror(fit_res) catch; [NaN, NaN] end
+        pred   = lq(doses, [α, β])
+        ss_res = sum((surv .- pred) .^ 2)
+        ss_tot = sum((surv .- mean(surv)) .^ 2)
+        r2     = 1.0 - ss_res / ss_tot
+        push!(params_df, (tag, doserates_Gys[j], α, β, se[1], se[2], α / β, r2))
+        println(@sprintf("  %-22s  α=%.4f±%.4f  β=%.4f±%.4f  α/β=%.2f  R²=%.4f",
+                         col, α, se[1], β, se[2], α / β, r2))
+    end
+    return params_df
+end
+
 #~ ============================================================
 #~ Simulation parameters
 #~ ============================================================
@@ -203,6 +240,12 @@ meta_df = DataFrame(
     dose_rate_Gyh = doserates_to_run_Gyh)
 CSV.write(joinpath(outdir, "survival_meta_12C_10MeV.csv"), meta_df)
 println("Saved: $(joinpath(outdir, "survival_meta_12C_10MeV.csv"))")
+
+# LQ fit
+println("\nFitting LQ model — 12C 10 MeV:")
+lq_params = fit_lq_survival(doses_to_run, surv_df, doserates_to_run_Gys; tag="12C_10MeV")
+CSV.write(joinpath(outdir, "lq_params_12C_10MeV.csv"), lq_params)
+println("Saved: lq_params_12C_10MeV.csv")
 
 #~ ============================================================
 #~ FINAL PRINT
@@ -362,12 +405,16 @@ insertcols!(surv_df, 1, :dose_Gy => doses_to_run)
 CSV.write(joinpath(outdir, "survival_results_12C_100MeV.csv"), surv_df)
 println("\nSaved: $(joinpath(outdir, "survival_results_12C_100MeV.csv"))")
 
-# Save metadata so the plot script knows the axes
 meta_df = DataFrame(
     dose_rate_Gys = doserates_to_run_Gys,
     dose_rate_Gyh = doserates_to_run_Gyh)
 CSV.write(joinpath(outdir, "survival_meta_12C_100MeV.csv"), meta_df)
 println("Saved: $(joinpath(outdir, "survival_meta_12C_100MeV.csv"))")
+
+println("\nFitting LQ model — 12C 100 MeV:")
+lq_params = fit_lq_survival(doses_to_run, surv_df, doserates_to_run_Gys; tag="12C_100MeV")
+CSV.write(joinpath(outdir, "lq_params_12C_100MeV.csv"), lq_params)
+println("Saved: lq_params_12C_100MeV.csv")
 
 #~ ============================================================
 #~ FINAL PRINT
@@ -528,12 +575,16 @@ insertcols!(surv_df, 1, :dose_Gy => doses_to_run)
 CSV.write(joinpath(outdir, "survival_results_1H_100MeV.csv"), surv_df)
 println("\nSaved: $(joinpath(outdir, "survival_results_1H_100MeV.csv"))")
 
-# Save metadata so the plot script knows the axes
 meta_df = DataFrame(
     dose_rate_Gys = doserates_to_run_Gys,
     dose_rate_Gyh = doserates_to_run_Gyh)
 CSV.write(joinpath(outdir, "survival_meta_1H_100MeV.csv"), meta_df)
 println("Saved: $(joinpath(outdir, "survival_meta_1H_100MeV.csv"))")
+
+println("\nFitting LQ model — 1H 100 MeV:")
+lq_params = fit_lq_survival(doses_to_run, surv_df, doserates_to_run_Gys; tag="1H_100MeV")
+CSV.write(joinpath(outdir, "lq_params_1H_100MeV.csv"), lq_params)
+println("Saved: lq_params_1H_100MeV.csv")
 
 #~ ============================================================
 #~ FINAL PRINT
