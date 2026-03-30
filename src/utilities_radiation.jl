@@ -120,7 +120,8 @@ sp = load_stopping_power()
 ```
 """
 function load_stopping_power()
-    sp = Dict{String,Matrix{Float64}}()
+    sp = Dict{String, Matrix{Float64}}()
+    spdir = joinpath(@__DIR__, "..", "data", "stoppingpower")
 
     ion_list = [
         ("1H",  "H"),  ("4He", "He"), ("6Li", "Li"), ("8Be", "Be"),
@@ -128,7 +129,7 @@ function load_stopping_power()
     ]
 
     for (ion, element) in ion_list
-        sp[ion] = readdlm("data/stoppingpower/$(element)_water.txt", Float64)
+        sp[ion] = readdlm(joinpath(spdir, "$(element)_water.txt"), Float64)
     end
 
     return sp

@@ -11,6 +11,7 @@ using InlineStrings
 using CUDA
 using Statistics: mean
 using Printf
+using ProgressMeter
 
 nthreads()
 
@@ -42,8 +43,8 @@ setup_GSM2!(r, a, b, rd, Rn)
 # Shared geometry — fixed once for all three conditions
 # ============================================================
 dose         = 2.0
-tumor_radius = 300.0
-X_box        = 300.0
+tumor_radius = 500.0
+X_box        = 500.0
 X_voxel      = 800.0
 R_cell       = 15.0
 target_geom  = "circle"
@@ -55,7 +56,7 @@ terminal_time = 72.0   # hours post-irradiation ABM window
 N_sideVox   = Int(floor(2 * X_box / X_voxel))
 N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
 
-snapshot_hours = [0, 12, 24, 48, 72]   # hours at which snapshots are saved
+snapshot_hours = [0, 4, 12, 20, 24, 48, 72]   # hours at which snapshots are saved
 
 datadir = joinpath(@__DIR__, "..", "data", "spheroid_temporal_evolution")
 mkpath(datadir)
@@ -114,7 +115,6 @@ function run_condition(
     compute_times_domain!(cell_df_irrad, gsm2_cycle;
                           nat_apo = 1e-10, terminal_time = terminal_time,
                           verbose = false, summary = true)
-
     # ── run ABM ──────────────────────────────────────────────────────────────
     ts, snaps = run_simulation_abm!(cell_df_irrad;
                     nat_apo           = 1e-10,
@@ -175,19 +175,7 @@ setup_cell_population!(target_geom, X_box, R_cell, N_sideVox,
                        N_CellsSide, gsm2_cycle[4])
 setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
 
-# Spheroid mask: keep only cells inside tumor_radius in a checkerboard pattern
-cell_df.is_cell = ifelse.(
-    (cell_df.x .^ 2 .+ cell_df.y .^ 2 .+ cell_df.z .^ 2 .<= tumor_radius^2) .&
-    ((cell_df.x .÷ Int(2R_cell) .+ cell_df.y .÷ Int(2R_cell) .+
-      cell_df.z .÷ Int(2R_cell)) .% 2 .== 0),
-    1, 0)
-for i in 1:nrow(cell_df)
-    cell_df.number_nei[i] = length(cell_df.nei[i]) -
-                             sum(cell_df.is_cell[cell_df.nei[i]])
-end
-
 set_oxygen!(cell_df; plot_oxygen=false)
-cell_df.O .= 21.0   # uniform normoxia
 
 # Save the pristine (pre-irradiation) geometry as the common reference.
 # The random cell-cycle assignment produced by setup_cell_population! is
@@ -239,7 +227,7 @@ function irradiate_copy(E::Float64, particle::String,
     Npar = round(Int, F * π * R_beam_^2 * 1e-8)
     println("  [$particle $(E) MeV] Npar=$Npar  R_beam=$(round(R_beam_,digits=2))")
 
-    @time MC_dose_fast!(ion, Npar, R_beam_, irrad_cond, cell_copy,
+    @time MC_dose_CPU!(ion, Npar, R_beam_, irrad_cond, cell_copy,
                         df_center_x, df_center_y, at,
                         gsm2_cycle, type_AT, track_seg)
     MC_loop_damage!(ion, cell_copy, irrad_cond, gsm2_cycle)

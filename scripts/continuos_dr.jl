@@ -16,6 +16,7 @@ using InlineStrings
 using CUDA
 using Statistics: mean
 using SparseArrays
+using Printf
 
 nthreads()
 
@@ -112,7 +113,7 @@ mkpath(outdir)
 #~ ============================================================
 #~ Survival vs dose loop
 #~ ============================================================
-doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+doses_to_run         = [0.1, 0.3, 0.7, 1.0, 1.3, 1.7, 2.0]
 doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
 doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
 
@@ -124,7 +125,7 @@ for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
     dr = dose_rate_gyh / zF
 
     for (k, dose) in enumerate(doses_to_run)
-        N_dose     = round(Int, dose * Npar_effect / 4)
+        N_dose     = round(Int, dose * Npar_effect/2)
         times_full = rand(Exponential(1.0 / dr), N_dose)
         lut_order  = mod1.(randperm(N_dose), Npar_effect)
 
@@ -212,3 +213,336 @@ println("="^60)
 for f in sort(readdir(outdir))
     println("  $outdir/$f")
 end
+
+
+
+
+
+#~ ============================================================
+#~ Simulation parameters
+#~ ============================================================
+E            = 100.0
+particle     = "12C"
+dose         = 1.
+tumor_radius = 350.0
+X_box        = 460.0
+au           = 4.0
+
+setup(E, particle, dose, tumor_radius; X_box = X_box)
+
+cell_df_copy = deepcopy(cell_df)
+cell_df.O   .= 21.0
+
+for i in 1:nrow(cell_df_copy)
+    fill!(cell_df_copy.dam_X_dom[i], 0)
+    fill!(cell_df_copy.dam_Y_dom[i], 0)
+end
+cell_df_copy.dam_X_total .= 0
+cell_df_copy.dam_Y_total .= 0
+
+#~ ============================================================
+#~ LUT precomputation
+#~ ============================================================
+println("Precomputing dose LUT...")
+@time lut = MC_precompute_lut!(
+    ion, Npar, R_beam, irrad_cond, cell_df,
+    df_center_x, df_center_y, at,
+    gsm2_cycle, type_AT, track_seg;
+    chunk_size = 50_000)
+
+println("Precomputing damage LUT...")
+@time damage_lut = precompute_damage_lut!(
+    lut, cell_df_copy, irrad_cond, gsm2_cycle, ion;
+    chunk_size = 50_000)
+
+jldsave("lut_12C_4Gy_100MeV.jld2"; damage_lut)
+
+Npar_effect = length(damage_lut)
+println("Npar_effect = $Npar_effect")
+
+#~ ============================================================
+#~ Base active-cell template
+#~ ============================================================
+active_cells_base = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}()
+for row in eachrow(cell_df_copy)
+    row.is_cell != 1 && continue
+    active_cells_base[row.index] = (zeros(Int, length(row.dam_X_dom)),
+                                    zeros(Int, length(row.dam_Y_dom)))
+end
+Ntot = length(active_cells_base)
+println("Total cells (Ntot) = $Ntot")
+
+outdir = joinpath(@__DIR__, "..", "data", "continuous_dr")
+mkpath(outdir)
+
+#~ ============================================================
+#~ Survival vs dose loop
+#~ ============================================================
+doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
+doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
+
+survival_results = zeros(length(doses_to_run), length(doserates_to_run_Gyh))
+gsm2             = gsm2_cycle[1]
+
+for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
+    println("\nRunning dose rate: $dose_rate_gyh Gy/h")
+    dr = dose_rate_gyh / zF
+
+    for (k, dose) in enumerate(doses_to_run)
+        N_dose     = round(Int, dose * Npar_effect)
+        times_full = rand(Exponential(1.0 / dr), N_dose)
+        lut_order  = mod1.(randperm(N_dose), Npar_effect)
+
+        times_filtered   = Float64[]
+        lut_indices      = Int[]
+        accumulated_time = 0.0
+
+        for i in 1:N_dose
+            lut_idx          = lut_order[i]
+            accumulated_time += times_full[i]
+            if !isempty(damage_lut[lut_idx])
+                push!(times_filtered,   accumulated_time)
+                push!(lut_indices,      lut_idx)
+                accumulated_time = 0.0
+            end
+        end
+        println("  [dose=$(dose) Gy] Effective particles: $(length(lut_indices)) / $N_dose")
+
+        # Reset active cells from base template
+        active_cells = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}(
+            idx => (copy(X), copy(Y))
+            for (idx, (X, Y)) in active_cells_base)
+
+        # Main particle loop
+        for i in 1:length(lut_indices)
+            lut_idx = lut_indices[i]
+
+            # 1. Apply damage
+            @inbounds for (idx, (x, y)) in damage_lut[lut_idx]
+                !haskey(active_cells, idx) && continue
+                active_cells[idx][1] .+= x
+                active_cells[idx][2] .+= y
+            end
+
+            # 2. Repair window: interval until next hit (Inf for last particle)
+            t = i < length(lut_indices) ? times_filtered[i + 1] : Inf
+
+            # 3. SSA repair
+            to_delete = Int[]
+            for (cell_idx, (X, Y)) in active_cells
+                all(iszero, X) && all(iszero, Y) && continue
+                death_time, _, _, X_new, Y_new =
+                    compute_repair_domain(X, Y, gsm2;
+                                          terminal_time = t, au = au)
+                if isfinite(death_time)
+                    push!(to_delete, cell_idx)
+                else
+                    active_cells[cell_idx] = (X_new, Y_new)
+                end
+            end
+
+            for idx in to_delete
+                delete!(active_cells, idx)
+            end
+        end
+
+        survival_results[k, j] = length(active_cells) / Ntot
+        println("  [dose=$(dose) Gy] Survival: $(round(survival_results[k,j], digits=4))")
+    end
+end
+
+#~ ============================================================
+#~ Save results
+#~ ============================================================
+# Save survival matrix with labelled columns (one per dose rate)
+col_names = [@sprintf("dr_%.0eGys", dr) for dr in doserates_to_run_Gys]
+surv_df   = DataFrame(survival_results, col_names)
+insertcols!(surv_df, 1, :dose_Gy => doses_to_run)
+CSV.write(joinpath(outdir, "survival_results_12C_100MeV.csv"), surv_df)
+println("\nSaved: $(joinpath(outdir, "survival_results_12C_100MeV.csv"))")
+
+# Save metadata so the plot script knows the axes
+meta_df = DataFrame(
+    dose_rate_Gys = doserates_to_run_Gys,
+    dose_rate_Gyh = doserates_to_run_Gyh)
+CSV.write(joinpath(outdir, "survival_meta_12C_100MeV.csv"), meta_df)
+println("Saved: $(joinpath(outdir, "survival_meta_12C_100MeV.csv"))")
+
+#~ ============================================================
+#~ FINAL PRINT
+#~ ============================================================
+println("\n", "="^60)
+println("ALL RESULTS SAVED TO $outdir/")
+println("="^60)
+for f in sort(readdir(outdir))
+    println("  $outdir/$f")
+end
+
+
+
+
+
+
+#~ ============================================================
+#~ Simulation parameters
+#~ ============================================================
+E            = 100.0
+particle     = "1H"
+dose         = 0.5
+tumor_radius = 150.0
+X_box        = 260.0
+au           = 4.0
+
+setup(E, particle, dose, tumor_radius; X_box = X_box)
+
+cell_df_copy = deepcopy(cell_df)
+cell_df.O   .= 21.0
+
+for i in 1:nrow(cell_df_copy)
+    fill!(cell_df_copy.dam_X_dom[i], 0)
+    fill!(cell_df_copy.dam_Y_dom[i], 0)
+end
+cell_df_copy.dam_X_total .= 0
+cell_df_copy.dam_Y_total .= 0
+
+#~ ============================================================
+#~ LUT precomputation
+#~ ============================================================
+println("Precomputing dose LUT...")
+@time lut = MC_precompute_lut!(
+    ion, Npar, R_beam, irrad_cond, cell_df,
+    df_center_x, df_center_y, at,
+    gsm2_cycle, type_AT, track_seg;
+    chunk_size = 50_000)
+
+println("Precomputing damage LUT...")
+@time damage_lut = precompute_damage_lut!(
+    lut, cell_df_copy, irrad_cond, gsm2_cycle, ion;
+    chunk_size = 50_000)
+
+jldsave("lut_1H_4Gy_100MeV.jld2"; damage_lut)
+
+Npar_effect = length(damage_lut)
+println("Npar_effect = $Npar_effect")
+
+#~ ============================================================
+#~ Base active-cell template
+#~ ============================================================
+active_cells_base = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}()
+for row in eachrow(cell_df_copy)
+    row.is_cell != 1 && continue
+    active_cells_base[row.index] = (zeros(Int, length(row.dam_X_dom)),
+                                    zeros(Int, length(row.dam_Y_dom)))
+end
+Ntot = length(active_cells_base)
+println("Total cells (Ntot) = $Ntot")
+
+outdir = joinpath(@__DIR__, "..", "data", "continuous_dr")
+mkpath(outdir)
+
+#~ ============================================================
+#~ Survival vs dose loop
+#~ ============================================================
+doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
+doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
+
+survival_results = zeros(length(doses_to_run), length(doserates_to_run_Gyh))
+gsm2             = gsm2_cycle[1]
+
+for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
+    println("\nRunning dose rate: $dose_rate_gyh Gy/h")
+    dr = dose_rate_gyh / zF
+
+    for (k, dose) in enumerate(doses_to_run)
+        N_dose     = round(Int, dose * Npar_effect/0.5)
+        times_full = rand(Exponential(1.0 / dr), N_dose)
+        lut_order  = mod1.(randperm(N_dose), Npar_effect)
+
+        times_filtered   = Float64[]
+        lut_indices      = Int[]
+        accumulated_time = 0.0
+
+        for i in 1:N_dose
+            lut_idx          = lut_order[i]
+            accumulated_time += times_full[i]
+            if !isempty(damage_lut[lut_idx])
+                push!(times_filtered,   accumulated_time)
+                push!(lut_indices,      lut_idx)
+                accumulated_time = 0.0
+            end
+        end
+        println("  [dose=$(dose) Gy] Effective particles: $(length(lut_indices)) / $N_dose")
+
+        # Reset active cells from base template
+        active_cells = Dict{Int, Tuple{Vector{Int}, Vector{Int}}}(
+            idx => (copy(X), copy(Y))
+            for (idx, (X, Y)) in active_cells_base)
+
+        # Main particle loop
+        for i in 1:length(lut_indices)
+            lut_idx = lut_indices[i]
+
+            # 1. Apply damage
+            @inbounds for (idx, (x, y)) in damage_lut[lut_idx]
+                !haskey(active_cells, idx) && continue
+                active_cells[idx][1] .+= x
+                active_cells[idx][2] .+= y
+            end
+
+            # 2. Repair window: interval until next hit (Inf for last particle)
+            t = i < length(lut_indices) ? times_filtered[i + 1] : Inf
+
+            # 3. SSA repair
+            to_delete = Int[]
+            for (cell_idx, (X, Y)) in active_cells
+                all(iszero, X) && all(iszero, Y) && continue
+                death_time, _, _, X_new, Y_new =
+                    compute_repair_domain(X, Y, gsm2;
+                                          terminal_time = t, au = au)
+                if isfinite(death_time)
+                    push!(to_delete, cell_idx)
+                else
+                    active_cells[cell_idx] = (X_new, Y_new)
+                end
+            end
+
+            for idx in to_delete
+                delete!(active_cells, idx)
+            end
+        end
+
+        survival_results[k, j] = length(active_cells) / Ntot
+        println("  [dose=$(dose) Gy] Survival: $(round(survival_results[k,j], digits=4))")
+    end
+end
+
+#~ ============================================================
+#~ Save results
+#~ ============================================================
+# Save survival matrix with labelled columns (one per dose rate)
+col_names = [@sprintf("dr_%.0eGys", dr) for dr in doserates_to_run_Gys]
+surv_df   = DataFrame(survival_results, col_names)
+insertcols!(surv_df, 1, :dose_Gy => doses_to_run)
+CSV.write(joinpath(outdir, "survival_results_1H_100MeV.csv"), surv_df)
+println("\nSaved: $(joinpath(outdir, "survival_results_1H_100MeV.csv"))")
+
+# Save metadata so the plot script knows the axes
+meta_df = DataFrame(
+    dose_rate_Gys = doserates_to_run_Gys,
+    dose_rate_Gyh = doserates_to_run_Gyh)
+CSV.write(joinpath(outdir, "survival_meta_1H_100MeV.csv"), meta_df)
+println("Saved: $(joinpath(outdir, "survival_meta_1H_100MeV.csv"))")
+
+#~ ============================================================
+#~ FINAL PRINT
+#~ ============================================================
+println("\n", "="^60)
+println("ALL RESULTS SAVED TO $outdir/")
+println("="^60)
+for f in sort(readdir(outdir))
+    println("  $outdir/$f")
+end
+
+

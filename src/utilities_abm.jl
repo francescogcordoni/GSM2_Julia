@@ -688,13 +688,12 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
     @inbounds for n_idx in pop.nei[removed_idx]
         is_valid_index(n_idx, n) && is_cell[n_idx] == 1 || continue
         number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
-        if number_nei[n_idx] > 0 && can_divide[n_idx] == 0
+        if number_nei[n_idx] > 0 && can_divide[n_idx] == 0 && isinf(pop.death_time[n_idx])
             cell_cycle[n_idx] = String7("G1")
             new_ct = generate_cycle_time("G1")
             cycle_times[n_idx] = isinf(recover_times[n_idx]) ?
                 new_ct : max(new_ct, recover_times[n_idx])
-            pop.death_time[n_idx] = Inf
-            can_divide[n_idx]     = 1
+            can_divide[n_idx] = 1
         end
     end
     return nothing
