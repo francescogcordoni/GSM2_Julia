@@ -16,11 +16,12 @@ const DEFAULTS = (
 # fit_max_Gy: upper dose limit used for LQ fitting (per condition)
 CONDITIONS = [
     (tag="12C_10MeV",  label=L"$^{12}$C 10 MeV/u",  color=:firebrick,  fit_max_Gy=1.3),
+    (tag="12C_100MeV", label=L"$^{12}$C 100 MeV/u", color=:darkorange, fit_max_Gy=3.0),
     (tag="1H_100MeV",  label=L"$^{1}$H 100 MeV/u",  color=:royalblue,  fit_max_Gy=3.0),
 ]
 
 # Dose-rate columns to exclude from all plots
-const EXCLUDE_DR = ["dr_5e-04Gys"]
+const EXCLUDE_DR = String[]
 
 # ── LQ fitting helper ─────────────────────────────────────────────────────────
 # Parse dose-rate value (Gy/s) from column name, e.g. "dr_1e-05Gys" → 1e-5
@@ -90,7 +91,7 @@ for cond in CONDITIONS
 end
 
 # Dose-rate palette (one color per dose rate, shared across conditions)
-dr_palette = [:navy, :steelblue, :seagreen, :darkorange]
+dr_palette = [:navy, :steelblue, :seagreen, :darkorange, :purple]
 
 lq(D, α, β) = exp.(-α .* D .- β .* D .^ 2)
 
@@ -131,6 +132,17 @@ for cond in CONDITIONS
         col_c  = dr_palette[min(k, length(dr_palette))]
         row    = lq_df[lq_df.dose_rate_Gys .== lq_df.dose_rate_Gys[k], :]
         lbl    = latexstring(@sprintf("%.0e~\\mathrm{Gy/s}", lq_df.dose_rate_Gys[k]))
+
+        # Raw data points
+        vals = surv_df[!, col]
+        mask_pos = vals .> 0
+        scatter!(p, doses[mask_pos], vals[mask_pos];
+            label             = "",
+            color             = col_c,
+            markersize        = 4,
+            markerstrokewidth = 0.5,
+            alpha             = 0.7,
+        )
 
         if !isempty(row) && !isnan(row.alpha[1])
             α, β = row.alpha[1], row.beta[1]

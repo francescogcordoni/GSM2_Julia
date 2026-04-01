@@ -1,6 +1,22 @@
-using CSV, DataFrames, Printf
+using Base.Threads
+using Distributed
+using CSV, DataFrames
+using Distributions
+using Random
+using ProgressBars
+using GLM
+using JLD2
+using DelimitedFiles
 using Statistics
-
+using StatsBase
+using Optim
+using LsqFit
+using ProgressMeter
+using InlineStrings
+using CUDA
+using Statistics: mean
+using SparseArrays
+using Printf
 # ============================================================
 # Load functions
 # ============================================================
@@ -61,37 +77,36 @@ results = DataFrame(
 # ============================================================
 setup_IonIrrad!(dose, E, particle)   # sets global ion/irrad/LET
 
-for tumor_radius in RADII
-    X_box = tumor_radius
+for _r in RADII
+    # global declarations so setup functions see updated Main.tumor_radius / Main.X_box
+    global tumor_radius = _r
+    global X_box        = 800.
 
     println("\n", "="^60)
     @printf("  RADIUS = %.0f µm\n", tumor_radius)
     println("="^60)
 
-    N_sideVox   = Int(floor(2 * X_box / X_voxel))
+    N_sideVox   = max(1, Int(floor(2 * X_box / X_voxel)))
     N_CellsSide = 2 * convert(Int64, floor(X_box / (2 * R_cell)))
 
     # ── Build geometry ──────────────────────────────────────────
-    R_beam, _, _ = calculate_beam_properties(calc_type, target_geom,
-                                              X_box, X_voxel, tumor_radius)
     setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
                         ParIrr="false", track_seg=track_seg)
     setup_cell_population!(target_geom, X_box, R_cell, N_sideVox,
-                           N_CellsSide, gsm2_cycle[4])
-    setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
-    set_oxygen!(cell_df; plot_oxygen=false)
+                            N_CellsSide, gsm2_cycle[4])
 
     Ncells = count(cell_df.is_cell .== 1)
     @printf("  Cells: %d\n", Ncells)
 
     # ── Irradiation timing ──────────────────────────────────────
-    cell_irrad = deepcopy(cell_df)
-
-    F    = irrad.dose / (1.602e-9 * LET)
-    Npar = round(Int, F * π * R_beam^2 * 1e-8)
-    @printf("  Npar = %d\n", Npar)
-
     t_irrad = @elapsed begin
+        R_beam, _, _ = calculate_beam_properties(calc_type, target_geom,
+                                                  X_box, X_voxel, tumor_radius)
+        setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+        set_oxygen!(cell_df; plot_oxygen=false)
+        cell_irrad = deepcopy(cell_df)
+        F    = irrad.dose / (1.602e-9 * LET)
+        Npar = round(Int, F * π * R_beam^2 * 1e-8)
         MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_irrad,
                      df_center_x, df_center_y, at,
                      gsm2_cycle, type_AT, track_seg)
