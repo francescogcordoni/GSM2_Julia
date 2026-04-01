@@ -404,6 +404,127 @@ function compute_repair_domain(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
     return (Inf, t, 0, X_work, Y_work)
 end
 
+"""
+    compute_repair_domain_trajectory(X, Y, gsm2; rng=default_rng(), au=4.0)
+        -> (times, X_traj, Y_traj, death_code)
+
+Gillespie simulation of X-lesion repair under GSM2 rates, recording the full
+temporal trajectory. The simulation runs until all X lesions are consumed
+(sum(X) == 0), regardless of whether lethal events (misrepair, interaction) occur.
+
+Reactions per domain j:
+- Repair      (rate r·X[j]):          X[j] -= 1
+- Misrepair   (rate a·X[j]):          X[j] -= 1, Y[j] += 1
+- Interaction (rate b·X[j]·(X[j]-1)): X[j] -= 2, Y[j] += 1
+
+At each reaction event the current time and the full X/Y state vectors are
+appended to the trajectory. The initial state (t=0) is always the first entry.
+
+Returns:
+- `times::Vector{Float64}` — time of each recorded event (including t=0)
+- `X_traj::Vector{Vector{Int}}` — X state at each event
+- `Y_traj::Vector{Vector{Int}}` — Y state at each event
+- `death_code::Int` — 0 = no Y accumulated (all repaired), 1 = Y > 0 (lethal)
+
+Inputs X, Y are not mutated.
+"""
+function compute_repair_domain_trajectory(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
+                                           rng::AbstractRNG = Random.default_rng(),
+                                           au::Float64      = 4.0)
+
+    times  = Float64[]
+    X_traj = Vector{Int}[]
+    Y_traj = Vector{Int}[]
+
+    X_work = copy(X)
+    Y_work = copy(Y)
+
+    # Record initial state
+    push!(times,  0.0)
+    push!(X_traj, copy(X_work))
+    push!(Y_traj, copy(Y_work))
+
+    sum_X = sum(X_work)
+    if sum_X == 0
+        return (times, X_traj, Y_traj, any(>(0), Y_work) ? 1 : 0)
+    end
+
+    a, b, r = gsm2.a, gsm2.b, gsm2.r
+    n       = length(X_work)
+    t       = 0.0
+
+    rates_r = Vector{Float64}(undef, n)
+    rates_a = Vector{Float64}(undef, n)
+    rates_b = Vector{Float64}(undef, n)
+
+    while sum_X > 0
+        # Build propensities
+        a0 = 0.0
+        @inbounds for i in 1:n
+            xi = X_work[i]
+            rr = r * xi
+            ra = a * xi
+            rb = xi > 1 ? b * xi * (xi - 1) : 0.0
+            rates_r[i] = rr; rates_a[i] = ra; rates_b[i] = rb
+            a0 += rr + ra + rb
+        end
+
+        if a0 <= 0.0
+            break   # no reactions possible, exit with current state
+        end
+
+        # Select reaction
+        threshold   = rand(rng) * a0
+        cumulative  = 0.0
+        reac_type   = 0
+        reac_domain = 0
+
+        @inbounds for i in 1:n
+            cumulative += rates_r[i]
+            if cumulative >= threshold; reac_type = 1; reac_domain = i; break; end
+        end
+        if reac_type == 0
+            @inbounds for i in 1:n
+                cumulative += rates_a[i]
+                if cumulative >= threshold; reac_type = 2; reac_domain = i; break; end
+            end
+        end
+        if reac_type == 0
+            @inbounds for i in 1:n
+                cumulative += rates_b[i]
+                if cumulative >= threshold; reac_type = 3; reac_domain = i; break; end
+            end
+        end
+
+        # Advance time
+        t += au * (-log(rand(rng)) / a0)
+
+        # Apply reaction
+        if reac_type == 1
+            # Repair: one X removed
+            @inbounds X_work[reac_domain] -= 1
+            sum_X -= 1
+        elseif reac_type == 2
+            # Misrepair: one X consumed, one Y created
+            @inbounds X_work[reac_domain] -= 1
+            @inbounds Y_work[reac_domain] += 1
+            sum_X -= 1
+        else
+            # Interaction: two X consumed, one Y created
+            @inbounds X_work[reac_domain] -= 2
+            @inbounds Y_work[reac_domain] += 1
+            sum_X -= 2
+        end
+
+        push!(times,  t)
+        push!(X_traj, copy(X_work))
+        push!(Y_traj, copy(Y_work))
+    end
+
+    death_code = any(>(0), Y_work) ? 1 : 0
+    return (times, X_traj, Y_traj, death_code)
+end
+
 #! ============================================================================
 #! Cell Cycle Helpers
 #! ============================================================================

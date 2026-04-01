@@ -2,12 +2,13 @@ using CSV, DataFrames
 using Plots
 using Statistics
 using Printf
+using LaTeXStrings
 
 # ============================================================
 # Configuration — must match continuous_doserate_sphere.jl
 # ============================================================
 indir  = joinpath(@__DIR__, "..", "data", "continuous_doserate_sphere")
-outdir = @__DIR__
+outdir = indir
 au     = 4.0
 
 # Dose-rate conditions: (Gy/s value, display color)
@@ -19,8 +20,18 @@ DR_COLORS = Dict(
     1e-5 => :steelblue,
     1e-2 => :darkorange)
 
+const DEFAULTS = (
+    framestyle = :box,
+    grid       = true,
+    gridalpha  = 0.3,
+    dpi        = 600,
+    fontfamily = "Computer Modern",
+    margin     = 5Plots.mm,
+)
+
 dose_label = "1p5Gy"
 dr_label(dr_gys::Float64) = @sprintf("%.0e", dr_gys)
+dr_plotlabel(dr_gys::Float64) = latexstring(@sprintf("%.0e~\\mathrm{Gy/s}", dr_gys))
 
 # ============================================================
 # Load summary
@@ -66,59 +77,83 @@ end
 # PLOT 1: Dose-rate comparison — total cells over time
 # ============================================================
 p_total = plot(;
-    xlabel = "Time (h)", ylabel = "Total cells",
-    title  = "1.5 Gy  |  Dose-rate comparison",
-    legend = :topright, size = (900, 550), dpi = 150)
+    xlabel = "Time (h)",
+    ylabel = "Total cells",
+    legend = :topright,
+    size   = (900, 550),
+    DEFAULTS...,
+)
 
 for dr_gys in sort(DOSERATES_GYS)
     haskey(ts_data, dr_gys) || continue
     res   = ts_data[dr_gys]
     col   = get(DR_COLORS, dr_gys, :black)
-    t_all = vcat(res.ts_irrad.time,       res.ts_post.time)
-    c_all = vcat(res.ts_irrad.total_cells, res.ts_post.total_cells)
+    t_all = vcat(res.ts_irrad.time,        res.ts_post.time)
+    c_all = vcat(res.ts_irrad.total_cells,  res.ts_post.total_cells)
     plot!(p_total, t_all, c_all;
-          label = "$(dr_gys) Gy/s  (SF=$(round(res.sf, digits=3)))",
+          label = dr_plotlabel(dr_gys),
           lw    = 2,
           color = col)
     vline!(p_total, [res.abm_wall_time];
-           label = "", color = col, lw = 1.5, linestyle = :dot)
+           label = "", color = col, lw = 1.2, linestyle = :dot)
 end
+
 display(p_total)
 savefig(p_total, joinpath(outdir, "survival_$(dose_label).png"))
-println("Saved: survival_$(dose_label).png")
+savefig(p_total, joinpath(outdir, "survival_$(dose_label).pdf"))
+println("Saved: survival_$(dose_label)")
 
 # ============================================================
 # PLOT 2: Phase breakdown — one panel per dose rate
 # ============================================================
-phase_colors = [:gray :steelblue :green :orange :red]
-phase_labels = ["G0" "G1" "S" "G2" "M"]
-phase_fields = [:g0_cells :g1_cells :s_cells :g2_cells :m_cells]
+phase_colors = [:gray, :steelblue, :green, :orange, :red]
+phase_labels = ["G0", "G1", "S", "G2", "M"]
+phase_fields = [:g0_cells, :g1_cells, :s_cells, :g2_cells, :m_cells]
 
 sorted_rates = sort(DOSERATES_GYS)
-n            = length(sorted_rates)
+n_rates      = length(sorted_rates)
 
-p_phases = plot(layout = (1, n), size = (420n, 420), dpi = 150)
-for (pi, dr_gys) in enumerate(sorted_rates)
+phase_panels = Plots.Plot[]
+for dr_gys in sorted_rates
     haskey(ts_data, dr_gys) || continue
     res   = ts_data[dr_gys]
     t_all = vcat(res.ts_irrad.time, res.ts_post.time)
+
+    p = plot(;
+        xlabel = "Time (h)",
+        ylabel = "Cells",
+        legend = :topright,
+        size   = (650, 480),
+        DEFAULTS...,
+    )
     for (fi, fld) in enumerate(phase_fields)
         y_all = vcat(res.ts_irrad[!, fld], res.ts_post[!, fld])
-        plot!(p_phases, t_all, y_all;
-              subplot = pi,
-              label   = phase_labels[fi],
-              color   = phase_colors[fi],
-              lw      = 1.5,
-              title   = "$(round(dr_gys, sigdigits=2)) Gy/s",
-              xlabel  = pi == ceil(Int, n/2) ? "Time (h)" : "",
-              ylabel  = pi == 1 ? "Cells" : "")
+        plot!(p, t_all, y_all;
+              label = phase_labels[fi],
+              color = phase_colors[fi],
+              lw    = 1.8)
     end
-    vline!(p_phases, [res.abm_wall_time];
-           subplot = pi, label = "", color = :black, lw = 1, linestyle = :dot)
+    vline!(p, [res.abm_wall_time];
+           label = "", color = :black, lw = 1.2, linestyle = :dot)
+
+    push!(phase_panels, p)
 end
-display(p_phases)
-savefig(p_phases, joinpath(outdir, "phases_$(dose_label).png"))
-println("Saved: phases_$(dose_label).png")
+
+if !isempty(phase_panels)
+    p_phases = plot(phase_panels...;
+                    layout = (1, length(phase_panels)),
+                    size   = (650 * length(phase_panels), 480),
+                    DEFAULTS...)
+    display(p_phases)
+    savefig(p_phases, joinpath(outdir, "phases_$(dose_label).png"))
+    savefig(p_phases, joinpath(outdir, "phases_$(dose_label).pdf"))
+    println("Saved: phases_$(dose_label)")
+
+    for (i, dr_gys) in enumerate(sorted_rates)
+        savefig(phase_panels[i], joinpath(outdir, "phases_$(dose_label)_$(dr_label(dr_gys))Gys.png"))
+        savefig(phase_panels[i], joinpath(outdir, "phases_$(dose_label)_$(dr_label(dr_gys))Gys.pdf"))
+    end
+end
 
 # ============================================================
 # PLOT 3: Normalised survival (N/N₀) over time
@@ -126,25 +161,29 @@ println("Saved: phases_$(dose_label).png")
 N0 = summary_df.Ntot[1]   # same geometry for all rates — use first row
 
 p_norm = plot(;
-    xlabel = "Time (h)", ylabel = "Relative cell number (N/N₀)",
-    title  = "Normalised survival — 1.5 Gy",
-    legend = :topright, size = (900, 500), dpi = 150)
+    xlabel = "Time (h)",
+    ylabel = L"N/N_0",
+    legend = :topright,
+    size   = (900, 500),
+    DEFAULTS...,
+)
 
 for dr_gys in sort(DOSERATES_GYS)
     haskey(ts_data, dr_gys) || continue
     res   = ts_data[dr_gys]
     col   = get(DR_COLORS, dr_gys, :black)
-    t_all = vcat(res.ts_irrad.time,       res.ts_post.time)
-    c_all = vcat(res.ts_irrad.total_cells, res.ts_post.total_cells)
+    t_all = vcat(res.ts_irrad.time,        res.ts_post.time)
+    c_all = vcat(res.ts_irrad.total_cells,  res.ts_post.total_cells)
     plot!(p_norm, t_all, c_all ./ N0;
-          label = "$(dr_gys) Gy/s", lw = 2, color = col)
+          label = dr_plotlabel(dr_gys), lw = 2, color = col)
     vline!(p_norm, [res.abm_wall_time];
-           label = "", color = col, lw = 1.5, linestyle = :dot)
+           label = "", color = col, lw = 1.2, linestyle = :dot)
 end
-hline!(p_norm, [1.0]; color = :black, ls = :dash, lw = 1, label = "N₀")
+hline!(p_norm, [1.0]; color = :black, ls = :dash, lw = 1, label = L"N_0")
 display(p_norm)
 savefig(p_norm, joinpath(outdir, "normalised_survival_$(dose_label).png"))
-println("Saved: normalised_survival_$(dose_label).png")
+savefig(p_norm, joinpath(outdir, "normalised_survival_$(dose_label).pdf"))
+println("Saved: normalised_survival_$(dose_label)")
 
 # ============================================================
 # FINAL PRINT
@@ -153,6 +192,6 @@ println("\n", "="^60)
 println("ALL PLOTS SAVED TO $outdir/")
 println("="^60)
 println("Files written:")
-for f in filter(f -> endswith(f, ".png"), sort(readdir(outdir)))
+for f in filter(f -> endswith(f, ".png") || endswith(f, ".pdf"), sort(readdir(outdir)))
     println("  $outdir/$f")
 end

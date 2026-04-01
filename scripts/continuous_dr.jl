@@ -162,7 +162,7 @@ for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
     dr = dose_rate_gyh / zF
 
     for (k, dose) in enumerate(doses_to_run)
-        N_dose     = round(Int, dose * Npar_effect/2)
+        N_dose     = round(Int, dose * Npar_effect/4)
         times_full = rand(Exponential(1.0 / dr), N_dose)
         lut_order  = mod1.(randperm(N_dose), Npar_effect)
 
@@ -266,7 +266,7 @@ end
 #~ ============================================================
 E            = 100.0
 particle     = "12C"
-dose         = 1.
+dose         = 0.5
 tumor_radius = 350.0
 X_box        = 460.0
 au           = 4.0
@@ -321,7 +321,7 @@ mkpath(outdir)
 #~ ============================================================
 #~ Survival vs dose loop
 #~ ============================================================
-doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 3.5]
 doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
 doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
 
@@ -333,7 +333,7 @@ for (j, dose_rate_gyh) in enumerate(doserates_to_run_Gyh)
     dr = dose_rate_gyh / zF
 
     for (k, dose) in enumerate(doses_to_run)
-        N_dose     = round(Int, dose * Npar_effect)
+        N_dose     = round(Int, dose * Npar_effect/0.5)
         times_full = rand(Exponential(1.0 / dr), N_dose)
         lut_order  = mod1.(randperm(N_dose), Npar_effect)
 

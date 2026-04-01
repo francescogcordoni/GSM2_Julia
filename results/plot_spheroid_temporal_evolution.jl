@@ -2,6 +2,7 @@ using CSV, DataFrames
 using Plots
 using Colors
 using Statistics
+using LaTeXStrings
 
 # ============================================================
 # Configuration
@@ -11,8 +12,8 @@ indir  = joinpath(@__DIR__, "..", "data", "spheroid_temporal_evolution")
 outdir = indir
 
 CONDITIONS = [
-    (label="1H_80MeV",   particle="1H",  energy=80.0, color=:steelblue),
-    (label="12C_80MeVu", particle="12C", energy=80.0, color=:red),
+    (label="1H_80MeV",   particle="1H",  energy=80.0, color=:steelblue, plotlabel=L"$^{1}$H 80 MeV/u"),
+    (label="12C_80MeVu", particle="12C", energy=80.0, color=:red,       plotlabel=L"$^{12}$C 80 MeV/u"),
 ]
 
 const PLOT_DEFAULTS = (
@@ -189,9 +190,8 @@ for cond in CONDITIONS
     ts_df  = ts_data[cond.label]
     sf_row = filter(r -> r.condition == cond.label, summary_df)
     sf_val = nrow(sf_row) > 0 ? sf_row.survival_fraction[1] : NaN
-    label  = replace(cond.label, "_" => "  ") * "  (SF=$(round(sf_val, digits=3)))"
     plot!(p_total, ts_df.time, ts_df.total_cells;
-            label=label, lw=2, color=cond.color)
+            label=cond.plotlabel, lw=2, color=cond.color)
 end
 
 display(p_total)
@@ -229,7 +229,7 @@ for cond in CONDITIONS
     sf_row = filter(r -> r.condition == cond.label, summary_df)
     Ntot   = nrow(sf_row) > 0 ? sf_row.Ntot[1] : ts_df.total_cells[1]
     plot!(p_sf, ts_df.time, ts_df.total_cells ./ Ntot;
-            label=replace(cond.label, "_" => "  "), lw=2, color=cond.color)
+            label=cond.plotlabel, lw=2, color=cond.color)
 end
 
 display(p_sf)

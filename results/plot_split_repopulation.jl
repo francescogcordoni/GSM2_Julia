@@ -112,8 +112,10 @@ p3 = plot(
     legend     = :topright,
 )
 
+pre_full_p3 = pre_full[pre_full.time .!= 48.0, :]
+
 for ph in ("G0", "G1", "S", "G2", "M")
-    plot!(p3, pre_full.time, pre_full[!, ph];
+    plot!(p3, pre_full_p3.time, pre_full_p3[!, ph];
         label     = ph,
         color     = phase_colors[ph],
         linewidth = 2,
