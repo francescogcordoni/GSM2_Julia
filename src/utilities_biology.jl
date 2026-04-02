@@ -1027,16 +1027,13 @@ function compute_neighbors_3d(N, M, L)
                                 continue
                             end
 
-                            # Calculate the neighboring (i, j, k) coordinates
-                            ni = i + di
-                            nj = j + dj
-                            nk = k + dk
+                            # Periodic boundary conditions: wrap around each axis
+                            ni = mod1(i + di, N)
+                            nj = mod1(j + dj, M)
+                            nk = mod1(k + dk, L)
 
-                            # Ensure the neighbor is within the bounds of the lattice
-                            if 1 <= ni <= N && 1 <= nj <= M && 1 <= nk <= L
-                                neighbor_idx = (nk - 1) * N * M + (nj - 1) * N + ni
-                                push!(neighbor_list, neighbor_idx)
-                            end
+                            neighbor_idx = (nk - 1) * N * M + (nj - 1) * N + ni
+                            push!(neighbor_list, neighbor_idx)
                         end
                     end
                 end
