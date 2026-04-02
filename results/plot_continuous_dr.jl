@@ -64,11 +64,15 @@ function fit_lq_survival(surv_df::DataFrame, tag::String; fit_max_Gy::Float64 = 
         end
 
         try
-            fit    = curve_fit(lq_model, D_fit, S_fit, [0.5, 0.05]; lower=[0.0, 0.0])
-            α, β   = fit.param
-            se     = stderror(fit)
-            ss_res = sum((S_fit .- lq_model(D_fit, fit.param)) .^ 2)
-            ss_tot = sum((S_fit .- mean(S_fit)) .^ 2)
+            # Fit in log space: log(S) = -α·D - β·D²  (linear in parameters)
+            lq_log(D, p) = -p[1] .* D .- p[2] .* D .^ 2
+            logS_fit = log.(S_fit)
+            fit  = curve_fit(lq_log, D_fit, logS_fit, [0.5, 0.05]; lower=[0.0, 0.0])
+            α, β = fit.param
+            se   = stderror(fit)
+            # R² also in log space
+            ss_res = sum((logS_fit .- lq_log(D_fit, fit.param)) .^ 2)
+            ss_tot = sum((logS_fit .- mean(logS_fit)) .^ 2)
             r2     = 1.0 - ss_res / ss_tot
             push!(params_df, (tag, dr_val, α, β, se[1], se[2], α / β, r2))
         catch e
@@ -110,7 +114,7 @@ for cond in CONDITIONS
 
     doses   = surv_df.dose_Gy
     dr_cols = setdiff(names(surv_df), vcat(["dose_Gy"], EXCLUDE_DR))
-    D_fine  = range(0, maximum(doses), length=300)
+    D_fine  = range(0, min(3.0, maximum(doses)), length=300)
 
     # Track global y minimum (skip zeros/negatives which break log scale)
     for col in dr_cols
@@ -122,6 +126,7 @@ for cond in CONDITIONS
         xlabel        = "Dose (Gy)",
         ylabel        = "Survival fraction",
         yscale        = :log10,
+        xlims         = (0, 3.0),
         legend        = :topright,
         size          = (650, 500),
         bottom_margin = 10Plots.mm,
@@ -132,17 +137,6 @@ for cond in CONDITIONS
         col_c  = dr_palette[min(k, length(dr_palette))]
         row    = lq_df[lq_df.dose_rate_Gys .== lq_df.dose_rate_Gys[k], :]
         lbl    = latexstring(@sprintf("%.0e~\\mathrm{Gy/s}", lq_df.dose_rate_Gys[k]))
-
-        # Raw data points
-        vals = surv_df[!, col]
-        mask_pos = vals .> 0
-        scatter!(p, doses[mask_pos], vals[mask_pos];
-            label             = "",
-            color             = col_c,
-            markersize        = 4,
-            markerstrokewidth = 0.5,
-            alpha             = 0.7,
-        )
 
         if !isempty(row) && !isnan(row.alpha[1])
             α, β = row.alpha[1], row.beta[1]

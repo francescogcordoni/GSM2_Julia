@@ -190,6 +190,15 @@ mkpath(outdir)
 # ============================================================
 # ── CONDITION 1: 12C 10 MeV/u ────────────────────────────
 # ============================================================
+E            = 10.0
+particle     = "12C"
+dose_ref     = 4.0
+tumor_radius = 450.0
+X_box        = 560.0
+au           = 4.0
+tag          = "12C_10MeV"
+setup(E, particle, dose_ref, tumor_radius; X_box = X_box)
+
 let
     E            = 10.0
     particle     = "12C"
@@ -243,7 +252,7 @@ let
               [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
 
     doses_to_run         = [0.1, 0.3, 0.7, 1.0, 1.3, 1.7, 2.0]
-    doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
+    doserates_to_run_Gys = [1e-5, 5e-5, 1e-4, 1e-3, 1e-2]
     doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
 
     println("\nRunning survival loop ($(nthreads()) threads, $(length(doses_to_run)*length(doserates_to_run_Gys)) combos)...")
@@ -272,12 +281,20 @@ end
 # ============================================================
 # ── CONDITION 2: 12C 100 MeV/u ───────────────────────────
 # ============================================================
+E            = 80.0
+particle     = "12C"
+dose_ref     = 0.5
+tumor_radius = 200.0
+X_box        = 250.0
+au           = 4.0
+tag          = "12C_100MeV"
+setup(E, particle, dose_ref, tumor_radius; X_box = X_box)
 let
-    E            = 100.0
+    E            = 80.0
     particle     = "12C"
     dose_ref     = 0.5
-    tumor_radius = 350.0
-    X_box        = 460.0
+    tumor_radius = 200.0
+    X_box        = 250.0
     au           = 4.0
     tag          = "12C_100MeV"
 
@@ -323,8 +340,8 @@ let
     base_Y = [zeros(Int, length(cell_df_copy.dam_Y_dom[ci])) for ci in
               [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
 
-    doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 3.5]
-    doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
+    doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    doserates_to_run_Gys = [1e-5, 5e-5, 1e-4, 1e-3, 1e-2]
     doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
 
     println("\nRunning survival loop ($(nthreads()) threads, $(length(doses_to_run)*length(doserates_to_run_Gys)) combos)...")
@@ -353,12 +370,21 @@ end
 # ============================================================
 # ── CONDITION 3: 1H 100 MeV ──────────────────────────────
 # ============================================================
+E            = 100.0
+particle     = "1H"
+dose_ref     = 0.5
+tumor_radius = 200.0
+X_box        = 250.0
+au           = 4.0
+tag          = "1H_100MeV"
+setup(E, particle, dose_ref, tumor_radius; X_box = X_box)
+
 let
     E            = 100.0
     particle     = "1H"
     dose_ref     = 0.5
-    tumor_radius = 150.0
-    X_box        = 260.0
+    tumor_radius = 200.0
+    X_box        = 250.0
     au           = 4.0
     tag          = "1H_100MeV"
 
@@ -404,8 +430,8 @@ let
     base_Y = [zeros(Int, length(cell_df_copy.dam_Y_dom[ci])) for ci in
               [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
 
-    doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
-    doserates_to_run_Gys = [1e-5, 1e-4, 1e-3, 1e-2]
+    doses_to_run         = [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    doserates_to_run_Gys = [1e-5, 5e-5, 1e-4, 1e-3, 1e-2]
     doserates_to_run_Gyh = doserates_to_run_Gys .* 3600.0 .* au
 
     println("\nRunning survival loop ($(nthreads()) threads, $(length(doses_to_run)*length(doserates_to_run_Gys)) combos)...")
