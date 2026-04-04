@@ -15,9 +15,9 @@ const DEFAULTS = (
 # ── Conditions to load ────────────────────────────────────────────────────────
 # fit_max_Gy: upper dose limit used for LQ fitting (per condition)
 CONDITIONS = [
-    (tag="12C_10MeV",  label=L"$^{12}$C 10 MeV/u",  color=:firebrick,  fit_max_Gy=1.3),
-    (tag="12C_100MeV", label=L"$^{12}$C 100 MeV/u", color=:darkorange, fit_max_Gy=3.0),
-    (tag="1H_100MeV",  label=L"$^{1}$H 100 MeV/u",  color=:royalblue,  fit_max_Gy=3.0),
+    (tag="12C_10MeV",  label=L"$^{12}$C 10 MeV/u",  color=:firebrick,  fit_max_Gy=1.3, xlim=2.0),
+    (tag="12C_100MeV", label=L"$^{12}$C 100 MeV/u", color=:darkorange, fit_max_Gy=3.0, xlim=6.0),
+    (tag="1H_100MeV",  label=L"$^{1}$H 100 MeV/u",  color=:royalblue,  fit_max_Gy=3.0, xlim=6.0),
 ]
 
 # Dose-rate columns to exclude from all plots
@@ -102,7 +102,6 @@ lq(D, α, β) = exp.(-α .* D .- β .* D .^ 2)
 # ── PLOT 1: Dose-survival curves + LQ fit (one panel per condition) ───────────
 surv_panels    = Plots.Plot[]
 surv_conds_out = []   # CONDITIONS entries for which a panel was built
-global_ymin    = Inf  # track minimum survival across all conditions
 
 for cond in CONDITIONS
     surv_path = joinpath(datadir, "survival_results_$(cond.tag).csv")
@@ -114,22 +113,16 @@ for cond in CONDITIONS
 
     doses   = surv_df.dose_Gy
     dr_cols = setdiff(names(surv_df), vcat(["dose_Gy"], EXCLUDE_DR))
-    D_fine  = range(0, min(3.0, maximum(doses)), length=300)
-
-    # Track global y minimum (skip zeros/negatives which break log scale)
-    for col in dr_cols
-        vals = filter(>(0), surv_df[!, col])
-        isempty(vals) || (global_ymin = min(global_ymin, minimum(vals)))
-    end
+    D_fine  = range(0, maximum(doses), length=300)
 
     p = plot(;
         xlabel        = "Dose (Gy)",
         ylabel        = "Survival fraction",
         yscale        = :log10,
-        xlims         = (0, 3.0),
-        legend        = :topright,
+        legend        = :bottomleft,
         size          = (650, 500),
         bottom_margin = 10Plots.mm,
+        left_margin   = 10Plots.mm,
         DEFAULTS...,
     )
 
@@ -152,13 +145,6 @@ for cond in CONDITIONS
     push!(surv_conds_out, cond)
 end
 
-# Apply shared y-axis limits to all panels so every plot has the same scale
-if isfinite(global_ymin) && !isempty(surv_panels)
-    ylo = 10 ^ floor(log10(global_ymin))   # round down to nearest decade
-    for p in surv_panels
-        ylims!(p, (ylo, 1.0))
-    end
-end
 
 if !isempty(surv_panels)
     ncols  = length(surv_panels)

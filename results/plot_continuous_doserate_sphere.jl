@@ -79,7 +79,7 @@ end
 p_total = plot(;
     xlabel = "Time (h)",
     ylabel = "Total cells",
-    legend = :topright,
+    legend = :topleft,
     size   = (900, 550),
     DEFAULTS...,
 )

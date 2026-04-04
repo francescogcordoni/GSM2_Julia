@@ -741,4 +741,3 @@ nsplit_df = DataFrame(
 )
 CSV.write(joinpath(datadir, "nsplit_reference.csv"), nsplit_df)
 println("Saved nsplit_reference.csv")
-println("Saved split_dose_survival.png")
