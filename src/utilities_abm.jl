@@ -5,7 +5,7 @@
 #! ---------
 #~ Radiation Damage & Repair
 #?   compute_times_domain!(cell_df, gsm2_cycle; nat_apo, terminal_time, verbose, print_every, summary)
-#       Parallel per-cell GSM2 survival + stochastic repair scheduling.
+#       Threaded per-cell GSM2 survival + stochastic repair scheduling.
 #       Updates sp, death_time, recover_time, cycle_time, is_cell in place.
 #       Dispatches gsm2 by cell_cycle phase. Deferred neighbor updates applied serially.
 #?   compute_repair_domain(X, Y, gsm2; terminal_time, rng, verbose, max_events_log)
@@ -13,6 +13,11 @@
 #       Gillespie simulation of X-lesion repair under GSM2 rates (a, b, r).
 #       death_code: 1=lethal, 0=recovered, -1=timeout.
 #       Immediate lethal if any Y>0; immediate recovery if sum(X)==0.
+#?   compute_repair_domain_trajectory(X, Y, gsm2; rng, au)
+#           -> (times, X_traj, Y_traj, death_code)
+#       Gillespie simulation recording the full time trajectory of X/Y states.
+#       Runs until all X consumed; records every event including t=0.
+#       death_code: 0=all repaired cleanly, 1=at least one Y lesion created.
 #
 #~ Cell Cycle Helpers
 #?   generate_cycle_time(phase) -> Float64
@@ -85,8 +90,12 @@
                             terminal_time=Inf, verbose=false, print_every=0, summary=true)
         -> Nothing
 
-Parallel per-cell GSM2 survival + stochastic repair scheduling for all active
+Threaded per-cell GSM2 survival + stochastic repair scheduling for all active
 cells (`is_cell==1`). Updates `cell_df` in place.
+
+Thread safety: each cell writes only to its own row index, so column-level writes
+are race-free. Neighbor updates (which touch other rows) are deferred into
+per-thread buffers and merged serially at the end.
 
 For each cell:
 1. Computes `sp` via `domain_GSM2`.
@@ -147,10 +156,9 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
     survived          = Threads.Atomic{Int}(0)
     timeout_cells     = Threads.Atomic{Int}(0)
 
-    for k in eachindex(active_cells)
+    @Threads.threads for k in eachindex(active_cells)
         i   = active_cells[k]
         tid = Threads.threadid()
-        tid <= max_threads || error("Thread ID $tid exceeds max_threads $max_threads")
 
         # Select GSM2 by phase
         phase = cell_df.cell_cycle[i]
@@ -662,8 +670,26 @@ end
 #! Lattice / Neighbor Utilities
 #! ============================================================================
 
+"""
+    is_valid_index(idx, n) -> Bool
+
+Returns `true` if `1 ≤ idx ≤ n`. Used as a bounds check before accessing neighbor
+arrays to guard against out-of-range neighbor indices in lattice operations.
+"""
 @inline is_valid_index(idx::Int32, n::Int32)::Bool = 1 <= idx <= n
 
+"""
+    is_time_due(t, eps, treat_neg) -> Bool
+
+Returns `true` if time `t` has elapsed (i.e. is due), within tolerance `eps`.
+- Returns `false` immediately for `Inf` or `missing` values (not yet scheduled).
+- `treat_neg=false`: checks `abs(t) ≤ eps` (clears both near-zero and small-negative).
+- `treat_neg=true`:  checks `t ≤ eps` (also fires for any negative t, useful if
+  clamping is not guaranteed upstream).
+
+In practice `update_time!` clamps timers at 0, so negative values should not occur;
+`treat_neg=false` is the safe default.
+"""
 @inline function is_time_due(t::Float64, eps::Float64, treat_neg::Bool)::Bool
     (ismissing(t) || isinf(t)) && return false
     return treat_neg ? (t <= eps) : (abs(t) <= eps)
@@ -691,7 +717,8 @@ Call this to fix any accumulated drift.
 """
 function recalculate_number_nei!(df::DataFrame)
     for i in 1:nrow(df)
-        df.number_nei[i] = length(df.nei[i]) - sum(df.is_cell[j] for j in df.nei[i])
+        nei = df.nei[i]
+        df.number_nei[i] = length(nei) - sum(df.is_cell[j] for j in nei)
     end
 end
 
@@ -940,14 +967,16 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
                     pop.can_divide[idx]   = 0
                 end
             else
-                next_phase = PHASE_TRANSITION[current_phase]
-                pop.cell_cycle[idx] = String7(next_phase)
+                # G1 → S → G2 → M transitions
                 if has_space
+                    next_phase = PHASE_TRANSITION[current_phase]
+                    pop.cell_cycle[idx]   = String7(next_phase)
                     pop.cycle_time[idx]   = generate_cycle_time(next_phase)
                     pop.death_time[idx]   = Inf
                     pop.recover_time[idx] = Inf
                     pop.can_divide[idx]   = 1
                 else
+                    # No empty neighbors: cell enters quiescence (G0)
                     pop.cell_cycle[idx]   = String7("G0")
                     pop.cycle_time[idx]   = Inf
                     pop.death_time[idx]   = Inf

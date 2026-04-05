@@ -1,5 +1,5 @@
 #! ============================================================================
-#! utilities_plots.jl
+#! utilities_plot.jl
 #!
 #! FUNCTIONS
 #! ---------
@@ -14,7 +14,7 @@
 #       layer_plot=true: one curve per energy_step. layer_plot=false: single density + mean line.
 #
 #~ Timing
-#?   plot_times(cell_df; show_means, summary, verbose, ...) -> Plot
+#?   plot_times(cell_df; show_means, summary, verbose, layout_tuple, size_px) -> Plot
 #       Four-panel figure: death_time, recover_time, cycle_time densities,
 #       and total X-damage density. Active cells only. Finite values only.
 #?   plot_initial_distributions(cell_df; bins, linewidth, size, ...) -> Plot
@@ -24,7 +24,7 @@
 #?   plot_cell_dynamics(ts) -> Plot
 #       Total cell count vs time.
 #?   plot_phase_dynamics(ts) -> Plot
-#       G1/S/G2/M cell counts vs time.
+#       G0/G1/S/G2/M cell counts vs time. Colors: G0=black, G1=green, S=orange, G2=purple, M=red.
 #?   plot_stem_dynamics(ts) -> Plot
 #       Stem vs non-stem cell counts vs time.
 #       Returns placeholder if no stem data available.
@@ -57,13 +57,17 @@ using Statistics
 using DataFrames
 
 """
-    plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot=false) -> Plot
+    plot_scalar_cell(cell_df, col::Symbol = :dose_cell;
+                     layer_plot=false, xscale=:identity) -> Plot
 
 Generic two-panel figure for any per-cell scalar column `col`.
 - Panel 1: density of `col` for active cells (`is_cell==1`, positive values only).
     `layer_plot=false` → single density + mean line.
     `layer_plot=true`  → one curve per `energy_step`.
 - Panel 2: 3D scatter of `(x, y, z)` colored by `col` (half-sphere `x≥0`).
+
+`xscale` controls the x-axis scale of the density panel and the colorbar of the
+3D panel. Use `xscale=:log10` for columns spanning orders of magnitude (e.g. `:sp`).
 
 Returns `nothing` if no active cells or no positive values.
 
@@ -73,10 +77,13 @@ Layer mode also requires `:energy_step`.
 # Example
 ```julia
 plot_scalar_cell(cell_df, :dose_cell)
-plot_scalar_cell(cell_df, :sp; layer_plot=true)
+plot_scalar_cell(cell_df, :sp; xscale=:log10)
+plot_scalar_cell(cell_df, :sp; layer_plot=true, xscale=:log10)
 ```
 """
-function plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot::Bool = false)
+function plot_scalar_cell(cell_df, col::Symbol = :dose_cell;
+                          layer_plot::Bool = false,
+                          xscale::Symbol   = :identity)
     for c in [:x, :y, :z, :is_cell, col]
         hasproperty(cell_df, c) || error("cell_df must contain column :$c")
     end
@@ -84,7 +91,8 @@ function plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot::Bool = 
     df_active = cell_df[cell_df.is_cell .== 1, :]
     isempty(df_active) && (@warn "No active cells (is_cell == 1)."; return nothing)
 
-    active_vals = filter(>(0), df_active[!, col])
+    active_vals = [Float64(v) for v in df_active[!, col]
+                   if !isnothing(v) && !ismissing(v) && v > 0]
     isempty(active_vals) && (@warn "No positive values in column :$col."; return nothing)
 
     col_str = string(col)
@@ -94,26 +102,38 @@ function plot_scalar_cell(cell_df, col::Symbol = :dose_cell; layer_plot::Bool = 
         p1 = density(active_vals;
                         title="$col_str Density (all active cells)",
                         xlabel=col_str, ylabel="Density",
-                        linewidth=2, legend=false)
+                        linewidth=2, legend=false, xscale=xscale)
         vline!(p1, [mean(active_vals)], color=:red, linestyle=:dash)
     else
         hasproperty(cell_df, :energy_step) ||
             error("layer_plot=true requires column :energy_step")
         p1 = plot(title="$col_str Density grouped by energy_step",
                   xlabel=col_str, ylabel="Density",
-                  legend=:topright, linewidth=2)
+                  legend=:topright, linewidth=2, xscale=xscale)
         for E in sort(unique(df_active.energy_step))
-            sub_pos = filter(>(0), df_active[df_active.energy_step .== E, col])
+            sub_pos = [Float64(v) for v in df_active[df_active.energy_step .== E, col]
+                       if !isnothing(v) && !ismissing(v) && v > 0]
             isempty(sub_pos) && continue
             density!(p1, sub_pos, label="energy_step $E")
         end
     end
 
     # Panel 2 — 3D scatter (half-sphere x≥0)
-    df3 = df_active[df_active.x .>= 0, :]
+    # Apply log10 transform to color values when xscale=:log10 so the colorbar
+    # reflects the same scale as the density panel.
+    df3   = df_active[df_active.x .>= 0, :]
+    c_vals = if xscale == :log10
+        [(!isnothing(v) && !ismissing(v) && v > 0) ? log10(Float64(v)) : NaN
+         for v in df3[!, col]]
+    else
+        [(!isnothing(v) && !ismissing(v)) ? Float64(v) : NaN
+         for v in df3[!, col]]
+    end
+    cb_title = xscale == :log10 ? "log₁₀($col_str)" : col_str
+
     p2 = scatter(df3.x, df3.y, df3.z;
                     markersize=4, markerstrokewidth=0.1,
-                    marker_z=df3[!, col], colorbar=true,
+                    marker_z=c_vals, colorbar=true, colorbar_title=cb_title,
                     xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
                     title="3D $col_str Distribution", legend=false,
                     aspect_ratio=:equal, seriescolor=:viridis,
@@ -191,14 +211,16 @@ function plot_damage(cell_df::DataFrame; layer_plot::Bool = false)
 end
 
 """
-    plot_times(cell_df; show_means=true, summary=true, verbose=false, ...) -> Plot
+    plot_times(cell_df; show_means=true, summary=true, verbose=false,
+               layout_tuple=(2,2), size_px=(1200,800)) -> Plot
 
 Four-panel figure for active cells (`is_cell==1`):
 1. `death_time` density   2. `recover_time` density
 3. `cycle_time` density   4. total X-damage density
 
-Finite values only. If `dam_X_total` is absent, computes `sum(dam_X_dom[i])` on the fly.
+Finite values only. If `dam_X_total` is absent, falls back to `sum(dam_X_dom[i])`.
 Missing columns produce annotated empty panels rather than errors.
+Returns `nothing` if no active cells.
 
 # Example
 ```julia
@@ -209,8 +231,6 @@ function plot_times(cell_df::DataFrame;
                     show_means::Bool     = true,
                     summary::Bool        = true,
                     verbose::Bool        = false,
-                    color_main           = :D55E00,
-                    color_alt            = :steelblue,
                     layout_tuple::Tuple{Int,Int} = (2, 2),
                     size_px::Tuple{Int,Int}      = (1200, 800))
 
@@ -336,7 +356,8 @@ end
 """
     plot_phase_dynamics(ts::SimulationTimeSeries) -> Plot
 
-G1/S/G2/M cell counts vs time.
+G0/G1/S/G2/M cell counts vs time.
+Colors: G0=black, G1=green, S=orange, G2=purple, M=red.
 
 # Example
 ```julia
@@ -347,10 +368,11 @@ function plot_phase_dynamics(ts::SimulationTimeSeries)
     p = plot(xlabel="Time (h)", ylabel="Number of Cells",
              title="Cell Cycle Phase Distribution",
              legend=:best, grid=true, framestyle=:box)
-    plot!(p, ts.time, ts.g1_cells, label="G1", linewidth=2)
-    plot!(p, ts.time, ts.s_cells,  label="S",  linewidth=2)
-    plot!(p, ts.time, ts.g2_cells, label="G2", linewidth=2)
-    plot!(p, ts.time, ts.m_cells,  label="M",  linewidth=2)
+    plot!(p, ts.time, ts.g0_cells, label="G0", linewidth=2, color=:black)
+    plot!(p, ts.time, ts.g1_cells, label="G1", linewidth=2, color=:green)
+    plot!(p, ts.time, ts.s_cells,  label="S",  linewidth=2, color=:orange)
+    plot!(p, ts.time, ts.g2_cells, label="G2", linewidth=2, color=:purple)
+    plot!(p, ts.time, ts.m_cells,  label="M",  linewidth=2, color=:red)
     return p
 end
 
@@ -566,8 +588,11 @@ function plot_cell_cycle_snapshots(snapshots::Dict;
         cell_df = isa(snapshots[t], CellPopulation) ?
             to_dataframe(snapshots[t], alive_only=true) : snapshots[t]
 
+        n_alive = hasproperty(cell_df, :is_cell) ?
+            count(==(1), cell_df.is_cell) : nrow(cell_df)
+
         p = plot_cell_cycle_distribution(cell_df; phase_plot=false, half_sphere=half_sphere)
-        plot!(p[1], title="Cell Cycle at t=$(t)h\n(n=$(nrow(cell_df)) cells)")
+        plot!(p[1], title="Cell Cycle at t=$(t)h\n(n=$n_alive alive cells)")
         plot!(p[2], title="3D Distribution t=$(t)h" * (half_sphere ? " (x ≥ 0)" : ""))
         push!(plots, p)
     end

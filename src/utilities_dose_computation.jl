@@ -10,7 +10,7 @@
 #       (track_seg=false) matrix kernels. Handles representative cell selection,
 #       DataFrame↔matrix conversion, and dose copy-back to full domain.
 #       If single_particle = true then it computes the dose for a single particle.
-#?   MC_precompute_lut!(ion, , irrad_cond, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg) -> Dict
+#?   MC_precompute_lut!(ion, Npar, R_beam, irrad_cond, cell_df, df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg; x_cb, y_cb, chunk_size) -> Vector{Dict{Int,Vector{Float64}}}
 #
 #~ DataFrame ↔ Matrix Conversion
 #?   dataframes_to_matrices(df_x, df_y, df_at) -> (mat_x, mat_y, mat_at)
@@ -391,14 +391,14 @@ function MC_loop_ions_domain_tsc_matrix!(
     Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
     Kp = irrad_cond[1].Kp; Rk = Rp
 
-    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
-    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    r_lower            = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = r_lower^2
     mid_radius_sq      = (gsm2.rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
     # Radial dose lookup table
     sim_ = 1000
-    impact_p = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150Rc), length=sim_)
+    impact_p = 10 .^ range(log10(r_lower), stop=log10(gsm2.rd + 150Rc), length=sim_)
     dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
     Threads.@threads for i in 1:sim_
@@ -483,13 +483,13 @@ function MC_loop_ions_domain_matrix!(
     Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
     Kp = irrad_cond[1].Kp; Rk = Rp
 
-    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
-    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    r_lower            = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = r_lower^2
     mid_radius_sq      = (gsm2.rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
     sim_ = 1000
-    impact_vec = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150Rc), length=sim_)
+    impact_vec = 10 .^ range(log10(r_lower), stop=log10(gsm2.rd + 150Rc), length=sim_)
     lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
     Threads.@threads for i in 1:sim_
@@ -579,16 +579,16 @@ function MC_loop_ions_domain_tsc_fast!(
     Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
     Kp = irrad_cond[1].Kp; Rk = Rp
 
-    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
-    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    r_lower            = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = r_lower^2
     mid_radius_sq      = (gsm2.rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
     sim_ = 1000
-    impact_p = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150Rc), length=sim_)
+    impact_p = 10 .^ range(log10(r_lower), stop=log10(gsm2.rd + 150Rc), length=sim_)
     dose_cell_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
-    @showprogress for i in 1:sim_
+    Threads.@threads for i in 1:sim_
         tid = Threads.threadid()
         track = Track(impact_p[i], 0.0, Rk)
         _d, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
@@ -615,7 +615,8 @@ function MC_loop_ions_domain_tsc_fast!(
     Np = rand(Poisson(Npar))
     println("Particles: $Np")
 
-    p = Progress(Np, 1, "Simulating particles… ", barlen=40)
+    p  = Progress(Np, 1, "Simulating particles… ", barlen=40)
+    lk = ReentrantLock()
     Threads.@threads for _ in 1:Np
         tid         = Threads.threadid()
         local_store = at_row_accumulators[tid]
@@ -642,13 +643,14 @@ function MC_loop_ions_domain_tsc_fast!(
                 local_store[k] += Kp / dist_sq
             end
         end
-        next!(p)
+        lock(lk) do; next!(p); end
     end
 
-    final_at_row = sum(at_row_accumulators)
+    final_at_row   = sum(at_row_accumulators)
+    domain_cols_at = [c for c in propertynames(at) if c != :index]
     idx = 1
-    for r in 1:num_cells, c in 1:num_domains_per_cell
-        at[r, c] = final_at_row[idx]; idx += 1
+    for r in 1:num_cells, col in domain_cols_at
+        at[r, col] = final_at_row[idx]; idx += 1
     end
 
     println("✔ TSC DataFrame simulation complete.\n")
@@ -686,19 +688,17 @@ function MC_loop_ions_domain_fast!(
     Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
     Kp = irrad_cond[1].Kp; Rk = Rp
 
-    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
-    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    r_lower            = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = r_lower^2
     mid_radius_sq      = (gsm2.rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
-    lower_bound_log <= 0 && error("Lower bound for lookup is non-positive.")
-
     # Lookup table
     sim_ = 1000
-    impact_vec = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150Rc), length=sim_)
+    impact_vec = 10 .^ range(log10(r_lower), stop=log10(gsm2.rd + 150Rc), length=sim_)
     lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
-    @showprogress for i in 1:sim_
+    Threads.@threads for i in 1:sim_
         tid = Threads.threadid()
         track = Track(impact_vec[i], 0.0, Rk)
         _d, _r, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
@@ -753,10 +753,11 @@ function MC_loop_ions_domain_fast!(
         end
     end
 
-    final_at_row = sum(at_acc)
+    final_at_row   = sum(at_acc)
+    domain_cols_at = [c for c in propertynames(at) if c != :index]
     idx = 1
-    for r in 1:num_cells, c in 1:num_domains_per_cell
-        at[r, c] = final_at_row[idx]; idx += 1
+    for r in 1:num_cells, col in domain_cols_at
+        at[r, col] = final_at_row[idx]; idx += 1
     end
 
     println("✔ Full MC DataFrame simulation complete.\n")
@@ -1099,13 +1100,13 @@ function MC_precompute_lut!(
     Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
     Kp = irrad_cond[1].Kp; Rk = Rp
 
-    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
-    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    r_lower            = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = r_lower^2
     mid_radius_sq      = (gsm2.rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
     sim_ = 1000
-    impact_vec = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150Rc), length=sim_)
+    impact_vec = 10 .^ range(log10(r_lower), stop=log10(gsm2.rd + 150Rc), length=sim_)
     lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
     Threads.@threads for i in 1:sim_
