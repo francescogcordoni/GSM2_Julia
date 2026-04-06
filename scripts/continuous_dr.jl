@@ -17,6 +17,8 @@ using CUDA
 using Statistics: mean
 using SparseArrays
 using Printf
+using Plots
+using StatsPlots
 
 nthreads()
 
@@ -77,6 +79,51 @@ function fit_lq_survival(doses, surv_df, doserates_Gys; tag="")
         push!(params_df, (tag, doserates_Gys[j], α, β, se[1], se[2], α / β, r2))
         println(@sprintf("  %-22s  α=%.4f±%.4f  β=%.4f±%.4f  α/β=%.2f  R²=%.4f",
                          col, α, se[1], β, se[2], α / β, r2))
+    end
+    return params_df
+end
+
+"""
+    fit_lq_beta_only(doses, surv_df, doserates_Gys, alpha_fixed; tag="") -> DataFrame
+
+Fit the LQ model S = exp(-α·D - β·D²) for each dose-rate column in `surv_df`,
+with `alpha_fixed` held constant and only β optimised.
+
+Use this after a free `fit_lq_survival` call: extract α at the reference dose
+rate (10⁻² Gy/s), then call this function to get β(dose_rate) with a consistent α.
+"""
+function fit_lq_beta_only(doses, surv_df, doserates_Gys, alpha_fixed; tag="")
+    lq_beta(D, p) = exp.(-alpha_fixed .* D .- p[1] .* D .^ 2)
+    dr_cols   = setdiff(names(surv_df), ["dose_Gy"])
+    params_df = DataFrame(
+        tag           = String[],
+        dose_rate_Gys = Float64[],
+        alpha         = Float64[],   # fixed — same for every row
+        beta          = Float64[],
+        beta_err      = Float64[],
+        alpha_beta    = Float64[],
+        r2            = Float64[],
+    )
+    for (j, col) in enumerate(dr_cols)
+        surv = clamp.(surv_df[!, col], 1e-10, 1.0)
+        local fit_res
+        try
+            fit_res = curve_fit(lq_beta, doses, surv, [0.05];
+                                lower=[0.0], upper=[10.0])
+        catch e
+            @warn "LQ beta-only fit failed for $col ($tag)" exception=e
+            continue
+        end
+        β      = coef(fit_res)[1]
+        se     = try stderror(fit_res)[1] catch; NaN end
+        pred   = lq_beta(doses, [β])
+        ss_res = sum((surv .- pred) .^ 2)
+        ss_tot = sum((surv .- mean(surv)) .^ 2)
+        r2     = 1.0 - ss_res / ss_tot
+        ab     = β > 0 ? alpha_fixed / β : Inf
+        push!(params_df, (tag, doserates_Gys[j], alpha_fixed, β, se, ab, r2))
+        println(@sprintf("  %-22s  α=%.4f (fixed)  β=%.4f±%.4f  α/β=%.2f  R²=%.4f",
+                         col, alpha_fixed, β, se, ab, r2))
     end
     return params_df
 end
@@ -276,6 +323,18 @@ let
     lq_params = fit_lq_survival(doses_to_run, surv_df, doserates_to_run_Gys; tag = tag)
     CSV.write(joinpath(outdir, "lq_params_$(tag).csv"), lq_params)
     println("Saved: lq_params_$(tag).csv")
+
+    # Beta-only calibration: fix α from the 10⁻² Gy/s row, re-fit β for all dose rates
+    ref_idx = findfirst(x -> isapprox(x, 1e-2; rtol=0.05), doserates_to_run_Gys)
+    if !isnothing(ref_idx)
+        alpha_ref = lq_params.alpha[ref_idx]
+        println("\nFitting LQ beta-only (α=$(round(alpha_ref, digits=4)) fixed at 1e-2 Gy/s) — $tag:")
+        lq_params_bo = fit_lq_beta_only(doses_to_run, surv_df, doserates_to_run_Gys, alpha_ref; tag=tag)
+        CSV.write(joinpath(outdir, "lq_params_beta_only_$(tag).csv"), lq_params_bo)
+        println("Saved: lq_params_beta_only_$(tag).csv")
+    else
+        @warn "Reference dose rate 1e-2 Gy/s not found in doserates_to_run_Gys for $tag"
+    end
 end
 
 # ============================================================
@@ -365,6 +424,17 @@ let
     lq_params = fit_lq_survival(doses_to_run, surv_df, doserates_to_run_Gys; tag = tag)
     CSV.write(joinpath(outdir, "lq_params_$(tag).csv"), lq_params)
     println("Saved: lq_params_$(tag).csv")
+
+    ref_idx = findfirst(x -> isapprox(x, 1e-2; rtol=0.05), doserates_to_run_Gys)
+    if !isnothing(ref_idx)
+        alpha_ref = lq_params.alpha[ref_idx]
+        println("\nFitting LQ beta-only (α=$(round(alpha_ref, digits=4)) fixed at 1e-2 Gy/s) — $tag:")
+        lq_params_bo = fit_lq_beta_only(doses_to_run, surv_df, doserates_to_run_Gys, alpha_ref; tag=tag)
+        CSV.write(joinpath(outdir, "lq_params_beta_only_$(tag).csv"), lq_params_bo)
+        println("Saved: lq_params_beta_only_$(tag).csv")
+    else
+        @warn "Reference dose rate 1e-2 Gy/s not found in doserates_to_run_Gys for $tag"
+    end
 end
 
 # ============================================================
@@ -455,6 +525,17 @@ let
     lq_params = fit_lq_survival(doses_to_run, surv_df, doserates_to_run_Gys; tag = tag)
     CSV.write(joinpath(outdir, "lq_params_$(tag).csv"), lq_params)
     println("Saved: lq_params_$(tag).csv")
+
+    ref_idx = findfirst(x -> isapprox(x, 1e-2; rtol=0.05), doserates_to_run_Gys)
+    if !isnothing(ref_idx)
+        alpha_ref = lq_params.alpha[ref_idx]
+        println("\nFitting LQ beta-only (α=$(round(alpha_ref, digits=4)) fixed at 1e-2 Gy/s) — $tag:")
+        lq_params_bo = fit_lq_beta_only(doses_to_run, surv_df, doserates_to_run_Gys, alpha_ref; tag=tag)
+        CSV.write(joinpath(outdir, "lq_params_beta_only_$(tag).csv"), lq_params_bo)
+        println("Saved: lq_params_beta_only_$(tag).csv")
+    else
+        @warn "Reference dose rate 1e-2 Gy/s not found in doserates_to_run_Gys for $tag"
+    end
 end
 
 # ============================================================
@@ -465,4 +546,92 @@ println("ALL RESULTS SAVED TO $outdir/")
 println("="^60)
 for f in sort(readdir(outdir))
     println("  $outdir/$f")
+end
+
+# ============================================================
+# Plots: dose rate vs α  and  dose rate vs β (α fixed)
+# ============================================================
+let
+    tags       = ["12C_10MeV", "12C_100MeV", "1H_100MeV"]
+    tag_labels = ["¹²C 10 MeV/u", "¹²C 80 MeV/u", "¹H 100 MeV/u"]
+    colors     = [:firebrick, :steelblue, :forestgreen]
+    markers    = [:circle,    :square,    :diamond]
+
+    # Load free-fit params (α and β both calibrated)
+    lq_free = map(t -> CSV.read(joinpath(outdir, "lq_params_$(t).csv"), DataFrame), tags)
+    # Load beta-only params (α fixed at 1e-2 Gy/s reference, only β calibrated)
+    lq_bo   = map(t -> CSV.read(joinpath(outdir, "lq_params_beta_only_$(t).csv"), DataFrame), tags)
+
+    # ── Panel 1: dose rate vs α  (free fit) ──────────────────────────────────
+    p_alpha = plot(;
+        xlabel   = "Dose rate (Gy/s)",
+        ylabel   = "α (Gy⁻¹)",
+        title    = "α vs dose rate — free LQ fit",
+        xscale   = :log10,
+        legend   = :topright,
+        size     = (700, 450),
+        grid     = true,
+    )
+    for (i, df) in enumerate(lq_free)
+        plot!(p_alpha, df.dose_rate_Gys, df.alpha;
+              label     = tag_labels[i],
+              color     = colors[i],
+              marker    = markers[i],
+              lw        = 2,
+              markersize = 5)
+        # Mark the reference point used to fix α
+        ref_row = findfirst(x -> isapprox(x, 1e-2; rtol=0.05), df.dose_rate_Gys)
+        if !isnothing(ref_row)
+            scatter!(p_alpha, [df.dose_rate_Gys[ref_row]], [df.alpha[ref_row]];
+                     color      = colors[i],
+                     markersize = 10,
+                     marker     = :star5,
+                     label      = "")
+        end
+    end
+    vline!(p_alpha, [1e-2];
+           linestyle = :dash, color = :black, alpha = 0.6,
+           label = "ref  10⁻² Gy/s")
+
+    # ── Panel 2: dose rate vs β  (β-only fit, α fixed) ───────────────────────
+    # The α value used for each condition is the free-fit α at 1e-2 Gy/s.
+    # It is stored as a constant in every row of lq_bo, reported in the legend.
+    p_beta = plot(;
+        xlabel  = "Dose rate (Gy/s)",
+        ylabel  = "β (Gy⁻²)",
+        title   = "β vs dose rate — α fixed at 10⁻² Gy/s value",
+        xscale  = :log10,
+        legend  = :topright,
+        size    = (700, 450),
+        grid    = true,
+    )
+    for (i, df) in enumerate(lq_bo)
+        alpha_fixed = df.alpha[1]   # same for all rows within one condition
+        plot!(p_beta, df.dose_rate_Gys, df.beta;
+              label      = @sprintf("%s  (α=%.4f)", tag_labels[i], alpha_fixed),
+              color      = colors[i],
+              marker     = markers[i],
+              lw         = 2,
+              markersize = 5)
+        # Error bars from beta_err
+        if hasproperty(df, :beta_err)
+            local errs = df.beta_err
+            scatter!(p_beta, df.dose_rate_Gys, df.beta;
+                     yerror     = errs,
+                     color      = colors[i],
+                     markersize = 0,
+                     label      = "")
+        end
+    end
+    vline!(p_beta, [1e-2];
+           linestyle = :dash, color = :black, alpha = 0.6,
+           label = "ref  10⁻² Gy/s")
+
+    # ── Combined figure ───────────────────────────────────────────────────────
+    p_lq_dr = plot(p_alpha, p_beta; layout = (1, 2), size = (1400, 500),
+                   plot_title = "LQ parameters vs dose rate")
+
+    savefig(p_lq_dr, joinpath(outdir, "lq_doserate_alpha_beta.png"))
+    println("\nSaved: $(joinpath(outdir, "lq_doserate_alpha_beta.png"))")
+    display(p_lq_dr)
 end
