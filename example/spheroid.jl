@@ -55,7 +55,7 @@ sp = load_stopping_power()
 # Irradiation
 PARTICLE      = "12C"      # ion species: "1H", "4He", "12C", "16O"
 ENERGY_MEV_U  = 80.0     # kinetic energy per nucleon (MeV/u)
-DOSE_GY       = 0.5       # prescribed dose (Gy)
+DOSE_GY       = 1.       # prescribed dose (Gy)
 
 # Spheroid and cell geometry
 TUMOR_RADIUS  = 350.0     # spheroid radius (µm)
