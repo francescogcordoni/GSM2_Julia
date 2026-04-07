@@ -1,5 +1,5 @@
 #! ============================================================================
-#! utilities_ABM_plots.jl
+#! utilities_plot_abm.jl
 #!
 #! FUNCTIONS
 #! ---------
@@ -31,11 +31,14 @@
 #       5-panel dashboard (3×2): dynamics + phases + proportions + growth + cycling.
 #
 #~ Snapshot Comparisons
+#?   plot_phase_proportions_alive(cell_df; title_text) -> Plot
+#       Bar chart of phase proportions (%) for live cells in a snapshot DataFrame.
 #?   plot_snapshot_comparison(snapshots; metric, times) -> Plot
 #       Grid of per-time bar charts for :cell_cycle or :can_divide.
 #       Accepts Dict{Int, DataFrame|CellPopulation}.
 #?   plot_phase_comparison_before_after(cell_df_initial, cell_df_final) -> Plot
 #       Side-by-side phase proportion bars: initial vs final snapshot.
+#       Uses plot_phase_proportions_alive internally.
 #?   plot_phase_proportions_timeseries(ts; title_text) -> Plot
 #       Phase proportions (%) from SimulationTimeSeries (same as plot_phase_proportions).
 #       Kept as separate entry point with optional title override.
@@ -369,9 +372,42 @@ function plot_snapshot_comparison(snapshots::Dict;
 end
 
 """
+    plot_phase_proportions_alive(cell_df::DataFrame;
+                                 title_text::String = "Phase Distribution") -> Plot
+
+Bar chart of phase proportions (%) computed from live cells (`is_cell == 1`) in a
+snapshot DataFrame. Phases: G0/G1/S/G2/M, same color scheme as `plot_phase_dynamics`.
+Returns a placeholder if no live cells are present.
+
+# Example
+```julia
+plot_phase_proportions_alive(cell_df; title_text="t = 24h")
+```
+"""
+function plot_phase_proportions_alive(cell_df::DataFrame;
+                                      title_text::String = "Phase Distribution")
+    alive  = cell_df[cell_df.is_cell .== 1, :]
+    total  = nrow(alive)
+    phases = ["G0", "G1", "S", "G2", "M"]
+    colors = [:black, :green, :orange, :purple, :red]
+
+    total == 0 && return plot(title=title_text * " (no live cells)", grid=false, showaxis=false)
+
+    counts = [count(==(ph), string.(alive.cell_cycle)) for ph in phases]
+    pcts   = 100 .* counts ./ total
+
+    return bar(phases, pcts;
+               xlabel="Phase", ylabel="Percentage (%)",
+               title=title_text, legend=false,
+               color=permutedims(colors), alpha=0.7,
+               ylims=(0, 100), bar_width=0.6)
+end
+
+"""
     plot_phase_comparison_before_after(cell_df_initial, cell_df_final) -> Plot
 
 Side-by-side phase proportion bars: initial (left) vs final (right) snapshot.
+Uses `plot_phase_proportions_alive` on each DataFrame.
 
 # Example
 ```julia
@@ -564,7 +600,8 @@ function print_simulation_summary(ts::SimulationTimeSeries)
         println("\nStem Cell Statistics:")
         println("  Initial : $(ts.stem_cells[1])")
         println("  Final   : $(ts.stem_cells[end])")
-        println("  Avg fraction : $(round(100*mean(ts.stem_cells ./ ts.total_cells), digits=1))%")
+        stem_frac = ifelse.(ts.total_cells .> 0, ts.stem_cells ./ ts.total_cells, 0.0)
+        println("  Avg fraction : $(round(100*mean(stem_frac), digits=1))%")
     end
 
     println("="^70 * "\n")

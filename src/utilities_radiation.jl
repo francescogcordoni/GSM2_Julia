@@ -31,45 +31,57 @@
 #       and LET after traveling x_um µm in water. Explicit Euler integration.
 #
 #~ Constants
-#?   Z_MAP — Dict mapping element symbols to atomic numbers (H→1 ... U→92)
+#?   Z_MAP — Dict mapping element symbols to atomic numbers (H=1 … Kr=36, Rb=37, U=92)
+#       Note: only elements relevant to particle therapy are included; 38–91 are absent.
 #! ============================================================================
 
 """
     ATRadius(ion::Ion, irrad::Irrad, type::String) -> (Rc, Rp, Kp)
 
 Amorphous track structure radii and dose amplitude for a given ion.
-Returns core radius `Rc`, penumbra radius `Rp`, and normalization coefficient `Kp`.
-Supports `"LEM"` and `"KC"` parameterizations. Fully deterministic.
+Returns core radius `Rc` (µm), penumbra radius `Rp` (µm), and normalization
+coefficient `Kp`.
+
+# Parameterizations
+
+**`"LEM"`** (Local Effect Model):
+- `Rc = 0.01` µm (fixed)
+- `Rp = 0.05 * (E/A)^1.7` µm
+- `Kp = LET_keV_um / (π * (1 + 2*log(Rp/Rc)))` (LET converted: ×0.1602)
+
+**`"KC"`** (Kiefer-Chatterjee):
+- `β` from relativistic kinematics: `β = sqrt(1 - 1/(E/AMU + 1)²)`
+- `Rc = 0.01116 * β` µm
+- `Rp = 0.0616 * (E/A)^1.7` µm
+- `z_eff = Z * (1 - exp(-125β/Z^(2/3)))` (effective charge)
+- `Kp = 1.25 × 10⁻⁴ * (z_eff/β)²`
+
+Throws an error for unknown `type`.
 
 # Example
 ```julia
 Rc, Rp, Kp = ATRadius(ion, irrad, "KC")
+Rc, Rp, Kp = ATRadius(ion, irrad, "LEM")
 ```
 """
-function ATRadius(ion::Ion, irrad::Irrad, type::String)
+function ATRadius(ion::Ion, _irrad::Irrad, type::String)
 
     if type == "LEM"
-        Rc = 0.01
-        Rp = 0.05 * ((ion.E / ion.A)^(1.7))
-        LETk = ion.LET * 0.1602
-        Kp = (1 / (pi)) * (LETk / (1 * (1 + 2 * log(Rp / Rc))))
+        Rc   = 0.01
+        Rp   = 0.05 * ((ion.E / ion.A)^(1.7))
+        LETk = ion.LET * 0.1602   # keV/µm → MeV·cm⁻¹ (×0.1602)
+        Kp   = (1 / π) * (LETk / (1 + 2 * log(Rp / Rc)))
 
     elseif type == "KC"
         AMU2MEV = 931.494027
-        β = sqrt(1 - 1 / ((ion.E / AMU2MEV + 1)^2))
-        Rc = 0.01116 * β
-        Rp = 0.0616 * ((ion.E / ion.A)^(1.7))
-
-        particleEnergy = ion.E
-        A = ion.A
-        Z = ion.Z
-        β = sqrt(1 - 1 / ((particleEnergy / AMU2MEV + 1)^2))
-        z_eff = Z * (1 - exp(-125 * β / Z^(2.0 / 3.0)))
-        Kp = 1.25 * 0.0001 * (z_eff / β)^2
+        β    = sqrt(1 - 1 / ((ion.E / AMU2MEV + 1)^2))
+        Rc   = 0.01116 * β
+        Rp   = 0.0616 * ((ion.E / ion.A)^(1.7))
+        z_eff = ion.Z * (1 - exp(-125 * β / ion.Z^(2.0 / 3.0)))
+        Kp   = 1.25 * 0.0001 * (z_eff / β)^2
 
     else
-        println("Error - unknown method")
-        return -1, -1
+        error("ATRadius: unknown type \"$type\". Use \"LEM\" or \"KC\".")
     end
 
     return Rc, Rp, Kp
@@ -120,7 +132,8 @@ sp = load_stopping_power()
 ```
 """
 function load_stopping_power()
-    sp = Dict{String,Matrix{Float64}}()
+    sp = Dict{String, Matrix{Float64}}()
+    spdir = joinpath(@__DIR__, "..", "data", "stoppingpower")
 
     ion_list = [
         ("1H",  "H"),  ("4He", "He"), ("6Li", "Li"), ("8Be", "Be"),
@@ -128,7 +141,7 @@ function load_stopping_power()
     ]
 
     for (ion, element) in ion_list
-        sp[ion] = readdlm("data/stoppingpower/$(element)_water.txt", Float64)
+        sp[ion] = readdlm(joinpath(spdir, "$(element)_water.txt"), Float64)
     end
 
     return sp
@@ -148,7 +161,7 @@ LET = linear_interpolation("12C", 150.0, sp)
 """
 function linear_interpolation(ion::String, input_value::Float64, sp::Dict)
     x = sp[ion][:, 1]
-    y = sp[ion][:, 2] / 10
+    y = sp[ion][:, 2] / 10   # convert MeV·cm²/g → keV/µm (÷10 for water, ρ=1 g/cm³)
 
     if input_value < minimum(x) || input_value > maximum(x)
         error("Input value $input_value is out of range.")
@@ -214,9 +227,11 @@ Fill per-layer AT array by propagating ion energy/LET across spheroid depth.
 Mutates `irrad_cond` in-place — one `AT` entry per distinct z-layer in `cell_df`.
 
 - `track_seg = true`  → ion state fixed across all layers (no energy loss).
-- `track_seg = false` → energy/LET updated after each layer via `residual_energy_after_distance`.
+- `track_seg = false` → energy/LET updated layer-by-layer via
+  `residual_energy_after_distance` using the actual per-layer z-spacing
+  (`unique_z[i+1] - unique_z[i]`). Non-uniform z-spacing is handled correctly.
 
-Assumes uniform z-spacing. Requires `sp` (stopping power dict) in scope.
+Requires `sp` (stopping power dict) in enclosing scope.
 
 # Example
 ```julia
@@ -225,7 +240,8 @@ compute_energy_box!(irrad_cond, ion, irrad, "KC", cell_df, false)
 ```
 """
 function compute_energy_box!(irrad_cond::Array{AT}, ion::Ion, irrad::Irrad, type_AT::String, cell_df::DataFrame, track_seg::Bool)
-    unique_z = sort(unique(cell_df.z))
+    unique_z     = sort(unique(cell_df.z))
+    n_layers     = length(unique_z)
     ion_original = ion
 
     E        = ion.E
@@ -237,11 +253,12 @@ function compute_energy_box!(irrad_cond::Array{AT}, ion::Ion, irrad::Irrad, type
     Rc, Rp, Kp = ATRadius(ion, irrad, type_AT)
     Rk = Rp
 
-    for i in 1:size(unique_z, 1)
+    for i in 1:n_layers
         irrad_cond[i] = AT(particle, E, A, Z, LET, 1.0, Rc, Rp, Rk, Kp)
 
-        if (!track_seg) && (E != 0.0)
-            step = diff(unique_z)[1]
+        # Propagate energy loss to next layer (skip on last layer — no layer i+1)
+        if (!track_seg) && (E != 0.0) && (i < n_layers)
+            step = unique_z[i + 1] - unique_z[i]   # actual per-layer spacing (µm)
             E, LET = residual_energy_after_distance(E, Z, A, step, particle, sp)
         end
 
@@ -303,9 +320,10 @@ function residual_energy_after_distance(E_u::Float64, Z::Int, A::Int, x_um::Floa
     distance_covered = 0.0
     while distance_covered < total_distance_cm && E_total > 0
         dEdx = stopping_power(E_total)
-        dE   = dEdx * step_cm
-        dE < 0 && (E_total = 0.0; break)
-        E_total = max(E_total - dE, 0.0)
+        # dEdx == 0 means the ion has effectively stopped (β→0 or unphysical state);
+        # dEdx < 0 should not occur but guards against numerical drift.
+        dEdx <= 0 && (E_total = 0.0; break)
+        E_total = max(E_total - dEdx * step_cm, 0.0)
         distance_covered += step_cm
     end
 

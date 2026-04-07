@@ -22,11 +22,12 @@
 #?   setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg) -> Nothing
 #       Computes per-layer AT conditions, assigns energy steps, builds reduced
 #       irrad_cond array; injects irrad_cond, lets, energies, num_energy_steps into Main.
-#?   setup(E, particle, dose, tumor_radius; X_box, X_voxel, R_cell, target_geom, calc_type, Type_AT, track_seg) 
-#?   -> ion, irrad, cell_df, at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T
-#      Setup the whole envirnment: calls setup_GSM2!, setup_IonIrrad!, setup_cell_lattice!,
-#      setup_cell_population!, setup_irrad_conditions!; injects ion, irrad, cell_df,
-#      at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T into Main.
+#?   setup(E, particle, dose, tumor_radius; X_box, X_voxel, R_cell, target_geom, calc_type, type_AT, track_seg)
+#           -> NamedTuple (ion, irrad, cell_df, at_start, R_beam, x_beam, y_beam, O2_mean, Npar, zF, D, T)
+#       Full pipeline: setup_GSM2! → setup_IonIrrad! → setup_cell_lattice! →
+#       setup_cell_population! → setup_irrad_conditions! → set_oxygen!.
+#       Uses Base.invokelatest to avoid world-age errors in notebook/async contexts.
+#       Requires gsm2 to be in Main (set by setup_GSM2! beforehand).
 #
 #~ Energy Binning
 #?   set_energy_steps!(cell_df, irrad_cond) -> Nothing
@@ -86,6 +87,7 @@ end
 
 Interpolates LET, builds `Ion`/`Irrad` objects, computes AT track radii.
 Injects `type_AT`, `ion`, `irrad`, `LET`, `Rc`, `Rp`, `Rk`, `Kp`, `A`, `Z` into `Main`.
+`A` is the mass number extracted from `particle` (e.g. `12` for `"12C"`).
 
 Requires global `sp` (stopping power dict) to be in scope.
 
@@ -101,7 +103,7 @@ function setup_IonIrrad!(dose::Float64, E::Float64, particle::String;
         dose_rate::Float64 = 0.18)
 
     A_ = parse(Int, filter(isdigit, particle))
-    A  = 1.
+    A  = Float64(A_)   # mass number in atomic mass units
     Z  = getZ(particle)
 
     LET_local  = linear_interpolation(particle, E, sp)
@@ -145,15 +147,19 @@ end
 
 """
     setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
-                        ParIrr="false", track_seg=true) -> Nothing
+                        ParIrr="false", track_seg=true, full_cycle=true) -> Nothing
 
 Generates cell positions and builds `cell_df` with `x/y/z/layer` columns.
 Injects `ParIrr`, `N`, `nodes_positions`, `N_CellsSide`, `cell_df`,
 `track_seg`, `full_cycle` into `Main`.
 
+- `full_cycle=true`: cells start distributed across the full cell cycle.
+  Set to `false` to initialise all cells in G1 (quiescent-like start).
+
 # Example
 ```julia
 setup_cell_lattice!("square", 900.0, 15.0, 12, 60; ParIrr="true")
+setup_cell_lattice!("circle", 600.0, 15.0, 12, 40; full_cycle=false)
 ```
 """
 function setup_cell_lattice!(target_geom::String,
@@ -161,8 +167,9 @@ function setup_cell_lattice!(target_geom::String,
                                 R_cell::Float64,
                                 N_sideVox::Int,
                                 N_CellsSide::Int;
-                                ParIrr::String  = "false",
-                                track_seg::Bool = true)
+                                ParIrr::String     = "false",
+                                track_seg::Bool    = true,
+                                full_cycle::Bool   = true)
 
     N_local, nodes_positions_local, N_CellsSide_local =
         generate_cells_positions_selector(target_geom, ParIrr,
@@ -187,7 +194,7 @@ function setup_cell_lattice!(target_geom::String,
         N_CellsSide     = $N_CellsSide_local
         cell_df         = $cell_df_local
         track_seg       = $track_seg
-        full_cycle      = true
+        full_cycle      = $full_cycle
     end
 
     println("=========== Cell Lattice Setup ===========")
@@ -371,10 +378,14 @@ end
 
 Returns the bin index containing `value` from a sorted vector of bin edges.
 First bin includes its lower bound; all others are `(lower, upper]`.
+Out-of-range values are clamped: returns `1` if below the first edge,
+`length(bins)-1` if above the last edge (never returns `nothing`).
 
 # Example
 ```julia
 set_energy_bins(0.5, [0.0, 0.1, 1.0, 10.0])  # → 2
+set_energy_bins(-1.0, [0.0, 0.1, 1.0, 10.0]) # → 1   (clamped)
+set_energy_bins(99.0, [0.0, 0.1, 1.0, 10.0]) # → 3   (clamped)
 ```
 """
 function set_energy_bins(value::Float64, bins::Vector{Float64})
@@ -384,7 +395,8 @@ function set_energy_bins(value::Float64, bins::Vector{Float64})
         (i == 1 && value == lower) && return i
         (value > lower && value ≤ upper) && return i
     end
-    return nothing
+    # Out-of-range fallback: clamp to first or last valid bin
+    return value ≤ bins[1] ? 1 : length(bins) - 1
 end
 
 """
@@ -657,6 +669,7 @@ function setup(
     LET   = Base.invokelatest(getfield, Main, :LET)
     F    = irrad.dose / (1.602e-9 * LET)
     Npar = round(Int, F * π * R_beam^2 * 1e-8)
+    Npar == 0 && error("Npar computed as zero — beam radius or dose too small (R_beam=$R_beam, dose=$(irrad.dose), LET=$LET)")
     zF   = irrad.dose / Npar
     D    = irrad.doserate / zF
     T    = irrad.dose / (zF * D) * 3600

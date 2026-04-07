@@ -22,11 +22,15 @@
 #                                         domain, tumor_radius, full_cycle, geometry, type,
 #                                         N_sideVox, N_CellsSide, X_box, X_voxel)
 #       Mutates cell_df in-place for partial irradiation (1 voxel layer in z).
+#       Cell cycle: full_cycle=true uses M(1h)/G2(5h)/S(7h)/G1(11h) proportional sampling.
+#       Stem cells: 20% probability (is_stem=1). Includes neighbor/G0 post-init.
 #?   create_cells_3D_voxel_df!(N, nodes_positions, R_cell, SP_, gsm2, cell_df, domain,
 #                              tumor_radius, full_cycle, geometry, type, X_box, X_voxel)
 #       Mutates cell_df in-place for full irradiation (entire 3D volume).
-#   initialize_G0_phase!(cell_df)
-#       Sets contact-inhibited cells (number_nei == 0) to G0. Call before compute_times_domain!
+#       Cell cycle and stem assignment identical to 1layervoxel variant.
+#?   initialize_G0_phase!(cell_df)
+#       Sets contact-inhibited cells (number_nei == 0) to G0, cycle_time=Inf.
+#       Call after number_nei is populated and before compute_times_domain!.
 #
 #~ Neighbors
 #?   compute_neighbors_3d(N, M, L)
@@ -216,7 +220,7 @@ function generate_cells_positions_squaredlattice_3D_new_1layervoxel(X_box::Float
     # Initialize positions array
     nodes_positions = Vector{Tuple{Float64,Float64,Float64}}()
 
-    # cicle to generate centers
+    # loop to generate cell centers
     for z in 0:(Int64(N_CellsSide / N_sideVox)-1)
         for y in 0:(N_CellsSide-1)
             for x in 0:(N_CellsSide-1)
@@ -291,7 +295,7 @@ function generate_cells_positions_squaredlattice_3D_new(X_box::Float64, R_cell::
     # Initialize positions array
     nodes_positions = Vector{Tuple{Float64,Float64,Float64}}()
 
-    # cicle to generate centers
+    # loop to generate cell centers
     for z in 0:(N_CellsSide-1)
         for y in 0:(N_CellsSide-1)
             for x in 0:(N_CellsSide-1)
@@ -629,20 +633,19 @@ function create_cells_3D_voxel_1layervoxel_df!(N::Int64, nodes_positions::Vector
     Threads.@threads for i in 1:N
         x, y, z = nodes_positions[i]
 
-        cell_line = rand() < 0.8 ? 1 : 0
-        is_stem_vec[i] = cell_line
+        is_stem_vec[i] = rand() < 0.2 ? 1 : 0   # 20% stem, 80% normal
 
         if full_cycle
+            # Proportional to phase duration: M=1h, G2=5h, S=7h, G1=11h (total 24h)
             ru = rand() * 24
             if ru <= 1
                 cell_cycle = "M"
-            elseif ru <= 20
-                cell_cycle = "S"
-            elseif ru <= 24
+            elseif ru <= 6
                 cell_cycle = "G2"
+            elseif ru <= 13
+                cell_cycle = "S"
             else
-                println("Error")
-                cell_cycle = "I"
+                cell_cycle = "G1"
             end
         else
             cell_cycle = (rand() < 0.25) ? "M" : "I"
@@ -699,14 +702,36 @@ function create_cells_3D_voxel_1layervoxel_df!(N::Int64, nodes_positions::Vector
     cell_df.dose = [zeros(Float64, domain) for _ in 1:N]
     cell_df.dose_cell = zeros(Float64, N)
 
-    cell_df.can_divide = zeros(Int64, N)
-    cell_df.number_nei = zeros(Int64, N)
+    cell_df.can_divide   = zeros(Int64, N)
+    cell_df.number_nei   = zeros(Int64, N)
 
-    cell_df.apo_time = zeros(Float64, N)
-    cell_df.death_time = zeros(Float64, N)
-    cell_df.recover_time = zeros(Float64, N)
-    cell_df.cycle_time = zeros(Float64, N)
+    # Timers: Inf means "not scheduled". Zero would trigger immediate events.
+    cell_df.apo_time     = fill(Inf, N)
+    cell_df.death_time   = fill(Inf, N)
+    cell_df.recover_time = fill(Inf, N)
+    cell_df.cycle_time   = fill(Inf, N)
     cell_df.is_death_rad = zeros(Int64, N)
+
+    # Count empty neighbors, set can_divide, assign cycle_time, detect G0
+    for i in 1:N
+        cell_df.is_cell[i] == 1 || continue
+        empty_count = 0
+        for nei_idx in cell_df.nei[i]
+            1 <= nei_idx <= N && cell_df.is_cell[nei_idx] == 0 && (empty_count += 1)
+        end
+        cell_df.number_nei[i] = empty_count
+        if empty_count == 0
+            cell_df.cell_cycle[i] = "G0"
+            cell_df.cycle_time[i] = Inf
+            cell_df.can_divide[i] = 0
+        else
+            cell_df.can_divide[i] = 1
+            cell_df.cycle_time[i] = generate_cycle_time(cell_df.cell_cycle[i])
+        end
+    end
+
+    g0_count = sum((cell_df.is_cell .== 1) .& (cell_df.cell_cycle .== "G0"))
+    println("Initialized $g0_count cells to G0 (contact-inhibited)")
 end
 
 """
@@ -831,8 +856,7 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
     Threads.@threads for i in 1:N
         x, y, z = nodes_positions[i]
 
-        cell_line = rand() < 0.8 ? 1 : 0
-        is_stem_vec[i] = cell_line
+        is_stem_vec[i] = rand() < 0.2 ? 1 : 0   # 20% stem, 80% normal
 
         if full_cycle
             ru = rand() * 24
@@ -910,18 +934,17 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
     cell_df.dose = [zeros(Float64, domain) for _ in 1:N]
     cell_df.dose_cell = zeros(Float64, N)
 
-    cell_df.can_divide = zeros(Int64, N)
-    cell_df.number_nei = zeros(Int64, N)
+    cell_df.can_divide   = zeros(Int64, N)
+    cell_df.number_nei   = zeros(Int64, N)
 
-    cell_df.apo_time = zeros(Float64, N)
-    cell_df.death_time = zeros(Float64, N)
-    cell_df.recover_time = zeros(Float64, N)
-    cell_df.cycle_time = zeros(Float64, N)
+    # Timers: Inf means "not scheduled". Zero would trigger immediate events.
+    cell_df.apo_time     = fill(Inf, N)
+    cell_df.death_time   = fill(Inf, N)
+    cell_df.recover_time = fill(Inf, N)
+    cell_df.cycle_time   = fill(Inf, N)
     cell_df.is_death_rad = zeros(Int64, N)
-    
-    # ============================================================================
-    # NEW: Count empty neighbors and initialize G0 for contact-inhibited cells
-    # ============================================================================
+
+    # Count empty neighbors, set can_divide, assign cycle_time, detect G0
     for i in 1:N
         if cell_df.is_cell[i] == 1
             # Count empty neighbors
@@ -952,59 +975,35 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
 end
 
 """
-compute_neighbors_3d(N::Int, M::Int, L::Int) 
-        -> Vector{Vector{Int}}
+    compute_neighbors_3d(N::Int, M::Int, L::Int) -> Vector{Vector{Int}}
 
-Compute the **3D Moore-neighborhood** (26‑connected neighbors) for each vertex in a
-regular `N × M × L` lattice.
+Compute the **3D Moore-neighborhood** (26-connected neighbors) for each cell in
+an `N × M × L` lattice with **periodic boundary conditions**.
 
-# Purpose
-This function builds the *full adjacency list* of a 3D grid where each cell (voxel)
-may have up to **26 neighbors**:
-- 6 face‑adjacent
-- 12 edge‑adjacent
-- 8 corner‑adjacent
+Every cell has exactly **26 neighbors** (all di,dj,dk ∈ {-1,0,1} except (0,0,0)).
+Boundary cells wrap around to the opposite face via `mod1`, so the lattice is
+topologically a 3-torus.
 
-The result is a vector where index `idx` contains a list of all valid neighbors of
-the cell corresponding to coordinates `(i, j, k)`.
+# Lattice indexing
+Column-major 1D index:  `idx = (k−1)·N·M + (j−1)·N + i`
+with `i ∈ 1:N`, `j ∈ 1:M`, `k ∈ 1:L`.
 
-This structure is useful for:
-- interaction-based cell simulations  
-- diffusive processes  
-- mechanical neighborhood queries  
-- agent‑based models  
-- spatial statistical kernels  
+# Periodic boundary
+Neighbor coordinates are computed as:
+```
+ni = mod1(i + di, N)
+nj = mod1(j + dj, M)
+nk = mod1(k + dk, L)
+```
+A cell at face `i=1` is neighbor with the cell at `i=N`, and vice versa.
 
-# Lattice Indexing
-The 3D grid is mapped into a 1D vector using the standard row-major mapping:
-idx = (k − 1) * (N*M) + (j − 1) * N + i
-with:
-- `i = 1:N`
-- `j = 1:M`
-- `k = 1:L`
-
-# Neighborhood Definition
-For each point `(i, j, k)`, the function checks all combinations:
-di, dj, dk ∈ {-1, 0, 1}
-excluding `(0, 0, 0)` (the point itself).  
-A neighbor is included only if its coordinates remain inside bounds:
-1 ≤ ni ≤ N
-1 ≤ nj ≤ M
-1 ≤ nk ≤ L
-# Output
-- A `Vector{Vector{Int}}` of length `N*M*L`
-- `neighbors[idx]` contains all valid neighbors of the vertex corresponding to that index
-
-The number of neighbors varies depending on whether a vertex lies:
-- inside the grid (26 neighbors),
-- on a face (17 neighbors),
-- on an edge (11 neighbors),
-- or on a corner (7 neighbors).
+# Returns
+`Vector{Vector{Int}}` of length `N·M·L`. Every inner vector has exactly 26 entries.
 
 # Example
 ```julia
 nei = compute_neighbors_3d(10, 10, 10)
-println("Neighbors of cell 1: ", nei[1])
+@assert length(nei[1]) == 26   # all cells have 26 neighbors (periodic)
 ```
 """
 function compute_neighbors_3d(N, M, L)
@@ -1027,16 +1026,13 @@ function compute_neighbors_3d(N, M, L)
                                 continue
                             end
 
-                            # Calculate the neighboring (i, j, k) coordinates
-                            ni = i + di
-                            nj = j + dj
-                            nk = k + dk
+                            # Periodic boundary conditions: wrap around each axis
+                            ni = mod1(i + di, N)
+                            nj = mod1(j + dj, M)
+                            nk = mod1(k + dk, L)
 
-                            # Ensure the neighbor is within the bounds of the lattice
-                            if 1 <= ni <= N && 1 <= nj <= M && 1 <= nk <= L
-                                neighbor_idx = (nk - 1) * N * M + (nj - 1) * N + ni
-                                push!(neighbor_list, neighbor_idx)
-                            end
+                            neighbor_idx = (nk - 1) * N * M + (nj - 1) * N + ni
+                            push!(neighbor_list, neighbor_idx)
                         end
                     end
                 end
@@ -1123,96 +1119,129 @@ This approximates the classical experimental observation that spheroids have:
 set_oxygen!(cell_df; rim_ox=7.0, core_ox=0.1, max_dist_ref=450.0, plot_oxygen=true)
 ```
 """
+
 function set_oxygen!(
     cell_df::DataFrame;
-    rim_ox=7.0,
-    core_ox=0.1,
-    max_dist_ref=400.0,
-    plot_oxygen::Bool=false
+    rim_ox::Float64       = 7.0,
+    core_ox::Float64      = 0.1,
+    max_dist_ref::Float64 = 400.0,
+    plot_oxygen::Bool     = false
 )
-    # ------------------------------------------------------------
-    # 1) Compute distance from spheroid center (0,0,0)
-    # ------------------------------------------------------------
-    cell_df.distance = sqrt.((cell_df.x).^2 .+ (cell_df.y).^2 .+ (cell_df.z).^2)
+    # ── sanity checks ────────────────────────────────────────────────────────
+    rim_ox  >= core_ox  || error("rim_ox must be ≥ core_ox (surface is more oxygenated than core)")
+    max_dist_ref > 0    || error("max_dist_ref (penetration depth) must be positive")
 
-    # Maximum spheroid radius using only real cells
+    # ── 1. Radial distance from spheroid centre (0, 0, 0) ───────────────────
+    cell_df.distance = sqrt.(cell_df.x .^ 2 .+ cell_df.y .^ 2 .+ cell_df.z .^ 2)
+
+    # Outer radius = furthest alive cell
     max_dist = maximum(cell_df.distance[cell_df.is_cell .== 1])
 
     # Allocate oxygen column
     cell_df.O = similar(cell_df.distance)
 
-    # ------------------------------------------------------------
-    # 2) Oxygen assignment (linear scaling from rim to core)
-    # ------------------------------------------------------------
+    # ── 2. Oxygen assignment ─────────────────────────────────────────────────
+    #
+    #   dist_from_rim  = depth below the outer surface  =  max_dist − r
+    #
+    #   Zone A (normoxic outer shell):   dist_from_rim ≤ 0    → O2 = rim_ox
+    #   Zone B (hypoxic viable rim):     0 < dist_from_rim < max_dist_ref
+    #                                    → linear interpolation rim_ox → core_ox
+    #   Zone C (necrotic core):          dist_from_rim ≥ max_dist_ref → O2 = core_ox
+    #
     for i in 1:nrow(cell_df)
+
         if cell_df.is_cell[i] == 0
             cell_df.O[i] = 0.0
             continue
         end
 
-        # Distance from outer rim
-        dist_from_rim = max_dist - cell_df.distance[i]
+        dist_from_rim = max_dist - cell_df.distance[i]   # ≥ 0 for inner cells
 
-        if dist_from_rim <= 0
-            # At the outermost rim
+        if dist_from_rim <= 0.0
+            # ── Zone A: outermost cells (≈ at surface) ───────────────────────
             cell_df.O[i] = rim_ox
+
         elseif dist_from_rim < max_dist_ref
-            # Linear interpolation from rim_ox → core_ox over 0 → max_dist_ref
+            # ── Zone B: linear drop from rim_ox → core_ox ────────────────────
+            #   frac = 0 at surface → O2 = rim_ox
+            #   frac = 1 at depth λ → O2 = core_ox
             frac = dist_from_rim / max_dist_ref
             cell_df.O[i] = rim_ox - (rim_ox - core_ox) * frac
+
         else
-            # Deeper than 450 µm from rim → core oxygen
+            # ── Zone C: deep core – clamp at core_ox ─────────────────────────
             cell_df.O[i] = core_ox
         end
     end
 
-    # ------------------------------------------------------------
-    # 3) Optional 2-panel visualization
-    # ------------------------------------------------------------
+    # ── 3. Optional visualisation ────────────────────────────────────────────
     if plot_oxygen
-        # Only real cells
-        df_cells_den = cell_df[cell_df.is_cell .== 1, :]
-        df_cells_3d  = df_cells_den[df_cells_den.x .>= 0, :]  # half-sphere view
+        df_alive = cell_df[cell_df.is_cell .== 1, :]
+        df_half  = df_alive[df_alive.x .>= 0, :]    # half-sphere for clarity
 
-        # 3D scatter
         p1 = scatter(
-            df_cells_3d.x, df_cells_3d.y, df_cells_3d.z;
-            markersize = 4,
+            df_half.x, df_half.y, df_half.z;
+            markersize        = 4,
             markerstrokewidth = 0.1,
-            marker_z = df_cells_3d.O,
-            colorbar = true,
-            xlabel = "x (µm)",
-            ylabel = "y (µm)",
-            zlabel = "z (µm)",
-            title = "3D Oxygen Distribution",
+            marker_z          = df_half.O,
+            colorbar          = true,
+            xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
+            title  = "3-D oxygen distribution  [%]",
             legend = false,
-            aspect_ratio = :equal,
-            seriescolor = :viridis,
-            size = (900, 700),
-            camera = (320, 30)  # adjust view if needed
+            seriescolor  = :viridis,
+            size         = (900, 700),
+            camera       = (320, 30)
         )
 
-        # Oxygen density histogram
-        p2 = density(
-            df_cells_den.O;
-            xlabel = "Oxygen concentration",
+        # Annotate zone boundaries on a 1-D radial plot for sanity check
+        r_vals = sort(df_alive.distance)
+        o_vals = rim_ox .- (rim_ox .- core_ox) .*
+                    clamp.((max_dist .- r_vals) ./ max_dist_ref, 0.0, 1.0)
+        p2 = Plots.plot(
+            max_dist .- r_vals, o_vals;
+            xlabel = "Depth from surface (µm)",
+            ylabel = "O₂  [%]",
+            title  = "Radial O₂ profile",
+            lw = 2, c = :blue, legend = false
+        )
+        vline!(p2, [max_dist_ref];
+                ls = :dash, c = :red,
+                label = "penetration depth λ = $(max_dist_ref) µm")
+
+        p3 = density(
+            df_alive.O;
+            xlabel = "O₂ concentration  [%]",
             ylabel = "Density",
-            title = "Oxygen Density Distribution",
-            legend = false,
-            lw = 2,
-            c = :blue
+            title  = "O₂ distribution across cells",
+            legend = false, lw = 2, c = :blue
         )
 
-        # Combine plots
-        display(plot(p1, p2; layout = (1, 2), size = (1400, 600)))
+        display(plot(p1, p2, p3; layout = (1, 3), size = (1800, 600)))
     end
 
     return nothing
 end
 
+
 """
-Initialize cells to G0 if they have no space to divide (number_nei == 0)
-Call this after setting up initial population, before compute_times_domain!
+    initialize_G0_phase!(cell_df::DataFrame) -> Nothing
+
+Sets all alive cells with `number_nei == 0` (no empty lattice neighbors) to the
+quiescent G0 phase. This enforces contact inhibition: a cell completely surrounded
+by other cells cannot divide and must pause its cycle.
+
+Call this **after** the initial population is created and `number_nei` is computed,
+and **before** `compute_times_domain!` — otherwise cells at full confluence would
+have finite `cycle_time` values that incorrectly trigger division events.
+
+Mutates `cell_df` in place. Sets `cell_cycle = "G0"`, `cycle_time = Inf`,
+`can_divide = 0` for each blocked cell.
+
+# Example
+```julia
+initialize_G0_phase!(cell_df)
+```
 """
 function initialize_G0_phase!(cell_df::DataFrame)
     blocked_count = 0

@@ -5,7 +5,7 @@
 #! ---------
 #~ Radiation Damage & Repair
 #?   compute_times_domain!(cell_df, gsm2_cycle; nat_apo, terminal_time, verbose, print_every, summary)
-#       Parallel per-cell GSM2 survival + stochastic repair scheduling.
+#       Threaded per-cell GSM2 survival + stochastic repair scheduling.
 #       Updates sp, death_time, recover_time, cycle_time, is_cell in place.
 #       Dispatches gsm2 by cell_cycle phase. Deferred neighbor updates applied serially.
 #?   compute_repair_domain(X, Y, gsm2; terminal_time, rng, verbose, max_events_log)
@@ -13,6 +13,11 @@
 #       Gillespie simulation of X-lesion repair under GSM2 rates (a, b, r).
 #       death_code: 1=lethal, 0=recovered, -1=timeout.
 #       Immediate lethal if any Y>0; immediate recovery if sum(X)==0.
+#?   compute_repair_domain_trajectory(X, Y, gsm2; rng, au)
+#           -> (times, X_traj, Y_traj, death_code)
+#       Gillespie simulation recording the full time trajectory of X/Y states.
+#       Runs until all X consumed; records every event including t=0.
+#       death_code: 0=all repaired cleanly, 1=at least one Y lesion created.
 #
 #~ Cell Cycle Helpers
 #?   generate_cycle_time(phase) -> Float64
@@ -85,8 +90,12 @@
                             terminal_time=Inf, verbose=false, print_every=0, summary=true)
         -> Nothing
 
-Parallel per-cell GSM2 survival + stochastic repair scheduling for all active
+Threaded per-cell GSM2 survival + stochastic repair scheduling for all active
 cells (`is_cell==1`). Updates `cell_df` in place.
+
+Thread safety: each cell writes only to its own row index, so column-level writes
+are race-free. Neighbor updates (which touch other rows) are deferred into
+per-thread buffers and merged serially at the end.
 
 For each cell:
 1. Computes `sp` via `domain_GSM2`.
@@ -147,10 +156,9 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
     survived          = Threads.Atomic{Int}(0)
     timeout_cells     = Threads.Atomic{Int}(0)
 
-    for k in eachindex(active_cells)
+    @Threads.threads for k in eachindex(active_cells)
         i   = active_cells[k]
         tid = Threads.threadid()
-        tid <= max_threads || error("Thread ID $tid exceeds max_threads $max_threads")
 
         # Select GSM2 by phase
         phase = cell_df.cell_cycle[i]
@@ -404,6 +412,127 @@ function compute_repair_domain(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
     return (Inf, t, 0, X_work, Y_work)
 end
 
+"""
+    compute_repair_domain_trajectory(X, Y, gsm2; rng=default_rng(), au=4.0)
+        -> (times, X_traj, Y_traj, death_code)
+
+Gillespie simulation of X-lesion repair under GSM2 rates, recording the full
+temporal trajectory. The simulation runs until all X lesions are consumed
+(sum(X) == 0), regardless of whether lethal events (misrepair, interaction) occur.
+
+Reactions per domain j:
+- Repair      (rate r·X[j]):          X[j] -= 1
+- Misrepair   (rate a·X[j]):          X[j] -= 1, Y[j] += 1
+- Interaction (rate b·X[j]·(X[j]-1)): X[j] -= 2, Y[j] += 1
+
+At each reaction event the current time and the full X/Y state vectors are
+appended to the trajectory. The initial state (t=0) is always the first entry.
+
+Returns:
+- `times::Vector{Float64}` — time of each recorded event (including t=0)
+- `X_traj::Vector{Vector{Int}}` — X state at each event
+- `Y_traj::Vector{Vector{Int}}` — Y state at each event
+- `death_code::Int` — 0 = no Y accumulated (all repaired), 1 = Y > 0 (lethal)
+
+Inputs X, Y are not mutated.
+"""
+function compute_repair_domain_trajectory(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
+                                           rng::AbstractRNG = Random.default_rng(),
+                                           au::Float64      = 4.0)
+
+    times  = Float64[]
+    X_traj = Vector{Int}[]
+    Y_traj = Vector{Int}[]
+
+    X_work = copy(X)
+    Y_work = copy(Y)
+
+    # Record initial state
+    push!(times,  0.0)
+    push!(X_traj, copy(X_work))
+    push!(Y_traj, copy(Y_work))
+
+    sum_X = sum(X_work)
+    if sum_X == 0
+        return (times, X_traj, Y_traj, any(>(0), Y_work) ? 1 : 0)
+    end
+
+    a, b, r = gsm2.a, gsm2.b, gsm2.r
+    n       = length(X_work)
+    t       = 0.0
+
+    rates_r = Vector{Float64}(undef, n)
+    rates_a = Vector{Float64}(undef, n)
+    rates_b = Vector{Float64}(undef, n)
+
+    while sum_X > 0
+        # Build propensities
+        a0 = 0.0
+        @inbounds for i in 1:n
+            xi = X_work[i]
+            rr = r * xi
+            ra = a * xi
+            rb = xi > 1 ? b * xi * (xi - 1) : 0.0
+            rates_r[i] = rr; rates_a[i] = ra; rates_b[i] = rb
+            a0 += rr + ra + rb
+        end
+
+        if a0 <= 0.0
+            break   # no reactions possible, exit with current state
+        end
+
+        # Select reaction
+        threshold   = rand(rng) * a0
+        cumulative  = 0.0
+        reac_type   = 0
+        reac_domain = 0
+
+        @inbounds for i in 1:n
+            cumulative += rates_r[i]
+            if cumulative >= threshold; reac_type = 1; reac_domain = i; break; end
+        end
+        if reac_type == 0
+            @inbounds for i in 1:n
+                cumulative += rates_a[i]
+                if cumulative >= threshold; reac_type = 2; reac_domain = i; break; end
+            end
+        end
+        if reac_type == 0
+            @inbounds for i in 1:n
+                cumulative += rates_b[i]
+                if cumulative >= threshold; reac_type = 3; reac_domain = i; break; end
+            end
+        end
+
+        # Advance time
+        t += au * (-log(rand(rng)) / a0)
+
+        # Apply reaction
+        if reac_type == 1
+            # Repair: one X removed
+            @inbounds X_work[reac_domain] -= 1
+            sum_X -= 1
+        elseif reac_type == 2
+            # Misrepair: one X consumed, one Y created
+            @inbounds X_work[reac_domain] -= 1
+            @inbounds Y_work[reac_domain] += 1
+            sum_X -= 1
+        else
+            # Interaction: two X consumed, one Y created
+            @inbounds X_work[reac_domain] -= 2
+            @inbounds Y_work[reac_domain] += 1
+            sum_X -= 2
+        end
+
+        push!(times,  t)
+        push!(X_traj, copy(X_work))
+        push!(Y_traj, copy(Y_work))
+    end
+
+    death_code = any(>(0), Y_work) ? 1 : 0
+    return (times, X_traj, Y_traj, death_code)
+end
+
 #! ============================================================================
 #! Cell Cycle Helpers
 #! ============================================================================
@@ -541,8 +670,26 @@ end
 #! Lattice / Neighbor Utilities
 #! ============================================================================
 
+"""
+    is_valid_index(idx, n) -> Bool
+
+Returns `true` if `1 ≤ idx ≤ n`. Used as a bounds check before accessing neighbor
+arrays to guard against out-of-range neighbor indices in lattice operations.
+"""
 @inline is_valid_index(idx::Int32, n::Int32)::Bool = 1 <= idx <= n
 
+"""
+    is_time_due(t, eps, treat_neg) -> Bool
+
+Returns `true` if time `t` has elapsed (i.e. is due), within tolerance `eps`.
+- Returns `false` immediately for `Inf` or `missing` values (not yet scheduled).
+- `treat_neg=false`: checks `abs(t) ≤ eps` (clears both near-zero and small-negative).
+- `treat_neg=true`:  checks `t ≤ eps` (also fires for any negative t, useful if
+  clamping is not guaranteed upstream).
+
+In practice `update_time!` clamps timers at 0, so negative values should not occur;
+`treat_neg=false` is the safe default.
+"""
 @inline function is_time_due(t::Float64, eps::Float64, treat_neg::Bool)::Bool
     (ismissing(t) || isinf(t)) && return false
     return treat_neg ? (t <= eps) : (abs(t) <= eps)
@@ -570,7 +717,8 @@ Call this to fix any accumulated drift.
 """
 function recalculate_number_nei!(df::DataFrame)
     for i in 1:nrow(df)
-        df.number_nei[i] = length(df.nei[i]) - sum(df.is_cell[j] for j in df.nei[i])
+        nei = df.nei[i]
+        df.number_nei[i] = length(nei) - sum(df.is_cell[j] for j in nei)
     end
 end
 
@@ -688,13 +836,12 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
     @inbounds for n_idx in pop.nei[removed_idx]
         is_valid_index(n_idx, n) && is_cell[n_idx] == 1 || continue
         number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
-        if number_nei[n_idx] > 0 && can_divide[n_idx] == 0
+        if number_nei[n_idx] > 0 && can_divide[n_idx] == 0 && isinf(pop.death_time[n_idx])
             cell_cycle[n_idx] = String7("G1")
             new_ct = generate_cycle_time("G1")
             cycle_times[n_idx] = isinf(recover_times[n_idx]) ?
                 new_ct : max(new_ct, recover_times[n_idx])
-            pop.death_time[n_idx] = Inf
-            can_divide[n_idx]     = 1
+            can_divide[n_idx] = 1
         end
     end
     return nothing
@@ -820,14 +967,16 @@ function update_ABM!(pop::CellPopulation, next_time::Float64, event::String,
                     pop.can_divide[idx]   = 0
                 end
             else
-                next_phase = PHASE_TRANSITION[current_phase]
-                pop.cell_cycle[idx] = String7(next_phase)
+                # G1 → S → G2 → M transitions
                 if has_space
+                    next_phase = PHASE_TRANSITION[current_phase]
+                    pop.cell_cycle[idx]   = String7(next_phase)
                     pop.cycle_time[idx]   = generate_cycle_time(next_phase)
                     pop.death_time[idx]   = Inf
                     pop.recover_time[idx] = Inf
                     pop.can_divide[idx]   = 1
                 else
+                    # No empty neighbors: cell enters quiescence (G0)
                     pop.cell_cycle[idx]   = String7("G0")
                     pop.cycle_time[idx]   = Inf
                     pop.death_time[idx]   = Inf

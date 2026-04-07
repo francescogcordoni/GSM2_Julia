@@ -1,47 +1,48 @@
 #! ============================================================================
-#! utilities_MC_gpu.jl
+#! utilities_dose_computation_GPU.jl
 #!
 #! FUNCTIONS
 #! ---------
-#~ Constants
-#?   BLOCK_SIZE             — CUDA threads per block (default 256)
-#?   GPU_PARTICLE_THRESHOLD — Npar threshold above which GPU is used (default 1_000_000)
-#       Override at runtime: GPU_PARTICLE_THRESHOLD = 0 (always GPU) or typemax(Int) (always CPU)
-#
-#~ CUDA Kernel Internals
+#~ GPU Kernel Utilities
 #?   _log_index(x, log_vmin, log_vmax, n) -> Int32
-#       Returns the log-spaced bin index for value x in [10^log_vmin, 10^log_vmax].
-#       Clamped to [1, n]. Callable from GPU device code.
-#?   _mc_dose_kernel_fast!(out, dom_x, dom_y, px, py, Np, dose_vec, sim_,
-#                          log_impact_min, log_impact_max,
-#                          core_radius_sq, mid_radius_sq, penumbra_radius_sq,
-#                          core_dose, Kp) -> Nothing
-#       CUDA kernel: one thread per domain point, accumulates dose from Np primaries
-#       using core / mid (log-table interpolation) / penumbra (Kp/r²) regions.
-#
-#~ Lookup Table & GPU Launch Helpers
+#       Log-spaced bin index for `x` in [10^log_vmin, 10^log_vmax] divided into
+#       `n` bins. Clamped to [1, n]. Inline helper callable from GPU device code.
 #?   _build_lookup(irrad_cond, gsm2, type_AT)
 #           -> (dose_vec, core_dose, core_radius_sq, mid_radius_sq,
 #               penumbra_radius_sq, Kp, log_impact_min, log_impact_max)
-#       Builds a CPU-side log-spaced dose lookup table (1000 samples) using
-#       distribute_dose_domain. Threaded. Returns all kernel constants.
-#?   _gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
-#                    core_radius_sq, mid_radius_sq, penumbra_radius_sq,
-#                    core_dose, Kp, log_impact_min, log_impact_max) -> Nothing
-#       Uploads particle coordinates to GPU, launches _mc_dose_kernel_fast!,
-#       synchronizes, and frees temporary device arrays.
+#       Builds a CPU-side log-spaced radial dose lookup table (1000 samples)
+#       covering core, mid, and penumbra regions. Used to initialise GPU runs.
 #
-#~ Top-Level Dispatcher
+#~ CUDA Kernels
+#?   _mc_dose_kernel_fast!(out, dom_x, dom_y, px, py, Np, dose_vec, sim_,
+#                          log_impact_min, log_impact_max,
+#                          core_radius_sq, mid_radius_sq, penumbra_radius_sq,
+#                          core_dose, Kp)
+#       CUDA kernel — one thread per domain point. Accumulates dose from Np
+#       primary particles using core / mid (log-interpolated lookup) / penumbra
+#       (Kp/dist²) regions. Mutates `out` in-place on device.
+#
+#~ GPU Dispatch
+#?   _gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
+#                     core_radius_sq, mid_radius_sq, penumbra_radius_sq,
+#                     core_dose, Kp, log_impact_min, log_impact_max)
+#       Uploads particle coordinates to the GPU, launches `_mc_dose_kernel_fast!`,
+#       synchronises, and frees temporary device arrays. Single-batch wrapper
+#       around the CUDA kernel.
+#
+#~ High-Level MC Wrapper (auto CPU/GPU dispatch)
 #?   MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy,
-#                 df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg;
-#                 x_cb, y_cb)
-#       Auto CPU/GPU dispatch:
-#         GPU path: Npar >= GPU_PARTICLE_THRESHOLD AND CUDA.functional()
-#                   → DataFrame→matrix, single CUDA kernel, matrix→DataFrame, copy-back
-#         CPU path: Npar < threshold OR no CUDA
-#                   → calls MC_loop_ions_domain_tsc_fast! / MC_loop_ions_domain_fast!
-#                     directly on DataFrames (zero conversion overhead)
-#       Supports both track_seg=true (TSC) and track_seg=false (layered) modes.
+#                  df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg;
+#                  x_cb, y_cb)
+#       Top-level Monte Carlo dose-deposition driver with automatic CPU/GPU
+#       dispatch. Selects GPU when CUDA is functional and Npar ≥
+#       GPU_PARTICLE_THRESHOLD; falls back to CPU otherwise.
+#       Supports two execution modes:
+#         • track_seg = true  → TSC (Track-Segment) matrix optimisation
+#         • track_seg = false → Layered (non-TSC) energy-step loop
+#       Handles representative cell selection, DataFrame↔matrix conversion,
+#       particle sampling (Poisson), kernel dispatch, and dose copy-back.
+#       Mutates `cell_df_copy` (dose/energy fields) and `at` (AT state) in place.
 #! ============================================================================
 
 const BLOCK_SIZE             = 256
@@ -52,16 +53,11 @@ const GPU_PARTICLE_THRESHOLD = 1_000_000
 
 Log-spaced bin index for `x` in `[10^log_vmin, 10^log_vmax]` divided into `n` bins.
 Clamped to `[1, n]`. Callable from GPU device code.
-
-# Example
-```julia
-_log_index(0.5, -2.0, 3.0, Int32(1000))
-```
 """
 @inline function _log_index(x        :: Float64,
-                                log_vmin :: Float64,
-                                log_vmax :: Float64,
-                                n        :: Int32) :: Int32
+                             log_vmin :: Float64,
+                             log_vmax :: Float64,
+                             n        :: Int32) :: Int32
     t   = (log10(x) - log_vmin) / (log_vmax - log_vmin)
     idx = Int32(1) + Int32(floor(t * Float64(n - Int32(1))))
     return clamp(idx, Int32(1), n)
@@ -69,18 +65,11 @@ end
 
 """
     _mc_dose_kernel_fast!(out, dom_x, dom_y, px, py, Np, dose_vec, sim_,
-                            log_impact_min, log_impact_max,
-                            core_radius_sq, mid_radius_sq, penumbra_radius_sq,
-                            core_dose, Kp)
+                          log_impact_min, log_impact_max,
+                          core_radius_sq, mid_radius_sq, penumbra_radius_sq,
+                          core_dose, Kp)
 
-CUDA kernel — one thread per domain point `(dom_x[k], dom_y[k])`.
-Accumulates dose from `Np` primaries using three radial regions:
-- core      : dist² ≤ core_radius_sq        → +core_dose
-- mid       : core < dist² ≤ mid_radius_sq  → log-table linear interpolation
-- penumbra  : mid < dist² < penumbra_radius_sq → +Kp/dist²
-
-Writes `out[k] = accumulated_dose`. Threads with `k > length(dom_x)` exit immediately.
-All arrays must reside on GPU (`CuDeviceVector{Float64}`).
+CUDA kernel — one thread per domain point. Accumulates dose from Np primaries.
 """
 function _mc_dose_kernel_fast!(
     out                :: CuDeviceVector{Float64},
@@ -143,42 +132,52 @@ end
         -> (dose_vec, core_dose, core_radius_sq, mid_radius_sq,
             penumbra_radius_sq, Kp, log_impact_min, log_impact_max)
 
-Builds a CPU-side log-spaced dose lookup table (1000 samples) via
-`distribute_dose_domain`. Threaded. Returns all constants needed by the GPU kernel.
+Builds a CPU-side log-spaced radial dose lookup table with 1000 samples,
+covering the range `[r_lower, gsm2.rd + 150·Rc]` µm.
 
-# Example
-```julia
-dose_vec, core_dose, cr_sq, mr_sq, pr_sq, Kp, lmin, lmax =
-    _build_lookup(irrad_cond, gsm2, "KC")
-```
+The lookup is used by the GPU kernel to interpolate dose from impact parameter:
+- `r ≤ sqrt(core_radius_sq)` → use `core_dose` (constant, equals `dose_vec[1]`)
+- `sqrt(core_radius_sq) < r ≤ sqrt(mid_radius_sq)` → log-linear interpolation in `dose_vec`
+- `sqrt(mid_radius_sq) < r < sqrt(penumbra_radius_sq)` → analytic `Kp/r²`
+- `r ≥ sqrt(penumbra_radius_sq)` → zero (beyond penumbra)
+
+`r_lower = max(1e-9, gsm2.rd − 10·Rc)` [µm] — physical lower bound on impact
+parameter. Both `core_radius_sq` and the lookup start use this clamped value for
+consistency (avoids `core_radius_sq = negative^2` when `rd < 10·Rc`).
+
+The threaded loop writes each sample to a per-thread buffer; `sum` over buffers
+merges the non-overlapping index ranges into the final `dose_vec`.
 """
 function _build_lookup(irrad_cond, gsm2, type_AT)
     Rp = irrad_cond[1].Rp
     Rc = irrad_cond[1].Rc
     Kp = irrad_cond[1].Kp
-    Rk = Rp
+    Rk = Rp   # penumbra cutoff for Track struct == penumbra radius
 
-    lower_bound_log    = max(1e-9, gsm2.rd - 10Rc)
-    core_radius_sq     = (gsm2.rd - 10Rc)^2
+    # Consistent lower bound used for both the lookup range and core_radius_sq
+    r_lower            = max(1e-9, gsm2.rd - 10Rc)
+    core_radius_sq     = r_lower^2
     mid_radius_sq      = (gsm2.rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
     sim_     = 1000
-    impact_p = 10 .^ range(log10(lower_bound_log),
+    impact_p = 10 .^ range(log10(r_lower),
                             stop   = log10(gsm2.rd + 150Rc),
                             length = sim_)
 
+    # Thread-local buffers: each index is written by exactly one thread;
+    # summing gives the complete dose_vec (non-overlapping ranges merge cleanly).
     lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
     Threads.@threads for i in 1:sim_
         tid   = Threads.threadid()
         track = Track(impact_p[i], 0.0, Rk)
         _d, _r, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd,
-                                                track, irrad_cond[1], type_AT)
+                                              track, irrad_cond[1], type_AT)
         lookup_threads[tid][i] = Gyr
     end
 
     dose_vec  = sum(lookup_threads)
-    core_dose = dose_vec[1]
+    core_dose = dose_vec[1]   # dose at the closest sampled impact parameter
 
     return (dose_vec, core_dose,
             core_radius_sq, mid_radius_sq, penumbra_radius_sq, Kp,
@@ -187,17 +186,25 @@ end
 
 """
     _gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
-                        core_radius_sq, mid_radius_sq, penumbra_radius_sq,
-                        core_dose, Kp, log_impact_min, log_impact_max) -> Nothing
+                     core_radius_sq, mid_radius_sq, penumbra_radius_sq,
+                     core_dose, Kp, log_impact_min, log_impact_max) -> Nothing
 
-Uploads `(x_list, y_list)` to GPU, launches `_mc_dose_kernel_fast!`, synchronizes,
-and frees temporary device arrays. Zeros `cu_out` before launch.
+Single-batch GPU dose kernel dispatch.
 
-# Example
-```julia
-_gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
-                    cr_sq, mr_sq, pr_sq, core_dose, Kp, lmin, lmax)
-```
+Uploads `x_list`/`y_list` (CPU particle coordinates) to the device as temporary
+`CuArray`s, resets `cu_out` to zero, and launches `_mc_dose_kernel_fast!` with
+`BLOCK_SIZE` threads per block and `⌈total_domains / BLOCK_SIZE⌉` blocks.
+Synchronizes the device and frees the temporary particle arrays after the kernel
+completes. The result is left in `cu_out` for the caller to retrieve.
+
+- `cu_out`             — device output vector [total_domains], overwritten in-place
+- `cu_dom_x/cu_dom_y`  — domain center coordinates on device [total_domains]
+- `x_list/y_list`      — particle hit coordinates on host (uploaded per call)
+- `cu_dose`            — log-spaced lookup table on device [sim_]
+- `*_radius_sq`        — squared radii for core/mid/penumbra region selection
+- `core_dose`          — constant dose in core region (from lookup[1])
+- `Kp`                 — penumbra coefficient for analytic `Kp/r²` fallback
+- `log_impact_min/max` — log10 bounds of the lookup table for interpolation
 """
 function _gpu_run_single!(
     cu_out             :: CuVector{Float64},
@@ -246,24 +253,38 @@ end
 
 """
     MC_dose_fast!(ion, Npar, R_beam, irrad_cond, cell_df_copy,
-                    df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg;
-                    x_cb=0.0, y_cb=0.0)
+                  df_center_x, df_center_y, at, gsm2_cycle, type_AT, track_seg;
+                  x_cb=0.0, y_cb=0.0) -> Nothing
 
-Auto CPU/GPU dispatch wrapper.
+Top-level Monte Carlo dose-deposition driver with automatic CPU/GPU dispatch.
 
-- **GPU path** (`Npar ≥ GPU_PARTICLE_THRESHOLD` AND `CUDA.functional()`):
-    DataFrame→matrix, single CUDA kernel launch (`_mc_dose_kernel_fast!`), matrix→DataFrame, copy-back.
-- **CPU path** (otherwise): calls `MC_loop_ions_domain_tsc_fast!` / `MC_loop_ions_domain_fast!`
-    directly on DataFrames — zero conversion overhead.
+Selects GPU when `CUDA.functional()` and `Npar ≥ GPU_PARTICLE_THRESHOLD`;
+falls back to CPU otherwise. Particle hits are drawn from `Poisson(Npar)` and
+sampled uniformly inside a circle of radius `R_beam` centered at `(x_cb, y_cb)`.
 
-Supports `track_seg=true` (TSC, single representative plane) and
-`track_seg=false` (layered, per-energy-step).
+Two execution modes controlled by `track_seg`:
+- `true`  — **TSC** (Track-Segment): one irradiation condition for the full volume.
+  GPU path passes all domain coordinates without index filtering; CPU path uses
+  representative cells grouped by `(x, y)` position.
+- `false` — **Layered**: iterates over `energy_step` layers, using `irrad_cond[id]`
+  for each layer. Hits are sampled once and reused across all layers.
 
-# Example
-```julia
-MC_dose_fast!(ion, 2_000_000, R_beam, irrad_cond, cell_df,
-                df_center_x, df_center_y, at, gsm2_cycle, "KC", true)
-```
+Mutates in place:
+- `at`           — domain dose values (written by `matrix_to_dataframe!`)
+- `cell_df_copy` — cell-level dose fields (written by `MC_loop_copy_dose_domain*`)
+
+# Arguments
+- `ion`          — `Ion` struct (particle species)
+- `Npar`         — mean number of particles (actual count drawn from `Poisson(Npar)`)
+- `R_beam`       — beam radius [µm]
+- `irrad_cond`   — `Vector{AT}`: one entry per energy step (or just [1] for TSC)
+- `cell_df_copy` — working copy of the cell DataFrame (mutated)
+- `df_center_x/y`— domain center coordinates as DataFrames
+- `at`           — amorphous-track dose DataFrame (mutated)
+- `gsm2_cycle`   — GSM2 parameters per phase; index [1] used for lookup
+- `type_AT`      — radial dose model: `"KC"` or `"LEM"`
+- `track_seg`    — `true` = TSC mode, `false` = layered mode
+- `x_cb/y_cb`   — beam center coordinates [µm]
 """
 function MC_dose_fast!(
     ion          :: Ion,
@@ -294,7 +315,6 @@ function MC_dose_fast!(
     t_start = time()
     gsm2    = gsm2_cycle[1]
 
-    # Helper: select representative cells for a given energy step (or all)
     function _get_representatives(cell_df, energy_step_filter=nothing)
         cell_df_is = if energy_step_filter === nothing
             filter(row -> row.is_cell == 1, cell_df)
@@ -304,7 +324,7 @@ function MC_dose_fast!(
         nrow(cell_df_is) == 0 && return nothing, nothing, nothing, nothing
 
         grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
-                                    :index => first => :representative_index)
+                                  :index => first => :representative_index)
         rep_indices_set = Set(grouped_df.representative_index)
 
         sx = filter(row -> row.index in rep_indices_set, df_center_x)
@@ -313,7 +333,6 @@ function MC_dose_fast!(
         return rep_indices_set, sx, sy, sa
     end
 
-    # Helper: sample Np particle hits (threaded)
     function _sample_hits(Np)
         x_list = Vector{Float64}(undef, Np)
         y_list = Vector{Float64}(undef, Np)
@@ -328,18 +347,27 @@ function MC_dose_fast!(
     # ─────────────────────────────────────────────────────────────────────────
     if track_seg
 
-        _, sx, sy, at_single = _get_representatives(cell_df_copy)
-        sx === nothing && (@warn "No cells with is_cell=1 → skipping."; return)
-
         if use_gpu
             println("• [GPU] TSC mode")
 
+            # Pass df_center_x / df_center_y / at in full — no index filtering.
+            # Filtering by representative indices from cell_df_copy causes
+            # empty matrices (total_domains = 0) when cell_df_copy is a
+            # deepcopy whose .index values differ from the pre-built at DataFrame.
+            # The original working top-level scripts always pass full DataFrames.
             dose_vec, core_dose, cr_sq, mr_sq, pr_sq, Kp, lmin, lmax =
                 _build_lookup([irrad_cond[1]], gsm2, type_AT)
 
-            mat_x, mat_y, mat_at = dataframes_to_matrices(sx, sy, at_single)
+            mat_x, mat_y, mat_at = dataframes_to_matrices(df_center_x,
+                                                           df_center_y, at)
             num_cells, num_dom   = size(mat_x)
             total_domains        = num_cells * num_dom
+
+            println("   Domains: $num_cells cells × $num_dom domains = $total_domains")
+            if total_domains == 0
+                @warn "dataframes_to_matrices returned empty matrices — check df_center_x/at."
+                return
+            end
 
             cu_dom_x = CuArray(vec(mat_x'))
             cu_dom_y = CuArray(vec(mat_y'))
@@ -351,10 +379,10 @@ function MC_dose_fast!(
             x_list, y_list = _sample_hits(Np)
 
             _gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
-                                cr_sq, mr_sq, pr_sq, core_dose, Kp, lmin, lmax)
+                             cr_sq, mr_sq, pr_sq, core_dose, Kp, lmin, lmax)
 
             mat_at .= reshape(Array(cu_out), num_dom, num_cells)'
-            matrix_to_dataframe!(at_single, mat_at)
+            matrix_to_dataframe!(at, mat_at)
 
         else
             println("• [CPU] TSC mode")
@@ -362,7 +390,7 @@ function MC_dose_fast!(
             nrow(cell_df_is) == 0 && (@warn "No cells with is_cell = 1 → skipping."; return)
 
             grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
-                                    :index => first => :representative_index)
+                                      :index => first => :representative_index)
             rep_indices_set = Set(grouped_df.representative_index)
             println("  → Found $(length(rep_indices_set)) representative cells")
 
@@ -370,17 +398,29 @@ function MC_dose_fast!(
             cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
             at_single        = filter(row -> row.index in rep_indices_set, at)
 
-            mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+            mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x,
+                                                           cell_df_single_y,
+                                                           at_single)
 
+            # ── FIX: pass track_seg as the required 12th Bool argument ────────
             MC_loop_ions_domain_tsc_matrix!(
                 Npar, x_cb, y_cb, [irrad_cond[1]], gsm2,
-                mat_x, mat_y, mat_at, R_beam, type_AT, ion
+                mat_x, mat_y, mat_at, R_beam, type_AT, ion, track_seg
             )
+            # ─────────────────────────────────────────────────────────────────
 
             matrix_to_dataframe!(at_single, mat_at)
+
+            # CPU path done — fall through to the unified copy-back below
         end
 
-        MC_loop_copy_dose_domain_fast!(cell_df_copy, at_single, at)
+        # Unified copy-back for both paths:
+        # GPU path: `at` was updated in-place by matrix_to_dataframe!
+        # CPU path: `at_single` results were written back into `at` rows by
+        #           matrix_to_dataframe!(at_single, ...) — at_single is a
+        #           filtered view sharing the same underlying row objects,
+        #           so `at` already contains the updated values.
+        MC_loop_copy_dose_domain_fast!(cell_df_copy, at, at)
 
     # ─────────────────────────────────────────────────────────────────────────
     # LAYERED (non-TSC) branch
@@ -412,41 +452,40 @@ function MC_dose_fast!(
                 cu_out   = CUDA.zeros(Float64, total_domains)
 
                 _gpu_run_single!(cu_out, cu_dom_x, cu_dom_y, x_list, y_list, cu_dose,
-                                    cr_sq, mr_sq, pr_sq, core_dose, Kp, lmin, lmax)
+                                 cr_sq, mr_sq, pr_sq, core_dose, Kp, lmin, lmax)
 
                 mat_at .= reshape(Array(cu_out), num_dom, num_cells)'
                 matrix_to_dataframe!(at_single, mat_at)
                 MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_copy, at_single, at, id)
             end
+
         else
             println("• [CPU] non-TSC mode")
 
             Np = rand(Poisson(Npar))
             println("• Sampling $Np particle hits...")
-
-            x_list = Vector{Float64}(undef, Np)
-            y_list = Vector{Float64}(undef, Np)
-            Threads.@threads for ip in 1:Np
-                x_list[ip], y_list[ip] = GenerateHit_Circle(x_cb, y_cb, R_beam)
-            end
+            x_list, y_list = _sample_hits(Np)
 
             for id in unique(cell_df_copy.energy_step)
                 println("  → Layer $id")
-                cell_df_is = filter(row -> (row.is_cell == 1) && (row.energy_step == id), cell_df_copy)
+                cell_df_is = filter(row -> (row.is_cell == 1) &&
+                                           (row.energy_step == id), cell_df_copy)
                 if nrow(cell_df_is) == 0
                     println("    (empty → skip)")
                     continue
                 end
 
                 grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
-                                        :index => first => :representative_index)
+                                          :index => first => :representative_index)
                 rep_indices_set = Set(grouped_df.representative_index)
 
                 cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
                 cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
                 at_single        = filter(row -> row.index in rep_indices_set, at)
 
-                mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+                mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x,
+                                                               cell_df_single_y,
+                                                               at_single)
 
                 MC_loop_ions_domain_matrix!(
                     x_list, y_list, [irrad_cond[id]], gsm2,
