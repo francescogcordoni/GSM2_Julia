@@ -10,3 +10,5 @@ include(joinpath(@__DIR__, "..", "src", "utilities_AT_computation.jl"))
 include(joinpath(@__DIR__, "..", "src", "utilities_plot.jl"))
 include(joinpath(@__DIR__, "..", "src", "utilities_abm.jl"))
 include(joinpath(@__DIR__, "..", "src", "utilities_plot_abm.jl"))
+#new
+include(joinpath(@__DIR__, "..", "src", "utilities_TCP_NTCP.jl"))

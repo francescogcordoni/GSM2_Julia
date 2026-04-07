@@ -234,7 +234,8 @@ function MC_dose_CPU!(
     )
     println("\n───────────────────────────────────────────────")
     println("🔧  Running MC_dose_fast!   (track_seg = $track_seg)")
-    println("───────────────────────────────────────────────")
+    println("───
+    ────────────────────────────────────────────")
 
     t_start = time()
     gsm2 = gsm2_cycle[1]
@@ -1193,3 +1194,483 @@ function MC_precompute_lut!(
     return lut
 end
 
+# NTCP - PI
+# Old method - correct version
+function MC_dose_fast_sim1voxel_NTCP!(ion::Ion, Npar::Int64, x_cb::Float64, y_cb::Float64, R_beam::Float64, irrad_cond::Vector{AT},
+                    cell_df_first_voxel_copy::DataFrame, df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+                    gsm2::GSM2, type_AT::String, track_seg::Bool, cell_df_copy::DataFrame, ParIrr::String)
+
+    # Ensure 'at' is initialized (e.g., with zeros) before calling loops
+    # Example: at[:, Not(:index)] .= 0.0
+
+    if track_seg
+        println("Track Segment Enabled (track_seg=true)")
+        # --- Filter for representative layer ---
+        # Find cells that are marked as 'is_cell'
+        cell_df_is = filter(row -> row.is_cell == 1, cell_df_first_voxel_copy)
+        if nrow(cell_df_is) == 0
+            @warn "No cells marked with is_cell=1 found. Cannot perform track segmentat calculation."
+            return # Or handle appropriately
+        end
+        # Group by x,y and get the index of the first cell in each group
+        # Using combine with first assumes the first cell encountered is representative
+        grouped_df = combine(groupby(cell_df_is, [:x, :y]), :index => first => :representative_index)
+
+        # Filter the domain center DataFrames and the target 'at' DataFrame
+        # Use 'in' with Ref() for efficient filtering based on the representative indices
+        rep_indices_set = Set(grouped_df.representative_index)
+        cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+        cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+        at_single = filter(row -> row.index in rep_indices_set, at)
+
+        if nrow(at_single) == 0
+            @warn "No representative cells found after filtering 'at' DataFrame. Check index matching."
+            return
+        end
+
+        # --- Run calculation for representative layer ---
+        # Pass only the first irradiation condition (assuming it's representative for tsc)
+        MC_loop_ions_domain_tsc_fast!(Npar, x_cb, y_cb, [irrad_cond[1]], gsm2, cell_df_single_x, cell_df_single_y, at_single, R_beam, type_AT, ion);
+
+        # --- Copy results and calculate damage ---
+        MC_loop_copy_dose_domain_fast!(cell_df_first_voxel_copy, at_single, at) # Copies from at_single to at AND populates cell_df.dose/dose_cell
+        
+        #row_cell_df = nrow(cell_df_first_voxel_copy)
+        #row_cell_df_copy = Int(nrow(cell_df_copy) ÷ row_cell_df)
+        # ripete cell_df.dose row_cell_df_copy volte (una per ogni blocco)
+        #dose_pattern = vcat([cell_df_first_voxel_copy.dose for _ in 1:row_cell_df_copy]...)
+        #dose_pattern_cell = vcat([cell_df_first_voxel_copy.dose_cell for _ in 1:row_cell_df_copy]...)
+
+        #if ParIrr == "true"
+        #    cell_df_copy[cell_df_copy.i_voxel_z .> 1, :is_cell] .= 0
+        #end
+
+        # assegna la colonna in cell_df_copy
+        #cell_df_copy.dose = ifelse.(cell_df_copy.is_cell .== 1, dose_pattern, dose_pattern.*0.0)
+        #cell_df_copy.dose_cell = ifelse.(cell_df_copy.is_cell .== 1, dose_pattern_cell, dose_pattern_cell.*0.0)
+
+        # -------------------------------------------------
+        # Inizializzazione sicura colonne
+        # -------------------------------------------------
+
+        if :dose_cell ∉ names(cell_df_copy)
+            cell_df_copy.dose_cell = zeros(Float64, nrow(cell_df_copy))
+        end
+
+        if :dose ∉ names(cell_df_copy)
+            cell_df_copy.dose = [Float64[] for _ in 1:nrow(cell_df_copy)]
+        end
+
+        # -------------------------------------------------
+        # Copia dei voxel simulati
+        # -------------------------------------------------
+
+        for z in unique(cell_df_first_voxel_copy.i_voxel_z)
+
+            # voxel simulato (sempre x=1,y=1)
+            ref = cell_df_first_voxel_copy[
+                (cell_df_first_voxel_copy.i_voxel_x .== 1) .&
+                (cell_df_first_voxel_copy.i_voxel_y .== 1) .&
+                (cell_df_first_voxel_copy.i_voxel_z .== z) .&
+                (cell_df_first_voxel_copy.is_cell .== 1),
+                :
+            ]
+
+            if nrow(ref) == 0
+                continue
+            end
+
+            n_cells = nrow(ref)
+
+            # copia su tutti i voxel x,y con lo stesso z
+            for x in unique(cell_df_copy.i_voxel_x)
+                for y in unique(cell_df_copy.i_voxel_y)
+
+                    inds = findall(
+                        (cell_df_copy.i_voxel_x .== x) .&
+                        (cell_df_copy.i_voxel_y .== y) .&
+                        (cell_df_copy.i_voxel_z .== z) .&
+                        (cell_df_copy.is_cell .== 1)
+                    )
+
+                    if length(inds) == 0
+                        continue
+                    end
+
+                    # dose_cell (Float64)
+                    cell_df_copy.dose_cell[inds] .= ref.dose_cell[1:length(inds)]
+
+                    # dose (Vector{Float64})
+                    for i in 1:length(inds)
+                        cell_df_copy.dose[inds[i]] = copy(ref.dose[i])
+                    end
+
+                end
+            end
+
+        end
+
+        # -------------------------------------------------
+        # Gestione ParIrr
+        # -------------------------------------------------
+
+        if ParIrr == "true"
+
+            dose_length = length(cell_df_first_voxel_copy.dose[findfirst(!isempty, cell_df_first_voxel_copy.dose)])
+
+            inds = findall(cell_df_copy.i_voxel_z .> 1)
+
+            cell_df_copy.dose_cell[inds] .= 0.0
+
+            for i in inds
+                cell_df_copy.dose[i] = zeros(Float64, dose_length)
+            end
+
+        end
+
+        # Remove the following # for the original version
+        #MC_loop_damage_domain_fast_NTCP!(ion, cell_df_copy, gsm2) # Calculates damage based on cell_df.dose
+
+    else
+        println("Track Segment Disabled (track_seg=false)")
+
+        Np = rand(Poisson(Npar))
+        x_list = Array{Float64}(undef, Np)
+        y_list = Array{Float64}(undef, Np)
+        @Threads.threads for ip in 1:Np
+            x_list[ip], y_list[ip] = GenerateHit_Circle(x_cb, y_cb, R_beam)
+        end
+
+        for id in unique(cell_df_first_voxel_copy.energy_step)
+            cell_df_is = filter(row -> (row.is_cell == 1) & (row.energy_step == id), cell_df_first_voxel_copy)
+            if (nrow(cell_df_is) != 0)
+                grouped_df = combine(groupby(cell_df_is, [:x, :y]), :index => first => :representative_index)
+
+                rep_indices_set = Set(grouped_df.representative_index)
+                cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+                cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+                at_single = filter(row -> row.index in rep_indices_set, at)
+
+                MC_loop_ions_domain_fast!(x_list, y_list, [irrad_cond[id]], gsm2, cell_df_single_x, cell_df_single_y, at_single, type_AT, ion);
+                MC_loop_copy_dose_domain_layer_fast_notsc!(cell_df_first_voxel_copy, at_single, at, id) 
+            end            
+        end
+        
+        # -------------------------------------------------
+        # Inizializzazione sicura colonne
+        # -------------------------------------------------
+
+        if :dose_cell ∉ names(cell_df_copy)
+            cell_df_copy.dose_cell = zeros(Float64, nrow(cell_df_copy))
+        end
+
+        if :dose ∉ names(cell_df_copy)
+            cell_df_copy.dose = [Float64[] for _ in 1:nrow(cell_df_copy)]
+        end
+
+        # -------------------------------------------------
+        # Copia dei voxel simulati
+        # -------------------------------------------------
+
+        for z in unique(cell_df_first_voxel_copy.i_voxel_z)
+
+            # voxel simulato (sempre x=1,y=1)
+            ref = cell_df_first_voxel_copy[
+                (cell_df_first_voxel_copy.i_voxel_x .== 1) .&
+                (cell_df_first_voxel_copy.i_voxel_y .== 1) .&
+                (cell_df_first_voxel_copy.i_voxel_z .== z) .&
+                (cell_df_first_voxel_copy.is_cell .== 1),
+                :
+            ]
+
+            if nrow(ref) == 0
+                continue
+            end
+
+            n_cells = nrow(ref)
+
+            # copia su tutti i voxel x,y con lo stesso z
+            for x in unique(cell_df_copy.i_voxel_x)
+                for y in unique(cell_df_copy.i_voxel_y)
+
+                    inds = findall(
+                        (cell_df_copy.i_voxel_x .== x) .&
+                        (cell_df_copy.i_voxel_y .== y) .&
+                        (cell_df_copy.i_voxel_z .== z) .&
+                        (cell_df_copy.is_cell .== 1)
+                    )
+
+                    if length(inds) == 0
+                        continue
+                    end
+
+                    # dose_cell (Float64)
+                    cell_df_copy.dose_cell[inds] .= ref.dose_cell[1:length(inds)]
+
+                    # dose (Vector{Float64})
+                    for i in 1:length(inds)
+                        cell_df_copy.dose[inds[i]] = copy(ref.dose[i])
+                    end
+
+                end
+            end
+
+        end
+
+        # -------------------------------------------------
+        # Gestione ParIrr
+        # -------------------------------------------------
+
+        if ParIrr == "true"
+
+            dose_length = length(cell_df_first_voxel_copy.dose[findfirst(!isempty, cell_df_first_voxel_copy.dose)])
+
+            inds = findall(cell_df_copy.i_voxel_z .> 1)
+
+            cell_df_copy.dose_cell[inds] .= 0.0
+
+            for i in inds
+                cell_df_copy.dose[i] = zeros(Float64, dose_length)
+            end
+
+        end
+
+        # Remove the following # for the original version
+        #MC_loop_damage_domain_fast_NTCP!(ion, cell_df_copy, gsm2)
+    end
+    println("MC_dose_fast! finished.")
+end
+
+# Old method - correct version
+function MC_loop_ions_domain_tsc_fast!(Npar::Int, x_cb::Float64, y_cb::Float64, irrad_cond::Vector{AT}, gsm2::GSM2,
+                            df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+                            R_beam::Float64, type_AT::String, ion::Ion)
+
+    Rp = irrad_cond[1].Rp
+    Rc = irrad_cond[1].Rc
+    Kp = irrad_cond[1].Kp
+    Rk = Rp # Assuming Rk = Rp as in the original snippet
+
+    lower_bound_log = max(1e-9, gsm2.rd - 10 * Rc)
+    core_radius_sq = (gsm2.rd - 10 * Rc)^2 # Squared core boundary for distance check
+    mid_radius_sq = (gsm2.rd + 150 * Rc)^2 # Squared mid boundary for distance check
+    penumbra_radius_sq = Rp^2             # Squared penumbra boundary
+
+    sim_ = 1000
+    if lower_bound_log <= 0
+        error("Lower bound for impact_p calculation is non-positive.")
+    end
+    impact_p = 10 .^ range(log10(lower_bound_log), stop=log10(gsm2.rd + 150 * Rc), length=sim_)
+    dose_cell_lookup = zeros(Float64, sim_)
+
+    dose_cell_lookup_threads = [zeros(Float64, sim_) for _ in 1:nthreads()]
+
+    @Threads.threads for i in 1:sim_
+        tid = Threads.threadid()
+        track = Track(impact_p[i], 0.0, Rk)
+        _dose, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
+        dose_cell_lookup_threads[tid][i] = Gyr
+    end
+    dose_cell_lookup = sum(dose_cell_lookup_threads)
+
+    impact_vec = impact_p
+    dose_vec = dose_cell_lookup
+    core_dose = dose_vec[1] # Dose for distances <= core_radius
+
+    num_domains_per_cell = size(df_center_x, 2) - 1
+    num_cells = size(df_center_x, 1)
+    total_domains = num_cells * num_domains_per_cell
+
+    dom_x_row = Vector{Float64}(undef, total_domains)
+    dom_y_row = Vector{Float64}(undef, total_domains)
+    idx = 1
+    for r in 1:num_cells
+        for c in 1:num_domains_per_cell
+            dom_x_row[idx] = df_center_x[r, c]
+            dom_y_row[idx] = df_center_y[r, c]
+            idx += 1
+        end
+    end
+    
+    at_row_accumulators = [zeros(Float64, total_domains) for _ in 1:nthreads()]
+
+    Np = rand(Poisson(Npar))
+    println("Monte Carlo Loop ", Np, " particles of ", ion.ion)
+
+    @Threads.threads for _ in 1:Np
+        tid = Threads.threadid()
+        local_at_row = at_row_accumulators[tid] # Get thread-local accumulator
+
+        x, y = GenerateHit_Circle(x_cb, y_cb, R_beam)
+        
+        for k in 1:total_domains
+            # Calculate squared distance first
+            dist_sq = (dom_x_row[k] - x)^2 + (dom_y_row[k] - y)^2
+
+            if dist_sq <= core_radius_sq
+                local_at_row[k] += core_dose
+            elseif dist_sq <= mid_radius_sq
+                dist = sqrt(dist_sq) # Calculate sqrt only when needed
+
+                idx_lookup = searchsortedfirst(impact_vec, dist)
+
+                if idx_lookup == 1
+                    local_at_row[k] += core_dose # Or dose_vec[1]
+                elseif idx_lookup > length(impact_vec)
+                    local_at_row[k] += dose_vec[end]
+                else
+                    x1, x2 = impact_vec[idx_lookup - 1], impact_vec[idx_lookup]
+                    y1, y2 = dose_vec[idx_lookup - 1], dose_vec[idx_lookup]
+                    interpolated_dose = y1 + (y2 - y1) * (dist - x1) / (x2 - x1)
+                    local_at_row[k] += interpolated_dose
+                end
+            elseif dist_sq < penumbra_radius_sq # Penumbra region (use < Rp^2)
+                local_at_row[k] += Kp / dist_sq
+            end
+        end
+    end
+
+    final_at_row = sum(at_row_accumulators)
+
+    idx = 1
+    for r in 1:num_cells
+        for c in 1:num_domains_per_cell
+            at[r, c] = final_at_row[idx] # Or += if 'at' had initial values
+            idx += 1
+        end
+    end
+
+    println("Finished Monte Carlo Loop")
+end
+
+# New method
+function MC_dose_CPU_sim1voxel!(
+    ion::Ion, Npar::Int64, R_beam::Float64,
+    irrad_cond::Vector{AT}, cell_df_copy::DataFrame,
+    df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+    gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool, cell_df_first_voxel_copy::DataFrame, ParIrr::String;
+    x_cb::Float64 = 0., y_cb::Float64 = 0., single_particle = false
+    )
+    println("\n───────────────────────────────────────────────")
+    println("🔧  Running MC_dose_fast!   (track_seg = $track_seg)")
+    println("───
+    ────────────────────────────────────────────")
+
+    t_start = time()
+    gsm2 = gsm2_cycle[1]
+
+    if track_seg
+        println("• Mode: Track-Segment Matrix Optimization")
+
+        cell_df_is = filter(row -> row.is_cell == 1, cell_df_first_voxel_copy)
+        nrow(cell_df_is) == 0 && (@warn "No cells with is_cell = 1 → skipping."; return)
+
+        grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
+                                    :index => first => :representative_index)
+        rep_indices_set = Set(grouped_df.representative_index)
+        println("  → Found $(length(rep_indices_set)) representative cells")
+
+        cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+        cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+        at_single        = filter(row -> row.index in rep_indices_set, at)
+
+        mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
+
+        MC_loop_ions_domain_tsc_matrix!(
+            Npar, x_cb, y_cb, [irrad_cond[1]], gsm2,
+            mat_x, mat_y, mat_at, R_beam, type_AT, ion,
+            single_particle
+        )
+
+        matrix_to_dataframe!(at_single, mat_at)
+        MC_loop_copy_dose_domain_fast!(cell_df_first_voxel_copy, at_single, at)
+
+                # -------------------------------------------------
+        # Inizializzazione sicura colonne
+        # -------------------------------------------------
+
+        if :dose_cell ∉ names(cell_df_copy)
+            cell_df_copy.dose_cell = zeros(Float64, nrow(cell_df_copy))
+        end
+
+        if :dose ∉ names(cell_df_copy)
+            cell_df_copy.dose = [Float64[] for _ in 1:nrow(cell_df_copy)]
+        end
+
+        # -------------------------------------------------
+        # Copia dei voxel simulati
+        # -------------------------------------------------
+
+        for z in unique(cell_df_first_voxel_copy.i_voxel_z)
+
+            # voxel simulato (sempre x=1,y=1)
+            ref = cell_df_first_voxel_copy[
+                (cell_df_first_voxel_copy.i_voxel_x .== 1) .&
+                (cell_df_first_voxel_copy.i_voxel_y .== 1) .&
+                (cell_df_first_voxel_copy.i_voxel_z .== z) .&
+                (cell_df_first_voxel_copy.is_cell .== 1),
+                :
+            ]
+
+            if nrow(ref) == 0
+                continue
+            end
+
+            n_cells = nrow(ref)
+
+            # copia su tutti i voxel x,y con lo stesso z
+            for x in unique(cell_df_copy.i_voxel_x)
+                for y in unique(cell_df_copy.i_voxel_y)
+
+                    inds = findall(
+                        (cell_df_copy.i_voxel_x .== x) .&
+                        (cell_df_copy.i_voxel_y .== y) .&
+                        (cell_df_copy.i_voxel_z .== z) .&
+                        (cell_df_copy.is_cell .== 1)
+                    )
+
+                    if length(inds) == 0
+                        continue
+                    end
+
+                    # dose_cell (Float64)
+                    cell_df_copy.dose_cell[inds] .= ref.dose_cell[1:length(inds)]
+
+                    # dose (Vector{Float64})
+                    for i in 1:length(inds)
+                        cell_df_copy.dose[inds[i]] = copy(ref.dose[i])
+                    end
+
+                end
+            end
+
+        end
+
+        # -------------------------------------------------
+        # Gestione ParIrr
+        # -------------------------------------------------
+
+        if ParIrr == "true"
+
+            dose_length = length(cell_df_first_voxel_copy.dose[findfirst(!isempty, cell_df_first_voxel_copy.dose)])
+
+            inds = findall(cell_df_copy.i_voxel_z .> 1)
+
+            cell_df_copy.dose_cell[inds] .= 0.0
+
+            for i in inds
+                cell_df_copy.dose[i] = zeros(Float64, dose_length)
+            end
+
+        end
+
+    else
+        println("• Warning: track_seg = false is not yet implemented.")
+
+    end
+
+    dt = round(time() - t_start; digits=3)
+    println("───────────────────────────────────────────────")
+    println("🎉 MC_dose! finished. Total time: $(dt)s")
+    println("───────────────────────────────────────────────\n")
+end
