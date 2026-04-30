@@ -276,10 +276,10 @@ p_phase_compare = plot(p_phase_init, p_phase_irrad; layout=(1, 2), size=(1000, 4
 
 println("\n--- Stochastic repair and death timers ---")
 @time compute_times_domain!(cell_df, gsm2_cycle;
-                             nat_apo       = NAT_APO,
-                             terminal_time = TERMINAL_TIME,
-                             verbose       = false,
-                             summary       = true)
+                                nat_apo       = NAT_APO,
+                                terminal_time = TERMINAL_TIME,
+                                verbose       = false,
+                                summary       = true)
 
 # ── Plot 9 — timer densities (death / recovery / cycle / X-damage) ───────────
 p_times = plot_times(cell_df; show_means=true, summary=true)
@@ -306,7 +306,7 @@ print_simulation_summary(ts)
 
 # Convert snapshots to DataFrames for plotting
 snap_df = Dict(t => to_dataframe(snaps[t]; alive_only=true)
-               for t in SNAPSHOT_HOURS if haskey(snaps, t))
+                for t in SNAPSHOT_HOURS if haskey(snaps, t))
 
 # ============================================================================
 # 7. OUTPUT — time-series plots
@@ -362,9 +362,9 @@ p_before_final = plot_phase_comparison_before_after(cell_df_pristine, cell_df)
 # ── Plot 25 — spatial distribution at t=0 and final snapshot ─────────────────
 t_last     = maximum(keys(snap_df))
 p_sp_init  = plot_spatial_distribution(cell_df_pristine;
-                 color_by=:cell_cycle, title_text="Spatial – pre-irradiation")
+                    color_by=:cell_cycle, title_text="Spatial – pre-irradiation")
 p_sp_final = plot_spatial_distribution(snap_df[t_last];
-                 color_by=:cell_cycle, title_text="Spatial – t=$(t_last)h")
+                    color_by=:cell_cycle, title_text="Spatial – t=$(t_last)h")
 p_spatial  = plot(p_sp_init, p_sp_final; layout=(1, 2), size=(1200, 500))
 
 # ── Plot 27 — 3-D phase animation over all snapshots ─────────────────────────
