@@ -58,7 +58,7 @@ ENERGY_MEV_U  = 80.0     # kinetic energy per nucleon (MeV/u)
 DOSE_GY       = 1.       # prescribed dose (Gy)
 
 # Spheroid and cell geometry
-TUMOR_RADIUS  = 550.0     # spheroid radius (µm)
+TUMOR_RADIUS  = 350.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
 X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)
@@ -152,8 +152,6 @@ setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 
 # Assign oxygenation (pO₂) profile across the spheroid
 set_oxygen!(cell_df; plot_oxygen=true)
-
-using StatsPlots
 
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)
