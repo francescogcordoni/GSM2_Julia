@@ -58,9 +58,9 @@ ENERGY_MEV_U  = 80.0     # kinetic energy per nucleon (MeV/u)
 DOSE_GY       = 1.       # prescribed dose (Gy)
 
 # Spheroid and cell geometry
-TUMOR_RADIUS  = 350.0     # spheroid radius (µm)
+TUMOR_RADIUS  = 550.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
-X_BOX         = 350.0     # simulation box half-size (µm); match TUMOR_RADIUS
+X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)
 
 # GSM2 domain geometry
@@ -153,6 +153,8 @@ setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 # Assign oxygenation (pO₂) profile across the spheroid
 set_oxygen!(cell_df; plot_oxygen=true)
 
+using StatsPlots
+
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)
 println("Spheroid: $N_init cells")
@@ -197,6 +199,20 @@ println("\n--- Poisson DNA damage sampling ---")
 
 # ── Plot 4 — dose distribution (density + 3-D spatial) ───────────────────────
 p_dose = plot_scalar_cell(cell_df, :dose_cell)
+
+p = density(
+    cell_df.dose_cell[cell_df.is_cell .== 1],
+    xlabel = "Dose [Gy]",
+    ylabel = "Density",
+    dpi = 600, legend = false
+)
+savefig(p, "dose_density.pdf")
+savefig(p, "dose_density.png")
+
+using StatsPlots
+
+histogram(cell_df.dose_cell[cell_df.is_cell .== 1])
+
 
 # ── Plot 5 — dose grouped by energy step (depth layers) ──────────────────────
 p_dose_layer = plot_scalar_cell(cell_df, :dose_cell; layer_plot=true)
@@ -251,7 +267,7 @@ cell_df_irradiated = deepcopy(cell_df)
 # (Phase assignments do not change during irradiation — the shift visible here
 #  reflects cells that received lethal dose and will be removed by the ABM.)
 p_phase_irrad   = plot_phase_proportions_alive(cell_df_irradiated;
-                      title_text="Phase distribution – post-irradiation")
+                        title_text="Phase distribution – post-irradiation")
 p_phase_compare = plot(p_phase_init, p_phase_irrad; layout=(1, 2), size=(1000, 400))
 
 # ============================================================================
