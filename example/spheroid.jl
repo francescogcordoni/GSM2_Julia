@@ -198,20 +198,6 @@ println("\n--- Poisson DNA damage sampling ---")
 # ── Plot 4 — dose distribution (density + 3-D spatial) ───────────────────────
 p_dose = plot_scalar_cell(cell_df, :dose_cell)
 
-p = density(
-    cell_df.dose_cell[cell_df.is_cell .== 1],
-    xlabel = "Dose [Gy]",
-    ylabel = "Density",
-    dpi = 600, legend = false
-)
-savefig(p, "dose_density.pdf")
-savefig(p, "dose_density.png")
-
-using StatsPlots
-
-histogram(cell_df.dose_cell[cell_df.is_cell .== 1])
-
-
 # ── Plot 5 — dose grouped by energy step (depth layers) ──────────────────────
 p_dose_layer = plot_scalar_cell(cell_df, :dose_cell; layer_plot=true)
 
