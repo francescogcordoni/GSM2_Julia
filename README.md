@@ -320,7 +320,7 @@ Assign stochastic repair, death, and cycle times to each cell before the ABM:
 
 ```julia
 compute_times_domain!(cell_df, gsm2_cycle;
-                      nat_apo       = 1e-10,   # natural apoptosis rate (h⁻¹)
+                      nat_apo       = 1e-10,   # non-radiation apoptosis rate (h⁻¹) (currently not used)
                       terminal_time = 72.0,    # ABM window (h)
                       verbose       = false,
                       summary       = true)
