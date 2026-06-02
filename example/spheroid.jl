@@ -53,9 +53,9 @@ sp = load_stopping_power()
 # ============================================================================
 
 # Irradiation
-PARTICLE      = "12C"      # ion species: "1H", "4He", "12C", "16O"
-ENERGY_MEV_U  = 80.0     # kinetic energy per nucleon (MeV/u)
-DOSE_GY       = 1.       # prescribed dose (Gy)
+PARTICLE      = "1H"      # ion species: "1H", "4He", "12C", "16O"
+ENERGY_MEV_U  = 5.0      # kinetic energy per nucleon (MeV/u)
+DOSE_GY       = 1.        # prescribed dose (Gy)
 
 # Spheroid and cell geometry
 TUMOR_RADIUS  = 350.0     # spheroid radius (µm)
@@ -76,7 +76,7 @@ const A_AVG= 0.01481;  const B_AVG= 0.01266;  const R_AVG= 2.5657
 
 # Simulation options
 const TYPE_AT        = "KC"         # track structure: "KC" (Kiefer-Chatterjee) or "LEM"
-const TRACK_SEG      = true         # true = fixed LET across depth (no Bragg-peak buildup)
+const TRACK_SEG      = false         # true = fixed LET across depth (no Bragg-peak buildup)
 const TARGET_GEOM    = "circle"     # spheroid cross-section for beam geometry
 const CALC_TYPE      = "full"       # beam radius mode: "full" (whole spheroid) or "fast"
 const TERMINAL_TIME  = 72.0         # post-irradiation ABM window (h)
@@ -151,7 +151,7 @@ setup_cell_population!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide,
 setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 
 # Assign oxygenation (pO₂) profile across the spheroid
-set_oxygen!(cell_df; plot_oxygen=true)
+set_oxygen!(cell_df; plot_oxygen = true)
 
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)

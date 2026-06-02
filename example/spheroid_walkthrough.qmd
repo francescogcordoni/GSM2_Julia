@@ -1,0 +1,834 @@
+---
+title: "Tumour Spheroid Irradiation with GSM²-ABM"
+subtitle: "A walkthrough of the spheroid irradiation example from the GSM2_Julia package"
+author: "Francesco G. Cordoni"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    code-fold: true
+    code-tools: true
+    code-copy: true
+    highlight-style: github
+    embed-resources: true
+    fig-align: center
+    number-sections: true
+execute:
+  eval: true
+  echo: true
+  cache: true
+---
+
+## Overview {.unnumbered}
+
+This document walks through the
+[`spheroid.jl`](https://github.com/francescogcordoni/GSM2_Julia/blob/main/example/spheroid.jl)
+example from the [GSM2_Julia](https://github.com/francescogcordoni/GSM2_Julia)
+repository. The example simulates the irradiation of a three-dimensional tumour
+spheroid with a charged-particle beam, followed by an agent-based model (ABM)
+simulation of post-irradiation cell dynamics over a 72-hour window.
+
+The pipeline combines two modelling components:
+
+- **GSM²** (Generalized Stochastic Microdosimetric Model): a fully probabilistic
+  framework for radiation-induced DNA damage induction, repair, and misrepair,
+  resolved at the single-cell and subnuclear scale.
+- **ABM** (Agent-Based Model): an event-driven continuous-time Markov simulation
+  of cell-cycle progression, proliferation, migration, and death following
+  irradiation.
+
+Together, these two components provide a mechanistic, single-cell account of
+tumour response to particle irradiation, from the physics of energy deposition
+to the long-term evolution of the surviving cell population.
+
+The full simulation pipeline is illustrated below.
+
+```{mermaid}
+flowchart TD
+    A["🔧 1. Parameters\nparticle · energy · dose · geometry"]
+    B["⚙️ 2. Setup\nGSM² · lattice · population · O₂"]
+    C["☢️ 3. Monte Carlo dose deposition\nAmorphous Track model"]
+    D["🧬 4. DNA damage sampling\nPoisson lesion induction"]
+    E["📊 5. GSM² survival probability\nper-cell stochastic SSA"]
+    F["⏱️ 6. Stochastic timers\nrepair · death · cycle"]
+    G["🔬 7. ABM simulation\ncell dynamics over 72 h"]
+    H["📈 8. Output\nplots · CSVs · snapshots"]
+
+    A --> B --> C --> D --> E --> F --> G --> H
+
+    style A fill:#dbeafe,stroke:#3b82f6
+    style B fill:#dbeafe,stroke:#3b82f6
+    style C fill:#fee2e2,stroke:#ef4444
+    style D fill:#fee2e2,stroke:#ef4444
+    style E fill:#fef9c3,stroke:#eab308
+    style F fill:#fef9c3,stroke:#eab308
+    style G fill:#dcfce7,stroke:#22c55e
+    style H fill:#dcfce7,stroke:#22c55e
+```
+
+---
+
+## Setup
+
+Load packages and source utilities. This is the same pattern used by every other
+script in the repository.
+
+```{julia}
+#| label: setup
+#| output: false
+
+# Switch to the global Julia environment where all simulation packages are installed
+import Pkg
+Pkg.activate(joinpath(homedir(), ".julia", "environments",
+                      "v$(VERSION.major).$(VERSION.minor)"))
+
+# Load packages in Main.Notebook
+using Base.Threads, Distributed
+using CSV, DataFrames, Distributions, Random
+using Plots, StatsPlots, Statistics, StatsBase
+using ProgressBars, ProgressMeter
+using GLM, Optim, LsqFit
+using JLD2, DelimitedFiles
+using InlineStrings, SparseArrays, Printf, CUDA
+using Statistics: mean
+
+# Force GR headless mode before any plot is created
+ENV["GKSwstype"] = "100"
+
+# Load packages in Main as well (utility functions defined there need them)
+@eval Main begin
+    using Base.Threads, Distributed, CSV, DataFrames, Distributions, Random
+    using Plots, StatsPlots, Statistics, StatsBase, ProgressBars, ProgressMeter
+    using GLM, Optim, LsqFit, JLD2, DelimitedFiles
+    using InlineStrings, SparseArrays, Printf, CUDA
+    using Statistics: mean
+end
+
+# Include utilities into Main so that functions and @eval Main injections share scope
+Base.include(Main, joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
+
+# Import all types from Main into Main.Notebook
+using Main: GSM2, Ion, Irrad, AT, Cell, CellPopulation, SimulationTimeSeries, Voxel, Track
+
+# Import all utility + plot functions from Main into Main.Notebook so they can
+# be called without the Main. prefix, and all @eval Main globals remain consistent
+import Main: setup_GSM2!, setup_IonIrrad!, setup_cell_lattice!, setup_cell_population!,
+             setup_irrad_conditions!, set_oxygen!, calculate_beam_properties,
+             load_stopping_power,
+             print_phase_distribution, print_simulation_summary, survival_ci,
+             MC_dose_CPU!, MC_loop_damage!,
+             compute_cell_survival_GSM2!, compute_times_domain!, run_simulation_abm!,
+             to_dataframe, deepcopy,
+             plot_cell_cycle_distribution, plot_phase_proportions_alive,
+             plot_scalar_cell, plot_damage, plot_times, plot_initial_distributions,
+             plot_cell_dynamics, plot_phase_dynamics, plot_phase_proportions,
+             plot_phase_stacked, plot_cycling_vs_quiescent, plot_growth_rate,
+             plot_stem_dynamics, plot_simulation_results, plot_analysis_dashboard,
+             plot_phase_proportions_timeseries, plot_phase_duration_distribution,
+             plot_snapshot_comparison, plot_phase_comparison_before_after,
+             plot_spatial_distribution, create_spatial_animation
+
+# Load stopping power and make it available in Main (needed by setup_IonIrrad!)
+sp = load_stopping_power()
+@eval Main sp = $sp
+
+gr()
+println("Threads available: ", nthreads())
+```
+
+::: {.callout-tip}
+## Running the full example from the command line
+
+```bash
+julia --threads auto example/spheroid.jl
+```
+
+Or from an interactive session:
+
+```julia
+include("example/spheroid.jl")
+```
+
+Make sure all packages listed in `spheroid.jl` are installed in your Julia environment
+before running.
+:::
+
+---
+
+## Irradiation parameters
+
+All user-facing parameters are collected in one block. Changing the irradiation
+condition requires editing only this block — no other part of the code needs to
+be modified.
+
+```{julia}
+#| label: parameters
+#| output: false
+
+PARTICLE      = "12C"
+ENERGY_MEV_U  = 80.0
+DOSE_GY       = 1.0
+
+TUMOR_RADIUS  = 350.0
+R_CELL        = 15.0
+X_BOX         = 550.0
+X_VOXEL       = 700.0
+
+RD            = 0.8
+RN            = 7.2
+
+TYPE_AT       = "KC"
+TRACK_SEG     = false
+TARGET_GEOM   = "circle"
+CALC_TYPE     = "full"
+TERMINAL_TIME = 72.0
+SNAPSHOT_HOURS = [0, 6, 12, 24, 48, 72]
+NAT_APO       = 1e-10
+
+OUTDIR = joinpath(@__DIR__, "output", "spheroid")
+mkpath(OUTDIR)
+```
+
+::: {.callout-tip}
+## Switching particle species
+Changing `PARTICLE` from `"1H"` to `"12C"` and adjusting `ENERGY_MEV_U` is all
+that is needed. LET, fluence, and Amorphous Track parameters are computed
+automatically from the stopping-power tables.
+:::
+
+---
+
+## Phase-specific GSM² parameters
+
+The GSM² model assigns three rate constants to each cell-cycle phase: the repair
+rate $r$, the sublethal-to-lethal conversion rate $a$, and the binary misrepair
+rate $b$. These are calibrated to reproduce the phase-specific LQ parameters
+reported by Sinclair (1966).
+
+```{julia}
+#| label: gsm2-params
+#| output: false
+
+A_G1 = 0.01287;  B_G1 = 0.04030;  R_G1 = 2.7805
+A_S  = 0.00589;  B_S  = 0.05794;  R_S  = 5.8401
+A_G2 = 0.02431;  B_G2 = 5.705e-5; R_G2 = 1.7720
+A_AVG= 0.01481;  B_AVG= 0.01266;  R_AVG= 2.5657
+```
+
+| Phase  | $\alpha$ (Gy⁻¹) | $\beta$ (Gy⁻²) | Radiosensitivity   |
+|--------|-----------------|----------------|--------------------|
+| G₁     | 0.351           | 0.040          | Moderate           |
+| S      | 0.124           | 0.029          | Most resistant     |
+| G₂/M   | 0.793           | 0.000          | Most sensitive     |
+
+: Phase-specific LQ parameters used for GSM² calibration. {.striped .hover}
+
+The purely linear response in G₂/M ($\beta = 0$) reflects the dominance of
+single-track lethal events, reproduced in GSM² by a near-zero binary misrepair
+rate $b$.
+
+---
+
+## Spheroid setup
+
+The setup stage builds the three-dimensional cell lattice, assigns biological
+attributes to each cell (cycle phase, oxygenation, damage vectors, neighbour
+lists), and computes the beam geometry.
+
+```{julia}
+#| label: setup-simulation
+#| output: true
+
+gsm2_cycle    = Array{GSM2}(undef, 4)
+gsm2_cycle[1] = GSM2(R_G1, A_G1, B_G1, RD, RN)
+gsm2_cycle[2] = GSM2(R_S,  A_S,  B_S,  RD, RN)
+gsm2_cycle[3] = GSM2(R_G2, A_G2, B_G2, RD, RN)
+gsm2_cycle[4] = GSM2(R_AVG, A_AVG, B_AVG, RD, RN)
+
+# setup_* functions are in Main; they inject globals into Main via @eval Main
+setup_GSM2!(R_AVG, A_AVG, B_AVG, RD, RN)
+setup_IonIrrad!(DOSE_GY, ENERGY_MEV_U, PARTICLE; type_AT=TYPE_AT)
+
+N_sideVox   = Int(floor(2 * X_BOX / X_VOXEL))
+N_CellsSide = 2 * convert(Int64, floor(X_BOX / (2 * R_CELL)))
+
+setup_cell_lattice!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide;
+                    ParIrr="false", track_seg=TRACK_SEG, full_cycle=true)
+
+# Inject spatial geometry into Main (setup_cell_population! reads these from Main)
+@eval Main begin
+    tumor_radius = $TUMOR_RADIUS
+    X_voxel      = $X_VOXEL
+    X_box        = $X_BOX
+end
+
+setup_cell_population!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide,
+                        gsm2_cycle[4]; ParIrr="false")
+
+# Sync all globals injected into Main by setup functions into Main.Notebook scope
+for _sym in [:gsm2, :center_x, :center_y, :domain,
+              :type_AT, :dose, :A_, :A, :Z, :LET, :ion, :irrad,
+              :Rc, :Rp, :Rk, :Kp, :DoseRate_h,
+              :N, :nodes_positions, :cell_df, :track_seg, :full_cycle, :ParIrr,
+              :rel_center_x, :rel_center_y, :df_center_x, :df_center_y, :at, :num_cols,
+              :tumor_radius, :X_voxel, :X_box]
+    isdefined(Main, _sym) && @eval $_sym = Main.$_sym
+end
+
+setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
+for _sym in [:irrad_cond, :irrad_cond_original_layers, :lets, :energies, :num_energy_steps]
+    isdefined(Main, _sym) && @eval $_sym = Main.$_sym
+end
+
+set_oxygen!(cell_df; plot_oxygen=false)
+
+N_init = count(cell_df.is_cell .== 1)
+println("Spheroid: $N_init cells")
+print_phase_distribution(cell_df; label="pre-irradiation")
+
+R_beam, x_beam, y_beam = calculate_beam_properties(
+    CALC_TYPE, TARGET_GEOM, X_BOX, X_VOXEL, TUMOR_RADIUS)
+
+F    = irrad.dose / (1.602e-9 * LET)
+Npar = round(Int, F * π * R_beam^2 * 1e-8)
+Npar == 0 && error("Npar = 0: check beam radius and dose settings")
+zF   = irrad.dose / Npar
+
+println("Beam: R_beam = $(round(R_beam, digits=1)) µm  |  Npar = $Npar  |  zF = $(round(zF, digits=5)) Gy")
+
+cell_df_pristine = deepcopy(cell_df)
+```
+
+### Initial cell-cycle distribution
+
+A 3-D half-cut view of the spheroid coloured by cycle phase:
+
+```{julia}
+#| label: fig-cycle-init
+#| fig-cap: "Initial 3-D cell-cycle distribution (half-cut view)."
+#| fig-width: 10
+#| fig-height: 6
+
+display(plot_cell_cycle_distribution(cell_df; phase_plot=false, half_sphere=true))
+```
+
+Phase proportions as a bar chart:
+
+```{julia}
+#| label: fig-phase-init
+#| fig-cap: "Phase proportion bar chart – pre-irradiation."
+#| fig-width: 7
+#| fig-height: 4
+
+display(plot_phase_proportions_alive(cell_df;
+    title_text="Phase distribution – pre-irradiation"))
+```
+
+### Oxygenation model
+
+The oxygen distribution follows a quasi-static, radially symmetric profile with
+three concentric zones:
+
+::: {.callout-note}
+## Oxygen zones
+| Zone | Condition | O₂ level |
+|------|-----------|----------|
+| Normoxic outer shell | depth $\delta < \lambda$ | 7% (surface value) |
+| Hypoxic viable rim | $\lambda \leq \delta < R - r_\mathrm{core}$ | Linear 7% → 0.1% |
+| Necrotic/hypoxic core | $\delta \geq R - r_\mathrm{core}$ | 0.1% (floor) |
+
+The penetration depth is $\lambda = 400\,\mu\mathrm{m}$.
+:::
+
+---
+
+## Monte Carlo dose deposition
+
+Dose deposition uses the Kiefer–Chatterjee parameterisation of the Amorphous
+Track model. Each particle is propagated stochastically and the energy deposited
+in each cell nucleus is computed from the radial dose distribution.
+
+```{julia}
+#| label: mc-dose
+#| cache: true
+
+println("--- Monte Carlo dose deposition ---")
+@time MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df,
+                  df_center_x, df_center_y, at,
+                  gsm2_cycle, TYPE_AT, TRACK_SEG)
+
+println("--- Poisson DNA damage sampling ---")
+@time MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle)
+```
+
+::: {.callout-note}
+## Protons as worst case
+High-energy protons require more particles to deliver the same dose as heavier
+ions, making the Monte Carlo step slower for protons than for carbon at equal dose.
+:::
+
+### Dose distribution
+
+Density of cell-absorbed doses with 3-D spatial map:
+
+```{julia}
+#| label: fig-dose
+#| fig-cap: "Cell dose distribution: density (left) and 3-D spatial map (right)."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_scalar_cell(cell_df, :dose_cell))
+```
+
+Dose split by depth layer, revealing the Bragg-peak buildup:
+
+```{julia}
+#| label: fig-dose-layer
+#| fig-cap: "Cell dose grouped by energy-step (depth) layer."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_scalar_cell(cell_df, :dose_cell; layer_plot=true))
+```
+
+---
+
+## DNA damage sampling
+
+Sublethal ($X$) and lethal ($Y$) lesions are sampled from Poisson distributions
+whose rates are proportional to the local specific energy and modulated by the OER:
+
+$$
+Z_X^{(j,d)} \sim \mathrm{Poisson}\!\left(\kappa(\mathrm{LET}, [\mathrm{O_2}])\, z^{(j,d)}\right)
+\qquad
+Z_Y^{(j,d)} \sim \mathrm{Poisson}\!\left(\lambda(\mathrm{LET}, [\mathrm{O_2}])\, z^{(j,d)}\right)
+$$
+
+Total sublethal (X) lesions per cell:
+
+```{julia}
+#| label: fig-damage
+#| fig-cap: "X-damage density across all alive cells."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_damage(cell_df))
+```
+
+X-damage split by depth layer:
+
+```{julia}
+#| label: fig-damage-layer
+#| fig-cap: "X-damage density grouped by energy-step layer."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_damage(cell_df; layer_plot=true))
+```
+
+X-damage density + 3-D spatial map:
+
+```{julia}
+#| label: fig-dam-X
+#| fig-cap: "Total sublethal (X) lesions per cell: density and 3-D spatial map."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_scalar_cell(cell_df, :dam_X_total))
+```
+
+Lethal (Y) lesions — any cell with `dam_Y_total > 0` has zero survival
+probability in GSM²:
+
+```{julia}
+#| label: fig-dam-Y
+#| fig-cap: "Total lethal (Y) lesions per cell: density and 3-D spatial map."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_scalar_cell(cell_df, :dam_Y_total))
+```
+
+X-damage vs absorbed dose scatter:
+
+```{julia}
+#| label: fig-dam-vs-dose
+#| fig-cap: "X-damage vs cell dose scatter (one point per alive cell)."
+#| fig-width: 7
+#| fig-height: 5
+
+let df_a = cell_df[cell_df.is_cell .== 1, :]
+    p = scatter(df_a.dose_cell, df_a.dam_X_total;
+                xlabel="Cell dose (Gy)", ylabel="Total X damage (DSBs)",
+                title="X damage vs dose per cell",
+                markersize=3, markerstrokewidth=0, alpha=0.5,
+                label="", color=:steelblue)
+    display(p)
+end
+```
+
+---
+
+## GSM² survival probability
+
+The GSM² SSA evolves each cell's lesion state through repair, conversion, and
+pairwise interaction events until survival (all sublethals repaired) or death
+(first lethal lesion forms).
+
+```{julia}
+#| label: gsm2-survival
+#| cache: true
+
+println("--- GSM2 survival probability ---")
+@time compute_cell_survival_GSM2!(cell_df, gsm2_cycle)
+
+alive_mask = cell_df.is_cell .== 1
+SF_mean    = mean(cell_df.sp[alive_mask])
+p_hat, ci_lo, ci_hi = survival_ci(cell_df.sp[alive_mask])
+println("Mean SP : $(round(SF_mean, digits=4))  " *
+        "(Wilson 95% CI: $(round(ci_lo, digits=4)) – $(round(ci_hi, digits=4)))")
+
+cell_df_irradiated = deepcopy(cell_df)
+```
+
+Survival probability density + 3-D spatial map (log₁₀ x-axis):
+
+```{julia}
+#| label: fig-sp
+#| fig-cap: "Per-cell survival probability: density (log₁₀) and 3-D spatial map."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_scalar_cell(cell_df, :sp; xscale=:log10))
+```
+
+Phase proportions before and after irradiation:
+
+```{julia}
+#| label: fig-phase-compare
+#| fig-cap: "Phase distribution: pre-irradiation (left) vs post-irradiation (right)."
+#| fig-width: 12
+#| fig-height: 5
+
+p_phase_irrad = plot_phase_proportions_alive(cell_df_irradiated;
+                    title_text="Phase distribution – post-irradiation")
+display(plot(plot_phase_proportions_alive(cell_df_pristine;
+         title_text="Phase distribution – pre-irradiation"),
+     p_phase_irrad; layout=(1, 2), size=(1000, 400)))
+```
+
+---
+
+## Stochastic repair and death timers
+
+Each cell is assigned stochastic waiting times for repair completion, lethal
+lesion formation, and the next cell-cycle event. These compete in the ABM's
+global event queue.
+
+```{julia}
+#| label: compute-timers
+#| cache: true
+
+println("--- Stochastic repair and death timers ---")
+@time compute_times_domain!(cell_df, gsm2_cycle;
+                                  nat_apo       = NAT_APO,
+                                  terminal_time = TERMINAL_TIME,
+                                  verbose       = false,
+                                  summary       = true)
+```
+
+Timer distributions with means annotated:
+
+```{julia}
+#| label: fig-times
+#| fig-cap: "Stochastic timer distributions: death, recovery, and cell-cycle event times."
+#| fig-width: 12
+#| fig-height: 6
+
+display(plot_times(cell_df; show_means=true, summary=true))
+```
+
+---
+
+## ABM simulation
+
+The ABM evolves the cell population over `TERMINAL_TIME` hours using a next-event
+algorithm. Only affected cells are rescheduled at each step.
+
+```{julia}
+#| label: run-abm
+#| cache: true
+
+println("--- Agent-based model ($TERMINAL_TIME h) ---")
+ts, snaps = @time run_simulation_abm!(cell_df;
+                nat_apo           = NAT_APO,
+                terminal_time     = TERMINAL_TIME,
+                snapshot_times    = SNAPSHOT_HOURS,
+                print_interval    = 6.0,
+                verbose           = true,
+                return_dataframes = false,
+                update_input      = true)
+
+N_final = count(cell_df.is_cell .== 1)
+SF_abm  = N_final / N_init
+println("\nFinal alive: $N_final / $N_init  (ABM SF = $(round(SF_abm, digits=4)))")
+print_simulation_summary(ts)
+
+snap_df = Dict(t => to_dataframe(snaps[t]; alive_only=true)
+               for t in SNAPSHOT_HOURS if haskey(snaps, t))
+```
+
+| Category | Event |
+|----------|-------|
+| Repair / death | sublethal damage repair or lethal lesion formation (GSM²) |
+| Cell cycle | G₁ → S → G₂ → M → division, or G₀ quiescence |
+| Particle arrival | new energy deposition during protracted irradiation |
+| Migration | random hop to an empty neighbouring lattice site |
+
+: Event categories in the ABM global priority queue. {.striped .hover}
+
+---
+
+## Output
+
+### Population dynamics
+
+Total cell count vs time:
+
+```{julia}
+#| label: fig-dyn
+#| fig-cap: "Total cell count over the 72-hour post-irradiation window."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_cell_dynamics(ts))
+```
+
+Per-phase cell counts vs time:
+
+```{julia}
+#| label: fig-phases-dyn
+#| fig-cap: "G₁, S, G₂, M, and G₀ cell counts over time."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_phase_dynamics(ts))
+```
+
+Phase percentages vs time:
+
+```{julia}
+#| label: fig-prop
+#| fig-cap: "Phase percentages of the surviving population over time."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_phase_proportions(ts))
+```
+
+Stacked area chart:
+
+```{julia}
+#| label: fig-stacked
+#| fig-cap: "Stacked phase counts over time."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_phase_stacked(ts))
+```
+
+Cycling (G₁+S+G₂+M) vs quiescent (G₀):
+
+```{julia}
+#| label: fig-cyq
+#| fig-cap: "Cycling vs quiescent cell counts over time."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_cycling_vs_quiescent(ts))
+```
+
+Sliding-window population growth rate:
+
+```{julia}
+#| label: fig-growth
+#| fig-cap: "Sliding-window estimate of the population growth rate."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_growth_rate(ts; window_size=10))
+```
+
+Three-panel simulation summary:
+
+```{julia}
+#| label: fig-summary
+#| fig-cap: "Three-panel simulation summary."
+#| fig-width: 14
+#| fig-height: 6
+
+display(plot_simulation_results(ts))
+```
+
+Five-panel analysis dashboard:
+
+```{julia}
+#| label: fig-dash
+#| fig-cap: "Five-panel analysis dashboard."
+#| fig-width: 16
+#| fig-height: 10
+
+display(plot_analysis_dashboard(ts))
+```
+
+Phase proportions timeseries:
+
+```{julia}
+#| label: fig-prop-ts
+#| fig-cap: "Phase proportions timeseries."
+#| fig-width: 10
+#| fig-height: 5
+
+display(plot_phase_proportions_timeseries(ts;
+    title_text="$PARTICLE $(ENERGY_MEV_U) MeV/u, $(DOSE_GY) Gy — Phase Dynamics"))
+```
+
+Phase duration proxy:
+
+```{julia}
+#| label: fig-dur
+#| fig-cap: "Phase duration proxy derived from ABM event counts."
+#| fig-width: 8
+#| fig-height: 5
+
+display(plot_phase_duration_distribution(ts))
+```
+
+### Spatial snapshots
+
+Phase bar chart at each snapshot time:
+
+```{julia}
+#| label: fig-snap-phase
+#| fig-cap: "Phase distribution at each snapshot (0, 6, 12, 24, 48, 72 h)."
+#| fig-width: 14
+#| fig-height: 5
+
+display(plot_snapshot_comparison(snap_df; metric=:cell_cycle))
+```
+
+Division capacity at each snapshot:
+
+```{julia}
+#| label: fig-snap-div
+#| fig-cap: "Fraction of cells able to divide at each snapshot time."
+#| fig-width: 14
+#| fig-height: 5
+
+display(plot_snapshot_comparison(snap_df; metric=:can_divide))
+```
+
+Phase comparison: pre-irradiation vs immediately post-irradiation:
+
+```{julia}
+#| label: fig-before-after
+#| fig-cap: "Phase distribution before vs immediately after irradiation."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_phase_comparison_before_after(cell_df_pristine, cell_df_irradiated))
+```
+
+Phase comparison: pre-irradiation vs end of ABM:
+
+```{julia}
+#| label: fig-before-final
+#| fig-cap: "Phase distribution before irradiation vs end of the 72-hour ABM."
+#| fig-width: 12
+#| fig-height: 5
+
+display(plot_phase_comparison_before_after(cell_df_pristine, cell_df))
+```
+
+Spatial distribution at t = 0 and the final snapshot:
+
+```{julia}
+#| label: fig-spatial
+#| fig-cap: "3-D cell-cycle spatial distribution: pre-irradiation (left) vs final snapshot (right)."
+#| fig-width: 14
+#| fig-height: 6
+
+t_last     = maximum(keys(snap_df))
+p_sp_init  = plot_spatial_distribution(cell_df_pristine;
+                 color_by=:cell_cycle, title_text="Spatial – pre-irradiation")
+p_sp_final = plot_spatial_distribution(snap_df[t_last];
+                 color_by=:cell_cycle, title_text="Spatial – t=$(t_last)h")
+display(plot(p_sp_init, p_sp_final; layout=(1, 2), size=(1200, 500)))
+```
+
+Animated GIF saved to disk:
+
+```{julia}
+#| label: anim
+#| output: false
+
+anim_file = joinpath(OUTDIR, "27_spatial_animation.gif")
+create_spatial_animation(snap_df; output_file=anim_file, fps=2, color_by=:cell_cycle)
+println("Animation saved to: $anim_file")
+```
+
+### Summary table
+
+```{julia}
+#| label: summary-table
+
+summary_df = DataFrame(
+    particle          = [PARTICLE],
+    energy_MeV_u      = [ENERGY_MEV_U],
+    dose_Gy           = [DOSE_GY],
+    tumor_radius_um   = [TUMOR_RADIUS],
+    N_cells_init      = [N_init],
+    N_cells_final     = [N_final],
+    Npar              = [Npar],
+    SF_GSM2_mean      = [round(SF_mean,  digits=5)],
+    SF_GSM2_CI_lo     = [round(ci_lo,    digits=5)],
+    SF_GSM2_CI_hi     = [round(ci_hi,    digits=5)],
+    SF_ABM            = [round(SF_abm,   digits=5)],
+    ABM_hours         = [TERMINAL_TIME],
+)
+summary_df
+```
+
+---
+
+## Further reading
+
+- Cordoni et al. (2021). *Generalized stochastic microdosimetric model: the main
+  formulation.* Physical Review E, 103, 012412.
+- Cordoni et al. (2022). *Cell survival computation via the GSM²; part I: the
+  theoretical framework.* Radiation Research, 197, 218–232.
+- Missiaggia et al. (2024). *Cell survival computation via the GSM²; part II:
+  numerical results.* Radiation Research.
+- Battestini et al. (2026). *Mechanistic driven TCP and NTCP modeling for
+  particle therapy.* (submitted)
+- Sinclair, W.K. (1966). *Cyclic X-ray responses in mammalian cells in vitro.*
+  Radiation Research, 33, 620–643.
+- Hall & Giaccia. *Radiobiology for the Radiologist.* 8th edition.
+
+---
+
+## Session info {.appendix}
+
+```{julia}
+#| label: session-info
+using Pkg
+Pkg.status()
+```
+
+```{julia}
+#| label: julia-version
+VERSION
+```
