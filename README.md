@@ -15,7 +15,7 @@ Ion beam → MC dose deposition → DNA damage (GSM<sup>2</sup>) → Survival �
 3. [Quickstart](#quickstart)
 4. [Pipeline in Detail](#pipeline-in-detail)
    - [Loading Utilities](#1-loading-utilities)
-   - [GSM2 Parameters](#2-gsm2-parameters)
+   - [GSM<sup>2</sup> Parameters](#2-gsm2-parameters)
    - [Environment Setup](#3-environment-setup)
    - [Monte Carlo Dose](#4-monte-carlo-dose)
    - [DNA Damage](#5-dna-damage)
@@ -117,9 +117,9 @@ to two-column energy/stopping-power tables.
 
 ---
 
-### 2. GSM2 Parameters
+### 2. GSM<sup>2</sup> Parameters
 
-The **Giant Stochastic Model 2 (GSM2)** describes stochastic DNA repair. Parameters
+The **Giant Stochastic Model 2 (GSM<sup>2</sup>)** describes stochastic DNA repair. Parameters
 are cell-cycle-phase dependent. Pass a `Vector{GSM2}` of length 4:
 
 ```julia
@@ -257,7 +257,7 @@ After this call, `cell_df` gains the columns:
 | Column | Type | Meaning |
 |---|---|---|
 | `dose_cell` | `Float64` | Total dose received by the cell (Gy) |
-| `dose` | `Vector{Float64}` | Per-domain dose vector (one entry per GSM2 domain) |
+| `dose` | `Vector{Float64}` | Per-domain dose vector (one entry per GSM<sup>2</sup> domain) |
 
 ---
 
@@ -292,7 +292,7 @@ The damage rate per domain is:
 
 ### 6. Survival
 
-Compute the GSM2 survival probability for each live cell:
+Compute the GSM<sup>2</sup> survival probability for each live cell:
 
 ```julia
 compute_cell_survival_GSM2!(cell_df, gsm2_cycle; NFrac=1)
@@ -456,7 +456,7 @@ Irrad(dose, kR, doserate)
 | `kR` | Relative biological effectiveness scaling (default 1.0) |
 | `doserate` | Dose rate (Gy/h) |
 
-### `GSM2`
+### `GSM<sup>2</sup>`
 ```julia
 GSM2(r, a, b, rd, Rn)
 ```
