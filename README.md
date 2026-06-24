@@ -3,7 +3,7 @@
 A Julia framework for simulating the full chain from physical ion beam delivery to post-irradiation cell population dynamics. Designed for tumour spheroids but applicable to any 3-D cell lattice.
 
 ```
-Ion beam → MC dose deposition → DNA damage (GSM<sup>2</sup>) → Survival → ABM cell dynamics
+Ion beam → MC dose deposition → DNA damage (GSM2) → Survival → ABM cell dynamics
 ```
 
 ---
