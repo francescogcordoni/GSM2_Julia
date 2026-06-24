@@ -275,7 +275,7 @@ function compute_times_domain_p53!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
     return nothing
 end
 
-function compute_repair_domain_p53(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
+function compute_repair_domain_p53_history(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
                                     terminal_time::Float64 = Inf,
                                     au::Float64            = 6.0,
                                     p53_scale::Float64     = 120.0)
@@ -473,10 +473,97 @@ function compute_repair_domain_p53(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM
 
     df_markov = DataFrame(time=markov_times, sum_X=markov_sumX, sum_Y=markov_sumY)
 
-    # Return: (death_time, recover_time, death_type, X, Y, df_markov, df_mol)
-    #   positions 4,5 = final X,Y vectors  (matches caller expectations)
-    #   positions 6,7 = full trajectory DataFrames
     return (dt_result, rt_result, death_type_result, X, Y, df_markov, df_mol)
+end
+
+
+function compute_repair_domain_p53(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
+                                   terminal_time::Float64 = Inf,
+                                   au::Float64            = 6.0,
+                                   p53_scale::Float64     = 120.0)
+
+    X = copy(X);  Y = copy(Y)
+
+    any(>(0), Y) && return (0.0, Inf, 1, X, Y)
+    sum(X) == 0  && return (Inf, 0.0, 0, X, Y)
+
+    ATM_tot=5.0; Akt_tot=1.0; Pip_tot=1.0; CytoC_tot=3.0; Casp3_tot=3.0
+    j_nc = 3
+    state = [2.17,0.01,0.0,0.8,0.01,0.4,0.26,0.94,0.89,
+             0.0,0.2,0.0,0.1,0.1,0.1,0.06,0.05]
+    p53s_idx = 3;  p21_idx = 14;  casp3_idx = 17
+
+    a = gsm2.a;  b = gsm2.b;  r = gsm2.r
+    n_domains = length(X)
+
+    p53s_now  = state[p53s_idx]
+    p53s_term = p53s_now / (1.0 + p53s_now)
+    aC = a * sigmoid(sum(X), 1 - p53s_term, 1 + p53s_term)
+    rC = r * sigmoid(sum(X), 1 + p53s_term, 1 - p53s_term)
+
+    current_time = 0.0
+
+    while sum(X) > 0
+        r1 = rand();  r2 = rand()
+
+        aX = aC .* X
+        bX = max.(b .* X .* (X .- 1), 0)
+        rX = rC .* X
+        a0 = sum(rX) + sum(aX) + sum(bX)
+        a0 ≤ 0.0 && break
+
+        dt = au * (1.0 / a0) * log(1.0 / r1)
+        current_time + dt > terminal_time && return (Inf, Inf, -1, X, Y)
+
+        # Solve p53 ODE over this inter-arrival interval
+        tmin_ode = dt * p53_scale
+        p_ode    = (ATM_tot, Akt_tot, Pip_tot, Float64(sum(X)), CytoC_tot, Casp3_tot, j_nc)
+        sol      = solve(ODEProblem(p53_network, state, (0.0, tmin_ode), p_ode),
+                            RK4(), isoutofdomain=(u,p,t)->any(x->x<0,u),
+                            save_everystep=false, save_start=false, dense=false)
+
+        if !isempty(sol.u)
+            state = sol.u[end]
+        end
+
+        current_time += dt
+
+        # Caspase-3 apoptosis
+        if state[casp3_idx] > 1.5
+            return (current_time, Inf, 3, X, Y)
+        end
+
+        # Update p53-coupled rates
+        p53s_now  = state[p53s_idx]
+        p53s_term = p53s_now / (1.0 + p53s_now)
+        aC = a * sigmoid(sum(X), 1 - p53s_term, 1 + p53s_term)
+        rC = r * sigmoid(sum(X), 1 + p53s_term, 1 - p53s_term)
+
+        # Select and apply reaction
+        props    = vcat(rX, aX, bX)
+        reac_idx = findfirst(x -> x >= r2 * a0, cumsum(props))
+
+        if reac_idx <= n_domains
+            X[reac_idx] -= 1
+            sum(X) == 0 && return (Inf, current_time, 0, X, Y)
+
+        elseif reac_idx <= 2 * n_domains
+            dom = reac_idx - n_domains
+            X[dom] -= 1;  Y[dom] += 1
+            th    = 0.1
+            p_sen = state[p21_idx] / (th + state[p21_idx])
+            return (current_time, Inf, rand() < p_sen ? 2 : 1, X, Y)
+
+        else
+            dom = reac_idx - 2 * n_domains
+            X[dom] -= 2;  Y[dom] += 1
+            th    = 0.1
+            p_sen = state[p21_idx] / (th + state[p21_idx])
+            return (current_time, Inf, rand() < p_sen ? 2 : 1, X, Y)
+        end
+    end
+
+    return (Inf, current_time, 0, X, Y)
 end
 
 
