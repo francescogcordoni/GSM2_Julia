@@ -58,7 +58,7 @@ ENERGY_MEV_U  = 250.0      # kinetic energy per nucleon (MeV/u)
 DOSE_GY       = 5.        # prescribed dose (Gy)
 
 # Spheroid and cell geometry
-TUMOR_RADIUS  = 300.0     # spheroid radius (µm)
+TUMOR_RADIUS  = 1000.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
 X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)

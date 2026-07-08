@@ -26,6 +26,7 @@ using CSV, DataFrames
 using Distributions
 using Random
 using Plots
+using PlotlyJS
 using StatsPlots
 using ProgressBars
 using GLM
@@ -152,7 +153,7 @@ setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 # Assign oxygenation (pO₂) profile across the spheroid
 #set_oxygen!(cell_df; plot_oxygen = true)
 # Assign oxygenation (pO₂) profile across the spheroid (analytic diffusion)
-set_oxygen_diffusion!(cell_df; density=:mean, plot_oxygen=true, verbose=true)
+set_oxygen_diffusion!(cell_df; density=:mean, plot_oxygen=false, verbose=true)
 
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)
@@ -212,7 +213,8 @@ mid_radius_sq      = (gsm2.rd + 150Rc)^2
 penumbra_radius_sq = Rp^2
 
     # Radial dose lookup table
-sim_ = 1000
+
+    sim_ = 1000
 impact_p = 10 .^ range(log10(r_lower), stop=log10(Rk), length=sim_)
 dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
@@ -253,13 +255,15 @@ ystar(impact_vec, dose_vec, 150.)
 
 ρ = 1.
 
-energy_vec = 10 .^ range(log10(0.1), stop = log10(250.), length = 1000)
+rd = 0.2
+
+energy_vec = 10 .^ range(log10(0.1), stop = log10(250.), length = 100)
 yF_vec     = Array{Float64}(undef, 0)
 yD_vec     = Array{Float64}(undef, 0)
 ystar_vec  = Array{Float64}(undef, 0)
 LET_vec  = Array{Float64}(undef, 0)
 
-#for ENERGY_MEV_U in energy_vec
+for ENERGY_MEV_U in energy_vec
     println(ENERGY_MEV_U)
     setup(ENERGY_MEV_U, PARTICLE, DOSE_GY, TUMOR_RADIUS)
 
@@ -273,17 +277,17 @@ LET_vec  = Array{Float64}(undef, 0)
 
     r_lower            = 0.1 * Rc
     core_radius_sq     = r_lower^2
-    mid_radius_sq      = (gsm2.rd + 150Rc)^2
+    mid_radius_sq      = (rd + 150Rc)^2
     penumbra_radius_sq = Rp^2
 
     sim_ = 1000
-    impact_p = 10 .^ range(log10(r_lower), stop = log10(gsm2.rd + Rp), length=sim_)
+    impact_p = 10 .^ range(log10(r_lower), stop = log10(rd + Rp), length=sim_)
     dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
     Threads.@threads for i in 1:sim_
         tid = Threads.threadid()
         track = Track(impact_p[i], 0.0, Rk)
-        _d, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
+        _d, _, Gyr = distribute_dose_domain(0.0, 0.0, rd, track, irrad_cond[1], type_AT)
         dose_lookup_threads[tid][i] = Gyr
     end
     dose_vec  = sum(dose_lookup_threads)
@@ -296,16 +300,73 @@ LET_vec  = Array{Float64}(undef, 0)
     push!(yD_vec, yD(impact_vec, dose_vec) * (ρ * π * gsm2.rd^2 / 0.1602))
     push!(ystar_vec, ystar(impact_vec, dose_vec, 150.) * (ρ * π * gsm2.rd^2 / 0.1602))
     push!(LET_vec, ion.LET)
+end
 
-Plots.plot(energy_vec, yF_vec, xscale=:log10, label = "yF", xlab = "Energy [MeV]", ylab = "Lineal energy [keV/μm]")
-Plots.plot!(energy_vec, yD_vec, xscale=:log10, label = "yD")
-Plots.plot!(energy_vec, ystar_vec, xscale=:log10, label = "y*")
-Plots.plot!(energy_vec, LET_vec, xscale=:log10, label = "LET")
+let x_exp = floor(Int, log10(minimum(energy_vec))):ceil(Int, log10(maximum(energy_vec)))
+    xt = (10.0 .^ x_exp, ["10^$e" for e in x_exp])
+    Plots.plot(energy_vec, yF_vec, xscale=:log10, xticks=xt,
+                label="yF", xlabel="Energy [MeV]", ylabel="Lineal energy [keV/μm]")
+    Plots.plot!(energy_vec, yD_vec,    xscale=:log10, xticks=xt, label="yD")
+    Plots.plot!(energy_vec, ystar_vec, xscale=:log10, xticks=xt, label="y*")
+    Plots.plot!(energy_vec, LET_vec,   xscale=:log10, xticks=xt, label="LET")
+end
 
-Plots.plot(energy_vec, 1.5 * yF_vec, xscale=:log10, label = "yF", xlab = "Energy [MeV]", ylab = "Lineal energy [keV/μm]")
-Plots.plot!(energy_vec, 1.5 * yD_vec, xscale=:log10, label = "yD")
-Plots.plot!(energy_vec, 1.5 * ystar_vec, xscale=:log10, label = "y*")
-Plots.plot!(energy_vec, LET_vec, xscale=:log10, label = "LET")
+let x_exp = floor(Int, log10(minimum(energy_vec))):ceil(Int, log10(maximum(energy_vec)))
+    xt = (10.0 .^ x_exp, ["10^$e" for e in x_exp])
+    Plots.plot(energy_vec, 1.5 * yF_vec, xscale=:log10, xticks=xt,
+                label="yF", xlabel="Energy [MeV]", ylabel="Lineal energy [keV/μm]")
+    Plots.plot!(energy_vec, 1.5 * yD_vec,    xscale=:log10, xticks=xt, label="yD")
+    Plots.plot!(energy_vec, 1.5 * ystar_vec, xscale=:log10, xticks=xt, label="y*")
+    Plots.plot!(energy_vec, LET_vec,          xscale=:log10, xticks=xt, label="LET")
+end
 
 
 
+
+
+
+
+ENERGY_MEV_U = 43.
+println(ENERGY_MEV_U)
+setup(ENERGY_MEV_U, PARTICLE, DOSE_GY, TUMOR_RADIUS)
+
+Rp = irrad_cond[1].Rp 
+Rc = irrad_cond[1].Rc
+Kp = irrad_cond[1].Kp
+Rk = Rp
+if Rp < Rc
+    Rp = Rc
+end
+
+rd = 0.3
+
+r_lower            = 0.1 * Rc
+core_radius_sq     = r_lower^2
+mid_radius_sq      = (rd + 150Rc)^2
+penumbra_radius_sq = Rp^2
+
+sim_ = 1000
+impact_p = 10 .^ range(log10(r_lower), stop = log10(rd + Rp + 0.1), length=sim_)
+dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
+
+Threads.@threads for i in 1:sim_
+    tid = Threads.threadid()
+    track = Track(impact_p[i], 0.0, Rk)
+    _d, _, Gyr = distribute_dose_domain(0.0, 0.0, rd, track, irrad_cond[1], type_AT)
+    dose_lookup_threads[tid][i] = Gyr
+end
+dose_vec  = sum(dose_lookup_threads)
+impact_vec = impact_p
+core_dose  = dose_vec[1]
+
+plotlyjs()
+let mask = dose_vec .> 10^-5
+    x_data = impact_vec[mask] * 10^-6
+    y_data = dose_vec[mask]
+    x_exp  = floor(Int, log10(minimum(x_data))):ceil(Int, log10(maximum(x_data)))
+    y_exp  = floor(Int, log10(minimum(y_data))):ceil(Int, log10(maximum(y_data)))
+    Plots.plot(x_data, y_data, xscale=:log10, yscale=:log10,
+                xticks=(10.0 .^ x_exp, ["10^$e" for e in x_exp]),
+                yticks=(10.0 .^ y_exp, ["10^$e" for e in y_exp]),
+                xlabel="Impact parameter (m)", ylabel="Dose (Gy)")
+end

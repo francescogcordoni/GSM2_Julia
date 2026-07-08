@@ -278,11 +278,12 @@ plot!(p2, od.time, od.Casp3; label="Casp3", lw=2)
 plot!(p2, od.time, od.p21;   label="p21",   lw=2)
 plot!(p2, od.time, od.ATMs;  label="ATMs",  lw=2)
 plot!(p2, od.time, od.Sen;  label="Sen",  lw=2)
+plot!(p2, od.time, od.PTEN;  label="PTEN",  lw=2)
 isfinite(dt) && vline!(p2, [dt]; color=:red, lw=1.5, ls=:dash, label="death")
 isfinite(rt) && vline!(p2, [rt]; color=:green, lw=1.5, ls=:dash, label="recover")
 
 fig = plot(p1, p2; layout=(1,2), size=(1100, 420),
-           left_margin=10Plots.mm, bottom_margin=8Plots.mm, right_margin=5Plots.mm)
+            left_margin=10Plots.mm, bottom_margin=8Plots.mm, right_margin=5Plots.mm)
 display(fig)
 savefig(fig, "p53_repair.png")
 
@@ -298,6 +299,8 @@ pc = plot(; xlabel="Time (h)", ylabel="Concentration",
             title="p21 — all cells",  legend=false)
 ps = plot(; xlabel="Time (h)", ylabel="Concentration",
             title="Sen — all cells",  legend=false)
+pten = plot(; xlabel="Time (h)", ylabel="Concentration",
+            title="PTEN — all cells",  legend=false)
 
 for (idx, cid) in enumerate(cell_ids)
     col = palette[idx]
@@ -309,17 +312,31 @@ for (idx, cid) in enumerate(cell_ids)
     plot!(pb, od_c.time, od_c.Casp3; color=col, lw=1.2, alpha=0.7)
     plot!(pc, od_c.time, od_c.p21;   color=col, lw=1.2, alpha=0.7)
     plot!(ps, od_c.time, od_c.Sen;   color=col, lw=1.2, alpha=0.7)
+    plot!(pten, od_c.time, od_c.PTEN;   color=col, lw=1.2, alpha=0.7)
 
     if isfinite(dt_c)
         vline!(pa, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
         vline!(pb, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
         vline!(pc, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
         vline!(ps, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
+        vline!(pten, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
     end
 end
 
-display(plot(pa, pb, pc; layout=(1,3), size=(1400, 400)))
-savefig(pa, "p53s_all.png")
-savefig(pb, "Casp3_all.png")
-savefig(pc, "p21_all.png")
+ps
+
+display(plot(pa, pb, pc, ps; layout=(2,2), size=(1400, 400)))
+#savefig(pa, "p53s_all.png")
+#savefig(pb, "Casp3_all.png")
+#savefig(pc, "p21_all.png")
+
+S_star = 150.
+pS = plot(; xlabel="Time (h)", ylabel="Concentration",
+            title="S", legend=false)
+pG = plot(; xlabel="Time (h)", ylabel="Concentration",
+            title="G1 or G2", legend=false)
+plot!(pS, od.time, (od.Sen)./(od.Sen .+ S_star);   color=:black, lw=1.2, alpha=0.7)
+plot!(pG, od.time, 0.5*(od.Sen)./(od.Sen .+ S_star);   color=:black, lw=1.2, alpha=0.7)
+display(plot(pG, pS; layout=(1,2), size=(1400, 400)))
+
 

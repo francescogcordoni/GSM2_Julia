@@ -68,7 +68,7 @@ function ATRadius(ion::Ion, _irrad::Irrad, type::String)
 
     if type == "LEM"
         Rc   = 0.01
-        Rp   = 0.05 * ((ion.E / ion.A)^(1.7))
+        Rp   = 0.05 * ((ion.E )^(1.7))
         LETk = ion.LET * 0.1602   # keV/µm → MeV·cm⁻¹ (×0.1602)
         Kp   = (1 / π) * (LETk / (1 + 2 * log(Rp / Rc)))
 
@@ -76,7 +76,7 @@ function ATRadius(ion::Ion, _irrad::Irrad, type::String)
         AMU2MEV = 931.494027
         β    = sqrt(1 - 1 / ((ion.E / AMU2MEV + 1)^2))
         Rc   = 0.01116 * β
-        Rp   = 0.0616 * ((ion.E / ion.A)^(1.7))
+        Rp   = 0.05 * ((ion.E)^(1.7))
         z_eff = ion.Z * (1 - exp(-125 * β / ion.Z^(2.0 / 3.0)))
         Kp   = 1.25 * 0.0001 * (z_eff / β)^2
 

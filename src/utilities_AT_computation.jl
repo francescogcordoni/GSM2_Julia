@@ -313,14 +313,14 @@ function GetRadialLinearDose(r::Float64, ion::AT, type::String; verbose::Bool = 
         z_eff     = ion.Z * (1 - exp(-125 * β / ion.Z^(2.0/3.0)))
         Kp        = 1.25 * 0.0001 * (z_eff / β)^2
         LETk      = ion.LET * 0.1602
-        r_penumbra = 0.0616 * (ion.E / ion.A)^1.7
+        r_penumbra = 0.05 * (ion.E)^1.7
 
         vprintln("KC: β=", β, " z_eff=", z_eff, " Kp=", Kp, " r_core=", r_core)
 
         if r <= r_core
             D_arc  = LETk - 2π * Kp * log(r_penumbra / r_core)
             D_arc /= π * r_core^2
-            D_arc *= 1.05  # empirical core correction (boundary normalization)
+            #D_arc *= 1.05  # empirical core correction (boundary normalization)
             vprintln("  [Core]     r=", r, " → D=", D_arc)
         else
             D_arc = Kp / (r * r)
@@ -338,7 +338,7 @@ function GetRadialLinearDose(r::Float64, ion::AT, type::String; verbose::Bool = 
 
         if r <= Rc
             D_arc  = norm / (π * Rc^2)
-            D_arc *= 1.05  # empirical core correction (boundary normalization)
+            #D_arc *= 1.05  # empirical core correction (boundary normalization)
             vprintln("  [Core]     r=", r, " → D=", D_arc)
         else
             D_arc = norm / (π * r * r)
