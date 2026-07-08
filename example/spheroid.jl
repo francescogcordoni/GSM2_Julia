@@ -54,11 +54,11 @@ sp = load_stopping_power()
 
 # Irradiation
 PARTICLE      = "1H"      # ion species: "1H", "4He", "12C", "16O"
-ENERGY_MEV_U  = 5.0      # kinetic energy per nucleon (MeV/u)
-DOSE_GY       = 1.        # prescribed dose (Gy)
+ENERGY_MEV_U  = 250.0      # kinetic energy per nucleon (MeV/u)
+DOSE_GY       = 5.        # prescribed dose (Gy)
 
 # Spheroid and cell geometry
-TUMOR_RADIUS  = 350.0     # spheroid radius (µm)
+TUMOR_RADIUS  = 300.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
 X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)
@@ -151,7 +151,9 @@ setup_cell_population!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide,
 setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 
 # Assign oxygenation (pO₂) profile across the spheroid
-set_oxygen!(cell_df; plot_oxygen = true)
+#set_oxygen!(cell_df; plot_oxygen = true)
+# Assign oxygenation (pO₂) profile across the spheroid (analytic diffusion)
+set_oxygen_diffusion!(cell_df; density=:mean, plot_oxygen=true, verbose=true)
 
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)

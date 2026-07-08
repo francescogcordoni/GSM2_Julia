@@ -1,16 +1,32 @@
 # ============================================================================
-# example/p53.jl
+# example/spheroid.jl
 #
-# KEY EXAMPLE — Irradiation of a 3-D spheroid followed by GSM2 model with p53 dynamics
+# KEY EXAMPLE — Irradiation of a 3-D spheroid followed by agent-based model
 # (ABM) simulation of post-irradiation cell dynamics.
 #
+# PIPELINE
+# --------
+#   1. PARAMETERS       — dose, particle, energy, geometry (edit here)
+#   2. SETUP            — GSM2, ion/irrad, cell lattice, population, O₂
+#   3. DOSE & DAMAGE    — Monte Carlo dose deposition + DNA damage sampling
+#   4. SURVIVAL         — GSM2 survival probability per cell
+#   5. TIMERS           — stochastic repair / death time assignment
+#   6. ABM              — post-irradiation cell dynamics simulation
+#   7. OUTPUT           — plots + CSVs saved to example/output/spheroid/
+#
+# HOW TO RUN
+# ----------
+#   julia --threads auto example/spheroid.jl
+#
+# ============================================================================
+
 using Base.Threads
 using Distributed
 using CSV, DataFrames
 using Distributions
 using Random
 using Plots
-using StatsPlots            # required for density() used in plot_times, plot_damage, etc.
+using StatsPlots
 using ProgressBars
 using GLM
 using JLD2
@@ -21,11 +37,9 @@ using Optim
 using LsqFit
 using ProgressMeter
 using InlineStrings
-using CUDA
 using Statistics: mean
 using SparseArrays
 using Printf
-using DifferentialEquations
 
 println("Threads available: ", nthreads())
 
@@ -38,18 +52,18 @@ sp = load_stopping_power()
 # ============================================================================
 
 # Irradiation
-PARTICLE      = "1H"      # ion species: "1H", "4He", "12C", "16O"
+PARTICLE      = "12C"      # ion species: "1H", "4He", "12C", "16O"
 ENERGY_MEV_U  = 250.0      # kinetic energy per nucleon (MeV/u)
 DOSE_GY       = 5.        # prescribed dose (Gy)
 
 # Spheroid and cell geometry
-TUMOR_RADIUS  = 50.0     # spheroid radius (µm)
+TUMOR_RADIUS  = 100.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
 X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)
 
 # GSM2 domain geometry
-RD            = 0.8       # domain radius (µm)
+RD            = 0.8      # domain radius (µm)
 RN            = 7.2       # nucleus radius (µm)
 
 # Phase-specific GSM2 parameters [G1/G0, S, G2/M, average]
@@ -136,7 +150,9 @@ setup_cell_population!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide,
 setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 
 # Assign oxygenation (pO₂) profile across the spheroid
-set_oxygen!(cell_df; plot_oxygen = true)
+#set_oxygen!(cell_df; plot_oxygen = true)
+# Assign oxygenation (pO₂) profile across the spheroid (analytic diffusion)
+set_oxygen_diffusion!(cell_df; density=:mean, plot_oxygen=true, verbose=true)
 
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)
@@ -172,154 +188,124 @@ cell_df_pristine = deepcopy(cell_df)
 # 3. DOSE & DAMAGE
 # ============================================================================
 
-cell_df.O .= 7.
+gsm2 = gsm2_cycle[1]
 
-println("\n--- Monte Carlo dose deposition ---")
-@time MC_dose_CPU!(ion, Npar, R_beam, irrad_cond, cell_df,
-                    df_center_x, df_center_y, at,
-                    gsm2_cycle, TYPE_AT, TRACK_SEG)
+cell_df_is = filter(row -> row.is_cell == 1, cell_df)
+nrow(cell_df_is) == 0 && (@warn "No cells with is_cell = 1 → skipping."; return)
 
-println("\n--- Poisson DNA damage sampling ---")
-@time MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle)
+grouped_df      = combine(groupby(cell_df_is, [:x, :y]),
+                            :index => first => :representative_index)
+rep_indices_set = Set(grouped_df.representative_index)
 
-active_cells = @view cell_df.index[cell_df.is_cell .== 1]
-n_active     = length(active_cells)
+cell_df_single_x = filter(row -> row.index in rep_indices_set, df_center_x)
+cell_df_single_y = filter(row -> row.index in rep_indices_set, df_center_y)
+at_single        = filter(row -> row.index in rep_indices_set, at)
 
-# Pre-allocate per-cell storage (index k, thread-safe)
-death_times    = Vector{Float64}(undef, n_active)
-recover_times  = Vector{Float64}(undef, n_active)
-death_types    = Vector{Int}(undef, n_active)
-X_finals       = Vector{Vector{Int64}}(undef, n_active)
-Y_finals       = Vector{Vector{Int64}}(undef, n_active)
-markov_results = Vector{DataFrame}(undef, n_active)
-ode_results    = Vector{DataFrame}(undef, n_active)
+mat_x, mat_y, mat_at = dataframes_to_matrices(cell_df_single_x, cell_df_single_y, at_single)
 
-#@Threads.threads 
-for k in eachindex(active_cells)
-    i = active_cells[k]
+Rp = irrad_cond[1].Rp; Rc = irrad_cond[1].Rc
+Kp = irrad_cond[1].Kp; Rk = Rp
 
-    phase = cell_df.cell_cycle[i]
-    gsm2  = if phase == "G1" || phase == "G0"
-        gsm2_cycle[1]
-    elseif phase == "S"
-        gsm2_cycle[2]
-    elseif phase == "G2" || phase == "M"
-        gsm2_cycle[3]
-    else
-        gsm2_cycle[4]
-    end
+r_lower            = 0.1 * Rc
+core_radius_sq     = r_lower^2
+mid_radius_sq      = (gsm2.rd + 150Rc)^2
+penumbra_radius_sq = Rp^2
 
-    # 1) GSM2 survival probability
-    cell_df.sp[i] = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
+    # Radial dose lookup table
+sim_ = 1000
+impact_p = 10 .^ range(log10(r_lower), stop=log10(Rk), length=sim_)
+dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
 
-    # 2) Stochastic repair + p53 dynamics
-    death_time, recover_time, death_type, X_f, Y_f, df_markov, df_mol =
-        compute_repair_domain_p53_history(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
+Threads.@threads for i in 1:sim_
+    tid = Threads.threadid()
+    track = Track(impact_p[i], 0.0, Rk)
+    _d, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
+    dose_lookup_threads[tid][i] = Gyr
+end
+dose_vec  = sum(dose_lookup_threads)
+impact_vec = impact_p
+core_dose  = dose_vec[1]
 
-    # Tag DataFrames with cell index and store at slot k
-    df_markov[!, :cell_id] = fill(i, nrow(df_markov))
-    if nrow(df_mol) > 0
-        df_mol[!, :cell_id] = fill(i, nrow(df_mol))
-    end
+Plots.plot(impact_vec, dose_vec, xscale=:log10, yscale=:log10)
 
-    if df_markov.sum_Y[size(df_markov, 1)] == 0
-        recover_time = df_markov.time[df_markov.sum_X .== 0][1]
-        death_time = Inf
-    else
-        recover_time = Inf
-        death_time = df_markov.time[df_markov.sum_Y .> 0][1]
-    end
-
-    death_times[k]    = death_time
-    recover_times[k]  = recover_time
-    death_types[k]    = death_type
-    X_finals[k]       = X_f
-    Y_finals[k]       = Y_f
-    markov_results[k] = df_markov
-    ode_results[k]    = df_mol
+using Trapz  # or implement trapz manually, see below
+function yF(impact_vec, lineal_vec)
+    num = trapz(impact_vec, lineal_vec .* 2π .* impact_vec)
+    den = trapz(impact_vec, 2π .* impact_vec)
+    return num / den
 end
 
-# Build master DataFrames from per-cell results
-all_markov = vcat(markov_results...; cols=:union)
-all_ode    = vcat(filter(df -> nrow(df) > 0, ode_results)...; cols=:union)
-
-results_df = DataFrame(
-    cell_id      = collect(active_cells),
-    death_time   = death_times,
-    recover_time = recover_times,
-    death_type   = death_types,
-)
-
-# ── Select a cell to inspect ─────────────────────────────────────────────────
-cell_to_plot = active_cells[1]          # change index to inspect a different cell
-k_plot       = findfirst(==(cell_to_plot), collect(active_cells))
-
-mk  = filter(:cell_id => ==(cell_to_plot), all_markov)
-od  = filter(:cell_id => ==(cell_to_plot), all_ode)
-dt  = death_times[k_plot]
-rt  = recover_times[k_plot]
-dtp = death_types[k_plot]
-
-# ── Plot 1: Markov chain — sum_X and sum_Y vs time ───────────────────────────
-p1 = plot(mk.time, mk.sum_X;
-            seriestype=:steppost, label="sum_X", lw=2,
-            xlabel="Time (h)", ylabel="Lesion count",
-            title="Cell $cell_to_plot | type=$dtp")
-plot!(p1, mk.time, mk.sum_Y;
-        seriestype=:steppost, label="sum_Y", lw=2)
-isfinite(dt) && vline!(p1, [dt]; color=:red, lw=1.5, ls=:dash, label="death")
-isfinite(rt) && vline!(p1, [rt]; color=:green, lw=1.5, ls=:dash, label="recover")
-
-# ── Plot 2: p53 network ODE ───────────────────────────────────────────────────
-p2 = plot(od.time, od.p53s;  label="p53s",  lw=2,
-            xlabel="Time (h)", ylabel="Concentration",
-            title="p53 network")
-plot!(p2, od.time, od.Casp3; label="Casp3", lw=2)
-plot!(p2, od.time, od.p21;   label="p21",   lw=2)
-plot!(p2, od.time, od.ATMs;  label="ATMs",  lw=2)
-plot!(p2, od.time, od.Sen;  label="Sen",  lw=2)
-isfinite(dt) && vline!(p2, [dt]; color=:red, lw=1.5, ls=:dash, label="death")
-isfinite(rt) && vline!(p2, [rt]; color=:green, lw=1.5, ls=:dash, label="recover")
-
-fig = plot(p1, p2; layout=(1,2), size=(1100, 420),
-           left_margin=10Plots.mm, bottom_margin=8Plots.mm, right_margin=5Plots.mm)
-display(fig)
-savefig(fig, "p53_repair.png")
-
-# ── All-cells p53 dynamics ────────────────────────────────────────────────────
-cell_ids = unique(all_ode.cell_id)
-palette  = distinguishable_colors(length(cell_ids))
-
-pa = plot(; xlabel="Time (h)", ylabel="Concentration",
-            title="p53s — all cells", legend=false)
-pb = plot(; xlabel="Time (h)", ylabel="Concentration",
-            title="Casp3 — all cells", legend=false)
-pc = plot(; xlabel="Time (h)", ylabel="Concentration",
-            title="p21 — all cells",  legend=false)
-ps = plot(; xlabel="Time (h)", ylabel="Concentration",
-            title="Sen — all cells",  legend=false)
-
-for (idx, cid) in enumerate(cell_ids)
-    col = palette[idx]
-    od_c = filter(:cell_id => ==(cid), all_ode)
-    k_c  = findfirst(==(cid), collect(active_cells))
-    dt_c = isnothing(k_c) ? Inf : death_times[k_c]
-
-    plot!(pa, od_c.time, od_c.p53s;  color=col, lw=1.2, alpha=0.7)
-    plot!(pb, od_c.time, od_c.Casp3; color=col, lw=1.2, alpha=0.7)
-    plot!(pc, od_c.time, od_c.p21;   color=col, lw=1.2, alpha=0.7)
-    plot!(ps, od_c.time, od_c.Sen;   color=col, lw=1.2, alpha=0.7)
-
-    if isfinite(dt_c)
-        vline!(pa, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
-        vline!(pb, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
-        vline!(pc, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
-        vline!(ps, [dt_c]; color=col, lw=1, ls=:dash, alpha=0.7)
-    end
+function yD(impact_vec, lineal_vec)
+    num = trapz(impact_vec, lineal_vec .^ 2 .* 2π .* impact_vec)
+    den = trapz(impact_vec, lineal_vec .* 2π .* impact_vec)
+    return num / den
 end
 
-display(plot(pa, pb, pc; layout=(1,3), size=(1400, 400)))
-savefig(pa, "p53s_all.png")
-savefig(pb, "Casp3_all.png")
-savefig(pc, "p21_all.png")
+function ystar(impact_vec, lineal_vec, y0)
+    num = y0^2 .* trapz(impact_vec, (1 .- exp.(-(lineal_vec ./ y0) .^ 2)) .* 2π .* impact_vec)
+    den = trapz(impact_vec, lineal_vec .* 2π .* impact_vec)
+    return num / den
+end
+
+yF(impact_vec, dose_vec)
+yD(impact_vec, dose_vec)
+ystar(impact_vec, dose_vec, 150.)
+
+ρ = 1.
+
+energy_vec = 10 .^ range(log10(0.1), stop = log10(250.), length = 1000)
+yF_vec     = Array{Float64}(undef, 0)
+yD_vec     = Array{Float64}(undef, 0)
+ystar_vec  = Array{Float64}(undef, 0)
+LET_vec  = Array{Float64}(undef, 0)
+
+#for ENERGY_MEV_U in energy_vec
+    println(ENERGY_MEV_U)
+    setup(ENERGY_MEV_U, PARTICLE, DOSE_GY, TUMOR_RADIUS)
+
+    Rp = irrad_cond[1].Rp 
+    Rc = irrad_cond[1].Rc
+    Kp = irrad_cond[1].Kp
+    Rk = Rp
+    if Rp < Rc
+        Rp = Rc
+    end
+
+    r_lower            = 0.1 * Rc
+    core_radius_sq     = r_lower^2
+    mid_radius_sq      = (gsm2.rd + 150Rc)^2
+    penumbra_radius_sq = Rp^2
+
+    sim_ = 1000
+    impact_p = 10 .^ range(log10(r_lower), stop = log10(gsm2.rd + Rp), length=sim_)
+    dose_lookup_threads = [zeros(Float64, sim_) for _ in 1:Threads.maxthreadid()]
+
+    Threads.@threads for i in 1:sim_
+        tid = Threads.threadid()
+        track = Track(impact_p[i], 0.0, Rk)
+        _d, _, Gyr = distribute_dose_domain(0.0, 0.0, gsm2.rd, track, irrad_cond[1], type_AT)
+        dose_lookup_threads[tid][i] = Gyr
+    end
+    dose_vec  = sum(dose_lookup_threads)
+    impact_vec = impact_p
+    core_dose  = dose_vec[1]
+
+    Plots.plot(impact_vec[dose_vec .> 0] * 10^-6, dose_vec[dose_vec .> 0], xscale=:log10, yscale=:log10)
+
+    push!(yF_vec, yF(impact_vec, dose_vec) * (ρ * π * gsm2.rd^2 / 0.1602))
+    push!(yD_vec, yD(impact_vec, dose_vec) * (ρ * π * gsm2.rd^2 / 0.1602))
+    push!(ystar_vec, ystar(impact_vec, dose_vec, 150.) * (ρ * π * gsm2.rd^2 / 0.1602))
+    push!(LET_vec, ion.LET)
+
+Plots.plot(energy_vec, yF_vec, xscale=:log10, label = "yF", xlab = "Energy [MeV]", ylab = "Lineal energy [keV/μm]")
+Plots.plot!(energy_vec, yD_vec, xscale=:log10, label = "yD")
+Plots.plot!(energy_vec, ystar_vec, xscale=:log10, label = "y*")
+Plots.plot!(energy_vec, LET_vec, xscale=:log10, label = "LET")
+
+Plots.plot(energy_vec, 1.5 * yF_vec, xscale=:log10, label = "yF", xlab = "Energy [MeV]", ylab = "Lineal energy [keV/μm]")
+Plots.plot!(energy_vec, 1.5 * yD_vec, xscale=:log10, label = "yD")
+Plots.plot!(energy_vec, 1.5 * ystar_vec, xscale=:log10, label = "y*")
+Plots.plot!(energy_vec, LET_vec, xscale=:log10, label = "LET")
+
+
 

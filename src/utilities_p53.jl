@@ -95,6 +95,103 @@ function p53_network(dydt, y, p, t)
     dydt[17] = (k_accasp30 + k_accasp31*((y[16]^4)/(y[16]^4 + j_cytoc^4)))*(Casp3_tot - y[17]) - k_decasp3*y[17]
 end
 
+function p53_network_senescense(dydt, y, p, t)
+
+    (ATM_tot, Akt_tot, Pip_tot, DBS_c, CytoC_tot, Casp3_tot, j_nc) = p
+
+    k_dim = 10.
+    k_undim = 1.
+    k_acatm = 2.
+    j_acatm = 1.
+    k_deatm = 1.3
+    j_deatm = 2.3
+
+    k_dmdm2n0 = 0.003
+    k_dmdm2n1 = 0.05
+    j_atm = 1.0
+    k_acp531 = 0.2
+    k_dep53 = 0.1
+    k_dp53s = 0.01
+    k_sp53 = 0.2
+    k_dp53n = 0.05
+    k_dp53 = 0.7
+    j_1p53n = 0.1
+    k_smdm20 = 0.002
+    k_smdm2 = 0.024
+    j_smdm2 = 1.0
+    k_dmdm2c = 0.003
+    k_1mdm2s = 0.3
+    j_1mdm2s = 0.1
+    k_mdm2s = 8.0
+    j_mdm2s = 0.3
+    k_i = 0.06
+    k_0 = 0.09
+    k_acakt = 0.25
+    j_acakt = 0.1
+    k_deakt = 0.1
+    j_deakt = 0.2
+    k_p2 = 0.1
+    j_p2 = 0.2
+    k_p3 = 0.5
+    j_p3 = 0.4
+    k_p46 = 0.6
+    j_p46 = 0.5
+    k_dp46 = 0.3
+    j_dp46 = 0.2
+    k_swip10 = 0.01
+    k_swip1 = 0.09
+    j_swip1 = 0.5
+    k_dwip1 = 0.05
+    k_sdinp10 = 0.001
+    k_sdinp11 = 0.01
+    j_sdinp11 = 0.7
+    k_sdinp12 = 0.07
+    j_sdinp12 = 0.3
+    k_ddinp1 = 0.01
+    k_spten0 = 0.01
+    k_spten = 0.5
+    j_spten = 1.0
+    k_dpten = 0.1
+    k_sp210 = 0.01
+    k_sp21 = 0.2
+    j_sp21 = 0.6
+    k_dp21 = 0.1
+    k_saip10 = 0.01
+    k_saip1 = 0.32
+    j_saip1 = 1.5
+    k_daip1 = 0.1
+    k_accytoc0 = 0.001
+    k_accytoc1 = 0.9
+    j_casp3 = 0.5
+    k_decytoc = 0.05
+    k_accasp30 = 0.001
+    k_accasp31 = 0.9
+    j_cytoc = 0.5
+    k_decasp3 = 0.07
+
+    q_arr = 0.3
+    deltaS = 1/2000
+    kS = 0.1
+
+    dydt[1] = 0.5*k_dim*(ATM_tot - 2*y[1] - y[2])^2 - k_undim*y[1]
+    dydt[2] = k_acatm*((DBS_c)/(DBS_c + j_nc))*y[2]*((ATM_tot - 2*y[1] - y[2])/(ATM_tot - 2*y[1] - y[2] + j_acatm)) - k_deatm*((y[2])/(y[2] + j_deatm))*(1 + y[11])
+    dydt[3] = k_acp531*((y[2])/(y[2] + j_atm))*y[4] - k_dep53*y[3] - k_dp53s*y[7]*((y[3])/(y[3] + j_1p53n))
+    dydt[4] = k_sp53 - k_dp53n*y[4] - k_dp53*y[7]*((y[4])/(y[4] + j_1p53n)) - k_acp531*((y[2])/(y[2] + j_atm))*y[4] + k_dep53*y[3]
+    dydt[5] = k_smdm20 + k_smdm2*((y[3]^4)/(y[3]^4 + j_smdm2^4)) + k_1mdm2s*((y[6])/(y[6] + j_1mdm2s)) - k_dmdm2c*y[5] - k_mdm2s*(y[8])*((y[5])/(y[5] + j_mdm2s))
+    dydt[6] = k_mdm2s*(y[8])*((y[5])/(y[5] + j_mdm2s)) - k_1mdm2s*((y[6])/(y[6] + j_1mdm2s)) - k_i*y[6] + k_0*y[7] - k_dmdm2c*y[6]
+    dydt[7] = k_i*y[6] - k_0*y[7] - y[7]*(k_dmdm2n0 + k_dmdm2n1*((y[2])/(y[2] + j_atm)))
+    dydt[8] = k_acakt*y[9]*((Akt_tot - y[8])/(Akt_tot - y[8] + j_acakt)) - k_deakt*((y[8])/(y[8] + j_deakt))
+    dydt[9] = k_p2*((Pip_tot - y[9])/(Pip_tot - y[9] + j_p2)) - k_p3*y[13]*((y[9])/(y[9] + j_p3))
+    dydt[10] = k_p46*y[12]*((y[3] - y[10])/(y[3] - y[10] + j_p46)) - k_dp46*y[11]*((y[10])/(y[10] + j_dp46))
+    dydt[11] = k_swip10 + k_swip1*(((y[3] - y[10])^3)/((y[3] - y[10])^3 + j_swip1^3)) - k_dwip1*y[11]
+    dydt[12] = k_sdinp10 + k_sdinp11*(((y[3] - y[10])^3)/((y[3] - y[10])^3 + j_sdinp11^3)) + k_sdinp12*(((y[10])^3)/((y[10])^3 + j_sdinp12^3)) - k_ddinp1*y[12]
+    dydt[13] = k_spten0 + k_spten*(((y[10])^3)/((y[10])^3 + j_spten^3)) - k_dpten*y[13]
+    dydt[14] = k_sp210 + k_sp21*(((y[3] - y[10])^3)/((y[3] - y[10])^3 + j_sp21^3)) - k_dp21*y[14]
+    dydt[15] = k_saip10 + k_saip1*(((y[10])^3)/((y[10])^3 + j_saip1^3)) - k_daip1*y[15]
+    dydt[16] = (k_accytoc0 + k_accytoc1*y[15]*((y[17]^4)/(y[17]^4 + j_casp3^4)))*(CytoC_tot - y[16]) - k_decytoc*y[16]
+    dydt[17] = (k_accasp30 + k_accasp31*((y[16]^4)/(y[16]^4 + j_cytoc^4)))*(Casp3_tot - y[17]) - k_decasp3*y[17]
+    dydt[18] = kS * max(y[14] - q_arr, 0) - deltaS * y[18]
+end
 
 
 function compute_times_domain_p53!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
@@ -301,12 +398,16 @@ function compute_repair_domain_p53_history(X::Vector{Int64}, Y::Vector{Int64}, g
     Mdm2n_0=0.26; Akts_0=0.94; Pip3_0=0.89; PTEN_0=0.1; p53killer_0=0.0; p21_0=0.1
     Wip1_0=0.2; p53DINP1_0=0.0; p53AIP1_0=0.1; CytoC_0=0.06; Casp3_0=0.05
 
+    Sen_0 = 0.
+
     net  = ["ATM2","ATMs","p53s","p53","Mdm2c","Mdm2cp","Mdm2n","Akts","Pip3",
-            "p53killer","Wip1","p53DINP1","PTEN","p21","p53AIP1","CytoC","Casp3"]
+            "p53killer","Wip1","p53DINP1","PTEN","p21","p53AIP1","CytoC","Casp3",
+            "Sen"]
     net_ = [net; "time"]
 
     state  = [ATM2_0, ATMs_0, p53s_0, p53_0, Mdm2c_0, Mdm2cp_0, Mdm2n_0, Akts_0, Pip3_0,
-                p53killer_0, Wip1_0, p53DINP1_0, PTEN_0, p21_0, p53AIP1_0, CytoC_0, Casp3_0]
+                p53killer_0, Wip1_0, p53DINP1_0, PTEN_0, p21_0, p53AIP1_0, CytoC_0, Casp3_0,
+                Sen_0]
 
     j_nc = 3
     a = gsm2.a;  b = gsm2.b;  r = gsm2.r
@@ -363,7 +464,7 @@ function compute_repair_domain_p53_history(X::Vector{Int64}, Y::Vector{Int64}, g
             if dt_remaining > 0
                 tmin_ode = dt_remaining * p53_scale
                 p_ode = (ATM_tot, Akt_tot, Pip_tot, sum(X), CytoC_tot, Casp3_tot, j_nc)
-                prob  = ODEProblem(p53_network, state, (0.0, tmin_ode), p_ode)
+                prob  = ODEProblem(p53_network_senescense, state, (0.0, tmin_ode), p_ode)
                 sol   = solve(prob, RK4(), isoutofdomain=(u,p,t)->any(x->x<0,u),
                                 save_everystep=false, save_start=false, saveat=tmin_ode/10)
                 if length(sol.u) > 0
@@ -386,7 +487,7 @@ function compute_repair_domain_p53_history(X::Vector{Int64}, Y::Vector{Int64}, g
         tmin_ode = dt * p53_scale                  # ODE uses a scaled time
         p_ode    = (ATM_tot, Akt_tot, Pip_tot, sum(X), CytoC_tot, Casp3_tot, j_nc)
 
-        prob = ODEProblem(p53_network, state, (0.0, tmin_ode), p_ode)
+        prob = ODEProblem(p53_network_senescense, state, (0.0, tmin_ode), p_ode)
         sol  = solve(prob, RK4(), isoutofdomain=(u,p,t)->any(x->x<0,u),
                         save_everystep=false, save_start=false, saveat=tmin_ode/10)
 
@@ -478,9 +579,9 @@ end
 
 
 function compute_repair_domain_p53(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
-                                   terminal_time::Float64 = Inf,
-                                   au::Float64            = 6.0,
-                                   p53_scale::Float64     = 120.0)
+                                    terminal_time::Float64 = Inf,
+                                    au::Float64            = 6.0,
+                                    p53_scale::Float64     = 120.0)
 
     X = copy(X);  Y = copy(Y)
 
@@ -490,7 +591,7 @@ function compute_repair_domain_p53(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM
     ATM_tot=5.0; Akt_tot=1.0; Pip_tot=1.0; CytoC_tot=3.0; Casp3_tot=3.0
     j_nc = 3
     state = [2.17,0.01,0.0,0.8,0.01,0.4,0.26,0.94,0.89,
-             0.0,0.2,0.0,0.1,0.1,0.1,0.06,0.05]
+                0.0,0.2,0.0,0.1,0.1,0.1,0.06,0.05]
     p53s_idx = 3;  p21_idx = 14;  casp3_idx = 17
 
     a = gsm2.a;  b = gsm2.b;  r = gsm2.r

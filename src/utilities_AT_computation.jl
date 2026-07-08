@@ -135,8 +135,8 @@ function distribute_dose_domain(
         dose = integral
 
         if rMax == track.Rk
-            theta1 = acos((b/(2*rMax) + rMax/(2*b) - radius^2/(2*b*rMax)))
-            theta2 = acos((b/(2*radius) - rMax^2/(2*b*radius) + radius/(2*b)))
+            theta1 = acos(clamp(b/(2*rMax) + rMax/(2*b) - radius^2/(2*b*rMax), -1.0, 1.0))
+            theta2 = acos(clamp(b/(2*radius) - rMax^2/(2*b*radius) + radius/(2*b), -1.0, 1.0))
             area3  = π*radius^2 - (theta1*rMax^2 + theta2*radius^2 - rMax*b*sin(theta1))
         end
 
