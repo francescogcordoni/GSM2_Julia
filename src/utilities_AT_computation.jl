@@ -313,7 +313,7 @@ function GetRadialLinearDose(r::Float64, ion::AT, type::String; verbose::Bool = 
         z_eff     = ion.Z * (1 - exp(-125 * β / ion.Z^(2.0/3.0)))
         Kp        = 1.25 * 0.0001 * (z_eff / β)^2
         LETk      = ion.LET * 0.1602
-        r_penumbra = 0.05 * (ion.E)^1.7
+        r_penumbra = 0.0616 * (ion.E )^1.7
 
         vprintln("KC: β=", β, " z_eff=", z_eff, " Kp=", Kp, " r_core=", r_core)
 
