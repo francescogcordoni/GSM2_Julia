@@ -123,7 +123,7 @@ function fit_lq_beta_only(doses, surv_df, doserates_Gys, alpha_fixed; tag="")
         ab     = β > 0 ? alpha_fixed / β : Inf
         push!(params_df, (tag, doserates_Gys[j], alpha_fixed, β, se, ab, r2))
         println(@sprintf("  %-22s  α=%.4f (fixed)  β=%.4f±%.4f  α/β=%.2f  R²=%.4f",
-                         col, alpha_fixed, β, se, ab, r2))
+                            col, alpha_fixed, β, se, ab, r2))
     end
     return params_df
 end
@@ -222,7 +222,7 @@ function run_survival_fast(
         sf = sum(is_alive) / Ntot
         survival_results[k, j] = sf
         println(@sprintf("  [%s | dose=%.2f Gy | dr=%.0e Gy/s] SF=%.4f  (eff.par=%d/%d)",
-                         tag, dose, dr_gys, sf, length(lut_indices), N_dose))
+                            tag, dose, dr_gys, sf, length(lut_indices), N_dose))
     end
 
     return survival_results
@@ -294,9 +294,9 @@ let
 
     cell_id_to_pos = Dict(idx => ci for (ci, idx) in enumerate(cell_ids))
     base_X = [zeros(Int, length(cell_df_copy.dam_X_dom[ci])) for ci in
-              [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
+                [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
     base_Y = [zeros(Int, length(cell_df_copy.dam_Y_dom[ci])) for ci in
-              [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
+                [findfirst(==(id), cell_df_copy.index) for id in cell_ids]]
 
     doses_to_run         = [0.1, 0.3, 0.7, 1.0, 1.3, 1.7, 2.0]
     doserates_to_run_Gys = [1e-5, 5e-5, 1e-4, 1e-3, 1e-2]
@@ -342,7 +342,7 @@ end
 # ============================================================
 E            = 80.0
 particle     = "12C"
-dose_ref     = 0.5
+dose_ref     = 4.
 tumor_radius = 200.0
 X_box        = 250.0
 au           = 4.0
@@ -351,7 +351,7 @@ setup(E, particle, dose_ref, tumor_radius; X_box = X_box)
 let
     E            = 80.0
     particle     = "12C"
-    dose_ref     = 0.5
+    dose_ref     = 4.
     tumor_radius = 200.0
     X_box        = 250.0
     au           = 4.0
@@ -442,7 +442,7 @@ end
 # ============================================================
 E            = 100.0
 particle     = "1H"
-dose_ref     = 0.5
+dose_ref     = 4.
 tumor_radius = 200.0
 X_box        = 250.0
 au           = 4.0
@@ -452,7 +452,7 @@ setup(E, particle, dose_ref, tumor_radius; X_box = X_box)
 let
     E            = 100.0
     particle     = "1H"
-    dose_ref     = 0.5
+    dose_ref     = 4.
     tumor_radius = 200.0
     X_box        = 250.0
     au           = 4.0
