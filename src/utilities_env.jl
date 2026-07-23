@@ -302,7 +302,7 @@ function setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
     z_to_layer = Dict(z => i for (i, z) in enumerate(unique_z))
 
     irrad_cond_local = Array{AT}(undef, length(unique_z))
-    compute_energy_box!(irrad_cond_local, ion, irrad, type_AT, cell_df, track_seg)
+    compute_energy_box!(irrad_cond_local, ion, irrad, type_AT, cell_df, track_seg, sp)
 
     lets_local     = getfield.(irrad_cond_local, :LET)
     energies_local = getfield.(irrad_cond_local, :E)

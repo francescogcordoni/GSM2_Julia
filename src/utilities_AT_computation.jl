@@ -271,80 +271,29 @@ function arc_intersection_angle(
 end
 
 """
-    GetRadialLinearDose(r::Float64, ion::AT, type::String; verbose=false) -> Float64
+    GetRadialLinearDose(r, ion::AT, type) -> Float64
 
-Radial linear dose [Gy/µm²] at distance `r` [µm] from the ion track center.
+Radial linear dose [Gy/µm²] at distance `r` [µm] from the track centre.
 
-**KC model** (Kiefer-Chatterjee):
-- Relativistic velocity: `β = sqrt(1 − 1/(E/AMU + 1)²)` with `AMU2MEV = 931.494027`.
-- Effective charge:      `z_eff = Z · (1 − exp(−125β / Z^(2/3)))`.
-- Penumbra coefficient:  `Kp = 1.25e-4 · (z_eff/β)²`.
-- Local penumbra radius: `r_penumbra = 0.0616 · (E/A)^1.7` [µm].
-  NOTE: this is computed locally from ion energy/mass and should be consistent
-  with `track.Rk` (the penumbra cutoff used in `distribute_dose_domain`).
-- Core (`r ≤ Rc`): `D = (LET·0.1602 − 2π·Kp·log(r_penumbra/Rc)) / (π·Rc²) · 1.05`
-- Penumbra (`r > Rc`): `D = Kp / r²`
+The core dose is *solved for* from energy conservation,
 
-**LEM model** (Local Effect Model):
-- Normalization: `norm = LET·0.1602 / (1 + 2·log(Rp/Rc))`
-- Core (`r ≤ Rc`): `D = norm / (π·Rc²) · 1.05`
-- Penumbra (`r > Rc`): `D = norm / (π·r²)`
+    D_core·πRc² + ∫_{Rc}^{Rk} D(r)·2πr dr = LET·0.1602
 
-The factor `1.05` is an empirical correction applied to the core dose in both
-models to account for the under-representation of the core contribution due to
-the log-normalization boundary condition.
-
-LET conversion: `ion.LET` [keV/µm] × 0.1602 → [Gy·µm²] (using ρ = 1 g/cm³).
-
-# Example
-```julia
-D = GetRadialLinearDose(0.5, irrad_cond, "KC")
-D = GetRadialLinearDose(2.0, irrad_cond, "LEM")
-```
+so the normalisation radius is `ion.Rk` — the same radius `distribute_dose_domain`
+truncates at. Never recompute it locally.
 """
-function GetRadialLinearDose(r::Float64, ion::AT, type::String; verbose::Bool = false)
-    vprintln(args...) = (verbose ? println(args...) : nothing)
+function GetRadialLinearDose(r::Float64, ion::AT, type::String)
+    r > ion.Rk && return 0.0                       # hard cutoff at truncation radius
 
     if type == "KC"
-        AMU2MEV = 931.494027
-
-        β         = sqrt(1 - 1 / ((ion.E / AMU2MEV + 1)^2))
-        r_core    = ion.Rc
-        z_eff     = ion.Z * (1 - exp(-125 * β / ion.Z^(2.0/3.0)))
-        Kp        = 1.25 * 0.0001 * (z_eff / β)^2
-        LETk      = ion.LET * 0.1602
-        r_penumbra = 0.0616 * (ion.E )^1.7
-
-        vprintln("KC: β=", β, " z_eff=", z_eff, " Kp=", Kp, " r_core=", r_core)
-
-        if r <= r_core
-            D_arc  = LETk - 2π * Kp * log(r_penumbra / r_core)
-            D_arc /= π * r_core^2
-            #D_arc *= 1.05  # empirical core correction (boundary normalization)
-            vprintln("  [Core]     r=", r, " → D=", D_arc)
-        else
-            D_arc = Kp / (r * r)
-            vprintln("  [Penumbra] r=", r, " → D=", D_arc)
-        end
-        return D_arc
+        r > ion.Rc && return ion.Kp / (r * r)      # hot path: no log, no exp
+        LETk = ion.LET * 0.1602
+        return (LETk - 2π * ion.Kp * log(ion.Rk / ion.Rc)) / (π * ion.Rc^2)
 
     elseif type == "LEM"
-        Rc   = ion.Rc
-        Rp   = ion.Rp
         LETk = ion.LET * 0.1602
-        norm = LETk / (1 + 2 * log(Rp / Rc))
-
-        vprintln("LEM: Rc=", Rc, " Rp=", Rp, " norm=", norm)
-
-        if r <= Rc
-            D_arc  = norm / (π * Rc^2)
-            #D_arc *= 1.05  # empirical core correction (boundary normalization)
-            vprintln("  [Core]     r=", r, " → D=", D_arc)
-        else
-            D_arc = norm / (π * r * r)
-            vprintln("  [Penumbra] r=", r, " → D=", D_arc)
-        end
-        return D_arc
+        norm = LETk / (1 + 2 * log(ion.Rk / ion.Rc))
+        return r > ion.Rc ? norm / (π * r * r) : norm / (π * ion.Rc^2)
 
     else
         error("GetRadialLinearDose: unknown model '$type'. Expected \"KC\" or \"LEM\".")

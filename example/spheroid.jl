@@ -46,7 +46,7 @@ println("Threads available: ", nthreads())
 
 # ── Load all source utilities ─────────────────────────────────────────────────
 include(joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
-sp = load_stopping_power()
+sp = load_stopping_power()                 # now returns Dict{String,StoppingTable}
 
 # ============================================================================
 # 1. PARAMETERS — edit these to change the irradiation condition
@@ -55,10 +55,11 @@ sp = load_stopping_power()
 # Irradiation
 PARTICLE      = "1H"      # ion species: "1H", "4He", "12C", "16O"
 ENERGY_MEV_U  = 250.0      # kinetic energy per nucleon (MeV/u)
-DOSE_GY       = 5.        # prescribed dose (Gy)
+DOSE_GY       = 1.        # prescribed dose (Gy)
+validate_stopping(sp, PARTICLE, parse(Int, match(r"\d+", PARTICLE).match))
 
 # Spheroid and cell geometry
-TUMOR_RADIUS  = 1000.0     # spheroid radius (µm)
+TUMOR_RADIUS  = 250.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
 X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)
@@ -76,7 +77,7 @@ const A_AVG= 0.01481;  const B_AVG= 0.01266;  const R_AVG= 2.5657
 
 # Simulation options
 const TYPE_AT        = "KC"         # track structure: "KC" (Kiefer-Chatterjee) or "LEM"
-const TRACK_SEG      = false         # true = fixed LET across depth (no Bragg-peak buildup)
+const TRACK_SEG      = true         # true = fixed LET across depth (no Bragg-peak buildup)
 const TARGET_GEOM    = "circle"     # spheroid cross-section for beam geometry
 const CALC_TYPE      = "full"       # beam radius mode: "full" (whole spheroid) or "fast"
 const TERMINAL_TIME  = 72.0         # post-irradiation ABM window (h)
