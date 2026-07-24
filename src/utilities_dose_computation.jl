@@ -1,7 +1,18 @@
 #! ============================================================================
 #! utilities_dose_computation.jl
 #!
-
+#! Amorphous-track Monte Carlo dose deposition onto sub-cellular domains.
+#!
+#! REQUIRES (load before this file)
+#!   utilities_structures.jl      Cell, Track, Ion, Irrad, AT, GSM2
+#!   utilities_general.jl         GenerateHit_Circle  (NOT redefined here)
+#!   utilities_radiation.jl       ATRadius, stopping tables
+#!   utilities_AT_computation.jl  distribute_dose_domain, GetRadialLinearDose
+#!   Random, Distributions, DataFrames
+#!
+#! Physics is unchanged from the original: near field from
+#! `distribute_dose_domain`, far field `Kp/dist²`, hard cutoff at `Rp`.
+#! Only the execution strategy differs.
 #!
 #! FUNCTIONS
 #! ---------
@@ -23,17 +34,57 @@
 #?   check_against_reference(...)                 fast path vs brute force
 #?   check_lut_closure(...)                       ∫Ḡ(b)·2πb db vs LET·0.1602
 #!
+#! WHAT CHANGED FROM THE ORIGINAL, AND WHY
+#! ---------------------------------------
+#! 1. LOOP INVERSION + TILING.  The old kernels were particle-outer /
+#!    domain-inner, so each particle streamed the whole accumulator through
+#!    cache:  `for _ in 1:Np; for k in 1:total_domains`.  At 10⁶ domains that
+#!    is 8 MB per particle, ~1.8 TB at 2×10⁵ particles, and the loop is
+#!    bandwidth-bound — roughly 10 flops per pair, far too few to hide it.
+#!    Domains are now partitioned across threads, tiled to L2, and all tracks
+#!    are swept per tile:  traffic becomes (ndom/TILE)·Np·16 bytes.
+#!
+#! 2. NO PER-THREAD ACCUMULATORS.  `at_acc[Threads.threadid()]` is unsafe under
+#!    `Threads.@threads` since Julia 1.8 (`:dynamic` scheduling migrates tasks
+#!    mid-body, so the tid read at the top can be stale and two tasks share one
+#!    buffer).  Partitioning by domain instead means threads write disjoint
+#!    slices of the output: the race is structurally impossible, the reduction
+#!    pass is gone, and so is nthreads()·ndom·8 bytes of scratch.
+#!
+#! 3. O(1) LUT LOOKUP.  The table is uniform in dist² rather than log-spaced in
+#!    dist, so the index is one multiply and a truncate instead of
+#!    `searchsortedfirst`.  Uniform-in-d² also puts the finest resolution near
+#!    the domain rim, where dose(b) varies fastest.
+#!
+#! 4. BRANCHLESS FAR FIELD + SPARSE NEAR FIELD.  Nearly every pair lands in the
+#!    `Kp/d²` branch, so that pass is isolated and vectorisable; the few
+#!    near-field pairs are corrected afterwards through a spatial hash of the
+#!    track positions.
+#!
+#! 5. COPY-BACK WAS O(n²)–O(n³).  `findfirst(==(idx), cell_df.index)` scans the
+#!    whole column, and sat inside a doubly nested loop.  Replaced by index→row
+#!    Dicts built once.  On a large lattice this was often costing more than
+#!    the Monte Carlo itself.
+#!
+#! 6. REPRODUCIBILITY.  Track positions are drawn up front from an explicit
+#!    RNG.  The old code could not be reproduced even with `Random.seed!`,
+#!    since thread assignment varied between runs.
+#!
+#! 7. DROPPED.  `MC_loop_ions_domain_tsc_fast!` and `MC_loop_ions_domain_fast!`
+#!    duplicated the two matrix kernels with a different progress bar and were
+#!    not called by `MC_dose_CPU!`.  The latter was never actually threaded:
+#!    `@showprogress for` with thread-local accumulators around it, so tid was
+#!    always 1.
+#! ============================================================================
 
 using Random
 
-#? Accumulator tile size in Float64 elements. 32768 ≈ 256 KB; lower to 16384
-#? if L2 is smaller. Inactive when the per-thread domain slice is already
-#? smaller than this — at ~10⁴ domains over many threads the accumulator fits
-#? in L2 anyway and tiling is a no-op. It matters at ≥ 10⁶ domains.
-const TILE_DOMAINS = 32_768
+#? Default domain-tile size in Float64 elements. 32768 = 256 KB, a common L2.
+#? This is the only cache-tuning knob; the *strategy* below adapts on its own.
+const DEFAULT_TILE_DOMAINS = 32_768
 
 #! ============================================================================
-#! Chunking
+#! Chunking and execution planning
 #! ============================================================================
 
 """
@@ -56,6 +107,74 @@ function chunk_ranges(n::Int, nchunks::Int)
     return rs
 end
 
+"""
+    DosePlan
+
+How `accumulate_dose!` will decompose the work. Printable, so the chosen
+strategy is visible rather than implicit.
+"""
+struct DosePlan
+    ndom::Int
+    Np::Int
+    tile::Int
+    ntiles::Int
+    npchunks::Int
+    nthreads::Int
+    strategy::Symbol
+    accum_bytes::Int
+    traffic_bytes::Float64
+end
+
+"""
+    plan_dose(ndom, Np; nthreads, tile) -> DosePlan
+
+Choose the decomposition from the actual geometry.
+
+The work is a full `ndom × Np` sweep either way, so the only thing to optimise
+is memory traffic. Two regimes:
+
+* **Accumulator fits cache** (`ndom ≤ tile`, one tile). Splitting by domain
+  would force every thread to re-read the whole track list: `nthreads·Np·16`
+  bytes. Instead split by *particle* — each thread keeps a private accumulator
+  resident and the tracks stream once: `Np·16 + nthreads·ndom·8`.
+
+* **Accumulator exceeds cache** (`ndom > tile`, many tiles). Private
+  accumulators would cost `nthreads·ndom·8` and none would stay resident.
+  Split by domain into cache-sized tiles and sweep all tracks per tile:
+  `ntiles·Np·16`.
+
+Between the two, when tiles are fewer than threads, tiles are additionally
+split across particle chunks so every thread has work. Scratch memory is then
+bounded by `nthreads·tile·8` — about 5 MB at 19 threads — regardless of how
+large the spheroid gets.
+"""
+function plan_dose(ndom::Int, Np::Int;
+                   nthreads::Int = Threads.nthreads(),
+                   tile::Int = DEFAULT_TILE_DOMAINS)
+    ndom <= 0 && return DosePlan(ndom, Np, 1, 0, 1, nthreads, :empty, 0, 0.0)
+
+    tile     = clamp(tile, 1, ndom)
+    ntiles   = cld(ndom, tile)
+    npchunks = clamp(cld(nthreads, ntiles), 1, max(1, Np))
+
+    strategy = ntiles == 1 ? (npchunks == 1 ? :serial_tile : :particle_parallel) :
+               (npchunks == 1 ? :domain_parallel : :hybrid)
+
+    accum   = npchunks == 1 ? 0 : ntiles * npchunks * min(tile, ndom) * 8
+    traffic = npchunks == 1 ? ntiles * float(Np) * 16 + ndom * 8 :
+                              float(Np) * 16 * ntiles + accum
+
+    DosePlan(ndom, Np, tile, ntiles, npchunks, nthreads, strategy, accum, traffic)
+end
+
+function Base.show(io::IO, p::DosePlan)
+    println(io, "  plan | $(p.ndom) domains x $(p.Np) tracks on $(p.nthreads) threads")
+    println(io, "       | strategy=$(p.strategy)  tiles=$(p.ntiles)x$(p.tile)  " *
+                "particle-chunks=$(p.npchunks)")
+    println(io, "       | scratch=$(round(p.accum_bytes/2^20; digits=2)) MiB  " *
+                "est. traffic=$(round(p.traffic_bytes/2^20; digits=1)) MiB")
+end
+
 #! ============================================================================
 #! Radial lookup table, uniform in dist²
 #! ============================================================================
@@ -71,9 +190,9 @@ Uniform in d² makes the lookup `i = trunc(Int, d2 * inv_step) + 1`, with no
 binary search, and concentrates resolution near the rim where dose(b) is
 steepest.
 
-The table starts at b = 0 rather than b = rd − 10·Rc. Same construction cost.
-To reproduce the old flat-core behaviour exactly, overwrite every entry below
-`(rd - 10Rc)² * inv_step` with `lut[1]` after building.
+The table starts at b = 0 rather than b = rd − 10·Rc, at the same construction
+cost. To reproduce the old flat-core behaviour exactly, overwrite every entry
+below `(rd - 10Rc)^2 * inv_step` with `lut[1]` after building.
 """
 function build_radial_lut(a::AT, gsm2::GSM2, type_AT::String;
                           n::Int = 8192, nchunks::Int = Threads.nthreads())
@@ -98,10 +217,15 @@ end
 #! ============================================================================
 
 """
-    TrackGrid(tx, ty, h)
+    TrackGrid(tx, ty, b_near; max_cells)
 
-Uniform bucket grid over track positions in CSR layout: cell `c` holds the
-tracks `idx[offs[c] : offs[c+1]-1]`.
+Uniform bucket grid over track positions, CSR layout: cell `c` holds the tracks
+`idx[offs[c] : offs[c+1]-1]`. `nring` is how many cells out the neighbourhood
+search must reach to cover `b_near`.
+
+Cell size starts at `b_near` and doubles until the grid fits `max_cells`, so a
+very small `b_near` on a wide beam cannot blow up memory. `nring` is recomputed
+to match, keeping the search correct at any cell size.
 
 Tracks are hashed rather than domains so the domain partition stays intact and
 each thread keeps writing only its own output indices.
@@ -112,19 +236,28 @@ struct TrackGrid
     inv_h::Float64
     nx::Int
     ny::Int
+    nring::Int
     offs::Vector{Int}
     idx::Vector{Int32}
 end
 
-function TrackGrid(tx::Vector{Float64}, ty::Vector{Float64}, h::Float64)
+function TrackGrid(tx::Vector{Float64}, ty::Vector{Float64}, b_near::Float64;
+                   max_cells::Int = 4_000_000)
     n = length(tx)
-    n == 0 && return TrackGrid(0.0, 0.0, 1.0, 1, 1, [1, 1], Int32[])
+    n == 0 && return TrackGrid(0.0, 0.0, 1.0, 1, 1, 1, [1, 1], Int32[])
 
     xmin, xmax = extrema(tx)
     ymin, ymax = extrema(ty)
+    W, H = xmax - xmin, ymax - ymin
+
+    h = max(b_near, eps())
+    while (floor(Int, W / h) + 1) * (floor(Int, H / h) + 1) > max_cells
+        h *= 2
+    end
     inv_h = 1.0 / h
-    nx = max(1, floor(Int, (xmax - xmin) * inv_h) + 1)
-    ny = max(1, floor(Int, (ymax - ymin) * inv_h) + 1)
+    nx = max(1, floor(Int, W * inv_h) + 1)
+    ny = max(1, floor(Int, H * inv_h) + 1)
+    nring = max(1, ceil(Int, b_near * inv_h))
 
     @inline cellof(x, y) = begin
         i = clamp(floor(Int, (x - xmin) * inv_h), 0, nx - 1)
@@ -150,7 +283,78 @@ function TrackGrid(tx::Vector{Float64}, ty::Vector{Float64}, h::Float64)
         cursor[c] += 1
     end
 
-    TrackGrid(xmin, ymin, inv_h, nx, ny, offs, idx)
+    TrackGrid(xmin, ymin, inv_h, nx, ny, nring, offs, idx)
+end
+
+#! ============================================================================
+#! Inner kernels
+#! ============================================================================
+
+"""
+    far_sweep!(acc, dx, dy, tx, ty, prange, Kp, rp2, b_near2)
+
+Add `Kp/d²` for every (domain, track) pair with `b_near² ≤ d² < Rp²`, zero
+elsewhere. Branchless so it vectorises; `acc`, `dx`, `dy` are contiguous views
+of one domain tile.
+
+Nearly every pair lands here, which is why it is worth isolating from the
+near-field case.
+"""
+@inline function far_sweep!(acc::AbstractVector{Float64},
+                            dx::AbstractVector{Float64}, dy::AbstractVector{Float64},
+                            tx::Vector{Float64}, ty::Vector{Float64},
+                            prange::UnitRange{Int},
+                            Kp::Float64, rp2::Float64, b_near2::Float64)
+    n = length(acc)
+    @inbounds for p in prange
+        x = tx[p]; y = ty[p]
+        @simd for k in 1:n
+            ddx = dx[k] - x
+            ddy = dy[k] - y
+            d2  = ddx * ddx + ddy * ddy
+            inr = (d2 >= b_near2) & (d2 < rp2)
+            acc[k] += ifelse(inr, Kp / max(d2, b_near2), 0.0)
+        end
+    end
+    return nothing
+end
+
+"""
+    near_sweep!(out, dom_x, dom_y, tx, ty, krange, grid, lut, inv_step, b_near2)
+
+Add the tabulated near-field dose for pairs with `d² < b_near²`, visiting only
+the tracks in the `nring` neighbourhood of each domain. Sparse: a handful of
+candidates per domain rather than a test per pair.
+"""
+function near_sweep!(out::Vector{Float64},
+                     dom_x::Vector{Float64}, dom_y::Vector{Float64},
+                     tx::Vector{Float64}, ty::Vector{Float64},
+                     krange::UnitRange{Int}, grid::TrackGrid,
+                     lut::Vector{Float64}, inv_step::Float64, b_near2::Float64)
+    nlut = length(lut)
+    r    = grid.nring
+    @inbounds for k in krange
+        x = dom_x[k]; y = dom_y[k]
+        i0 = clamp(floor(Int, (x - grid.x0) * grid.inv_h), 0, grid.nx - 1)
+        j0 = clamp(floor(Int, (y - grid.y0) * grid.inv_h), 0, grid.ny - 1)
+        acc = 0.0
+        for j in max(0, j0 - r):min(grid.ny - 1, j0 + r)
+            base = j * grid.nx
+            for i in max(0, i0 - r):min(grid.nx - 1, i0 + r)
+                c = base + i + 1
+                for s in grid.offs[c]:(grid.offs[c+1] - 1)
+                    p   = grid.idx[s]
+                    ddx = x - tx[p]; ddy = y - ty[p]
+                    d2  = ddx * ddx + ddy * ddy
+                    if d2 < b_near2
+                        acc += lut[min(trunc(Int, d2 * inv_step) + 1, nlut)]
+                    end
+                end
+            end
+        end
+        out[k] += acc
+    end
+    return nothing
 end
 
 #! ============================================================================
@@ -159,85 +363,84 @@ end
 
 """
     accumulate_dose!(out, dom_x, dom_y, tx, ty, Kp, rp2, lut, inv_step, b_near2;
-                     nchunks, tile) -> out
+                     plan, nthreads, tile, verbose) -> out
 
 Accumulate the dose from every track into `out`, overwriting it.
 
-Two passes per thread:
+Decomposition comes from `plan_dose` and adapts to the geometry: particle-
+parallel with private accumulators while the domain set fits cache,
+domain-tiled once it does not, hybrid in between. Pass `verbose = true` to see
+which was chosen.
 
-* **Far field** — domains tiled to L2, all tracks swept per tile. Branchless
-  and vectorisable: adds `Kp/d²` for `b_near² ≤ d² < Rp²`, zero elsewhere.
-  This is where essentially all pairs land.
-* **Near field** — sparse. Only tracks in the 3×3 grid neighbourhood are
-  candidates, so a handful of checks per domain rather than a sweep. Adds the
-  LUT value for `d² < b_near²`.
-
-Threads own disjoint slices of `out`: no race, no reduction, no scratch.
+Threads never share an output element, under any strategy, so there is no race
+and no `threadid()` anywhere.
 """
 function accumulate_dose!(out::Vector{Float64},
                           dom_x::Vector{Float64}, dom_y::Vector{Float64},
                           tx::Vector{Float64}, ty::Vector{Float64},
                           Kp::Float64, rp2::Float64,
                           lut::Vector{Float64}, inv_step::Float64, b_near2::Float64;
-                          nchunks::Int = Threads.nthreads(),
-                          tile::Int = TILE_DOMAINS)
+                          plan::Union{Nothing,DosePlan} = nothing,
+                          nthreads::Int = Threads.nthreads(),
+                          tile::Int = DEFAULT_TILE_DOMAINS,
+                          verbose::Bool = false)
 
     ndom = length(dom_x)
     Np   = length(tx)
     length(dom_y) == ndom || error("accumulate_dose!: dom_x/dom_y length mismatch")
     length(ty) == Np      || error("accumulate_dose!: tx/ty length mismatch")
+    length(out) == ndom   || error("accumulate_dose!: out length mismatch")
     fill!(out, 0.0)
     (ndom == 0 || Np == 0) && return out
 
-    grid = TrackGrid(tx, ty, sqrt(b_near2))
-    nlut = length(lut)
+    P = plan === nothing ? plan_dose(ndom, Np; nthreads = nthreads, tile = tile) : plan
+    verbose && show(stdout, P)
 
-    tasks = map(chunk_ranges(ndom, nchunks)) do myrange
-        Threads.@spawn begin
-            lo_all, hi_all = first(myrange), last(myrange)
+    tiles = [((t - 1) * P.tile + 1):min(t * P.tile, ndom) for t in 1:P.ntiles]
 
-            # ---- far field: tile domains, sweep all tracks per tile ----
-            t0 = lo_all
-            while t0 <= hi_all
-                t1 = min(t0 + tile - 1, hi_all)
-                for p in 1:Np
-                    x = tx[p]; y = ty[p]
-                    @inbounds @simd for k in t0:t1
-                        dx = dom_x[k] - x
-                        dy = dom_y[k] - y
-                        d2 = dx * dx + dy * dy
-                        inr = (d2 >= b_near2) & (d2 < rp2)
-                        out[k] += ifelse(inr, Kp / max(d2, b_near2), 0.0)
+    # ---- far field ----------------------------------------------------------
+    if P.npchunks == 1
+        # one task per tile, writing its own slice of `out` in place
+        tasks = map(tiles) do kr
+            Threads.@spawn far_sweep!(view(out, kr), view(dom_x, kr), view(dom_y, kr),
+                                      tx, ty, 1:Np, Kp, rp2, b_near2)
+        end
+        foreach(wait, tasks)
+    else
+        # tiles split across particle chunks; one buffer per (tile, chunk)
+        pranges = chunk_ranges(Np, P.npchunks)
+        bufs = [[zeros(Float64, length(kr)) for _ in 1:P.npchunks] for kr in tiles]
+
+        tasks = Task[]
+        for (t, kr) in enumerate(tiles), c in 1:P.npchunks
+            push!(tasks, Threads.@spawn far_sweep!(bufs[t][c],
+                                                   view(dom_x, kr), view(dom_y, kr),
+                                                   tx, ty, pranges[c], Kp, rp2, b_near2))
+        end
+        foreach(wait, tasks)
+
+        rtasks = map(enumerate(tiles)) do (t, kr)
+            Threads.@spawn begin
+                o = view(out, kr)
+                for c in 1:P.npchunks
+                    b = bufs[t][c]
+                    @inbounds @simd for k in eachindex(o)
+                        o[k] += b[k]
                     end
                 end
-                t0 = t1 + 1
-            end
-
-            # ---- near field: sparse, via the track hash ----
-            @inbounds for k in myrange
-                x = dom_x[k]; y = dom_y[k]
-                i0 = clamp(floor(Int, (x - grid.x0) * grid.inv_h), 0, grid.nx - 1)
-                j0 = clamp(floor(Int, (y - grid.y0) * grid.inv_h), 0, grid.ny - 1)
-                acc = 0.0
-                for j in max(0, j0-1):min(grid.ny-1, j0+1)
-                    for i in max(0, i0-1):min(grid.nx-1, i0+1)
-                        c = j * grid.nx + i + 1
-                        for s in grid.offs[c]:(grid.offs[c+1] - 1)
-                            p  = grid.idx[s]
-                            dx = x - tx[p]; dy = y - ty[p]
-                            d2 = dx * dx + dy * dy
-                            if d2 < b_near2
-                                li = trunc(Int, d2 * inv_step) + 1
-                                acc += lut[min(li, nlut)]
-                            end
-                        end
-                    end
-                end
-                out[k] += acc
             end
         end
+        foreach(wait, rtasks)
     end
-    foreach(wait, tasks)
+
+    # ---- near field: sparse, always split by domain --------------------------
+    grid = TrackGrid(tx, ty, sqrt(b_near2))
+    ntasks = map(chunk_ranges(ndom, nthreads)) do kr
+        Threads.@spawn near_sweep!(out, dom_x, dom_y, tx, ty, kr, grid,
+                                   lut, inv_step, b_near2)
+    end
+    foreach(wait, ntasks)
+
     return out
 end
 
@@ -262,7 +465,9 @@ function MC_loop_ions_domain_tsc_matrix!(
     R_beam::Float64, type_AT::String, ion::Ion, single_particle::Bool = false;
     seed::Union{Nothing,Integer} = nothing,
     nchunks::Int = Threads.nthreads(),
-    n_lut::Int = 8192)
+    n_lut::Int = 8192,
+    tile::Int = DEFAULT_TILE_DOMAINS,
+    verbose::Bool = true)
 
     a  = irrad_cond[1]
     Np = single_particle ? 1 : rand(Poisson(Npar))
@@ -282,9 +487,9 @@ function MC_loop_ions_domain_tsc_matrix!(
     dom_x = vec(permutedims(mat_x)); dom_y = vec(permutedims(mat_y))
     out   = Vector{Float64}(undef, ncell * ndomc)
 
-    println("  TSC  | Np=$Np  domains=$(length(out))  threads=$(Threads.nthreads())")
     accumulate_dose!(out, dom_x, dom_y, tx, ty, a.Kp, a.Rp^2,
-                     lut, inv_step, b_near2; nchunks = nchunks)
+                     lut, inv_step, b_near2;
+                     nthreads = nchunks, tile = tile, verbose = verbose)
 
     mat_at .= reshape(out, ndomc, ncell)'
     return nothing
@@ -304,7 +509,9 @@ function MC_loop_ions_domain_matrix!(
     mat_x::Matrix{Float64}, mat_y::Matrix{Float64}, mat_at::Matrix{Float64},
     type_AT::String, ion::Ion;
     nchunks::Int = Threads.nthreads(),
-    n_lut::Int = 8192)
+    n_lut::Int = 8192,
+    tile::Int = DEFAULT_TILE_DOMAINS,
+    verbose::Bool = true)
 
     a = irrad_cond[1]
     lut, inv_step, b_near2 = build_radial_lut(a, gsm2, type_AT; n = n_lut, nchunks = nchunks)
@@ -313,9 +520,9 @@ function MC_loop_ions_domain_matrix!(
     dom_x = vec(permutedims(mat_x)); dom_y = vec(permutedims(mat_y))
     out   = Vector{Float64}(undef, ncell * ndomc)
 
-    println("  full | Np=$(length(x_list))  domains=$(length(out))")
     accumulate_dose!(out, dom_x, dom_y, x_list, y_list, a.Kp, a.Rp^2,
-                     lut, inv_step, b_near2; nchunks = nchunks)
+                     lut, inv_step, b_near2;
+                     nthreads = nchunks, tile = tile, verbose = verbose)
 
     mat_at .= reshape(out, ndomc, ncell)'
     return nothing

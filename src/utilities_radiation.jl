@@ -1,6 +1,7 @@
 #! ============================================================================
 #! utilities_radiation.jl   —   corrected
 #!
+#! ============================================================================
 
 #? MeV·cm²/g → keV/µm at ρ = 1 g/cm³.  SRIM's MeV/µm would be 1000.0.
 const STOPPING_UNIT = 0.1
@@ -290,8 +291,8 @@ The returned Rp is the radius the domain integral must truncate at *and* the
 radius the core dose must be normalised against.  Keep `Rk = Rp` and let
 GetRadialLinearDose read `ion.Rk`; never recompute a penumbra radius locally.
 """
-function ATRadius(ion::Ion, _irrad::Irrad, type::String)
-    ion.E > 0 || error("ATRadius: non-positive energy $(ion.E) MeV/u for $(ion.ion)")
+function ATRadius_params(ion::Ion, type::String)
+    ion.E > 0 || return nothing
 
     if type == "LEM"
         Rc   = 0.01
@@ -310,19 +311,42 @@ function ATRadius(ion::Ion, _irrad::Irrad, type::String)
         error("ATRadius: unknown type \"$type\". Use \"LEM\" or \"KC\".")
     end
 
-    Rp > Rc || error("""
-        ATRadius: Rp=$Rp µm ≤ Rc=$Rc µm for $(ion.ion) at E=$(ion.E) MeV/u.
-        The ion has effectively stopped; ln(Rp/Rc) changes sign and the core
-        dose goes negative. Stop propagating this layer instead.""")
-
+    Rp > Rc || return nothing
     LETk  = ion.LET * 0.1602
     Dcore = (LETk - 2π * Kp * log(Rp / Rc)) / (π * Rc^2)
-    Dcore > 0 || error("""
-        ATRadius: non-positive core dose ($Dcore) for $(ion.ion) at E=$(ion.E) MeV/u.
-        Penumbra alone carries $(2π*Kp*log(Rp/Rc)) ≥ LETk=$LETk — the Kp
-        parameterisation and the tabulated LET are inconsistent at this energy.""")
+    Dcore > 0 || return nothing
 
-    return Rc, Rp, Kp
+    return (Rc = Rc, Rp = Rp, Kp = Kp, Dcore = Dcore)
+end
+
+"""
+    ATRadius_valid(ion, type) -> Bool
+
+Whether the AT parameterisation is self-consistent at this ion's energy and LET.
+
+Fails when `Rp ≤ Rc` (below ~0.02 MeV/u for protons the penumbra formula
+collapses inside the core) or when the penumbra alone would carry more than the
+full LET, leaving a negative core dose.
+
+`ion.LET` must be the **local** LET at `ion.E`. A path-averaged or otherwise
+mismatched LET will make a perfectly valid energy look invalid, because Kp, Rc
+and Rp are all derived from β(E) and the core is normalised against LET.
+"""
+ATRadius_valid(ion::Ion, type::String) = ATRadius_params(ion, type) !== nothing
+
+function ATRadius(ion::Ion, _irrad::Irrad, type::String)
+    ion.E > 0 || error("ATRadius: non-positive energy $(ion.E) MeV/u for $(ion.ion)")
+    p = ATRadius_params(ion, type)
+    if p === nothing
+        error("""
+            ATRadius: parameterisation invalid for $(ion.ion) at E=$(ion.E) MeV/u,
+            LET=$(ion.LET) keV/µm. Either Rp ≤ Rc (ion effectively stopped) or the
+            penumbra alone exceeds LET, giving a negative core dose.
+            Check that ion.LET is the LOCAL LET at this energy — a slab-averaged
+            LET is inconsistent with Kp and Rp, which come from β(E).
+            Use ATRadius_valid to test before calling.""")
+    end
+    return p.Rc, p.Rp, p.Kp
 end
 
 #! ============================================================================
@@ -368,24 +392,89 @@ required_particles(dose_Gy::Float64, LET_keV_um::Float64, R_beam::Float64) =
 #! ============================================================================
 
 """
-    compute_energy_box!(irrad_cond, ion, irrad, type_AT, cell_df, track_seg, sp) -> Nothing
+    occupied_layers(cell_df, unique_z) -> BitVector
+
+Which z-layers actually contain a cell (`is_cell == 1`).
+
+`cell_df` holds every lattice node, occupied or not, so `unique(cell_df.z)`
+alone says nothing about where the material is.
+"""
+function occupied_layers(cell_df::DataFrame, unique_z::Vector{Float64})
+    hasproperty(cell_df, :is_cell) || error("occupied_layers: cell_df needs :is_cell")
+    zidx = Dict{Float64,Int}(z => i for (i, z) in enumerate(unique_z))
+    occ  = falses(length(unique_z))
+    @inbounds for r in 1:nrow(cell_df)
+        if cell_df.is_cell[r] == 1
+            j = get(zidx, Float64(cell_df.z[r]), 0)
+            j != 0 && (occ[j] = true)
+        end
+    end
+    return occ
+end
+
+"""
+    absorbing_mask(occ, mode) -> BitVector
+
+Which slabs remove energy. Slab `i` spans `z[i] → z[i+1]`.
+
+* `:occupied` — only slabs whose leading layer holds cells. A run of occupied
+  layers `a:b` then absorbs over `z[b+1] - z[a]`, i.e. one slab thickness per
+  occupied layer, which is the right path length through the material.
+* `:span`     — everything between the first and last occupied layer, so
+  interior gaps (a necrotic core, say) still attenuate.
+* `:all`      — every slab. The original behaviour.
+"""
+function absorbing_mask(occ::BitVector, mode::Symbol)
+    n = length(occ)
+    mode === :all      && return trues(n)
+    mode === :occupied && return copy(occ)
+    if mode === :span
+        any(occ) || return falses(n)
+        m = falses(n)
+        m[findfirst(occ):findlast(occ)] .= true
+        return m
+    end
+    error("absorbing_mask: unknown mode :$mode. Use :occupied, :span or :all.")
+end
+
+"""
+    compute_energy_box!(irrad_cond, ion, irrad, type_AT, cell_df, track_seg, sp;
+                        absorb = :occupied) -> Nothing
 
 Fill one `AT` per z-layer, propagating energy across the spheroid.
 
-Changes: `sp` is an explicit argument (it was read from the enclosing scope, an
-implicit global); the trailing `ion = ion_original` was a no-op on a local
-binding and is gone; the LET stored per layer is the path-averaged value over
-that layer rather than the entrance value; and propagation stops cleanly once
-the ion runs out of range instead of pushing a sub-threshold energy into
-ATRadius.
+**Energy is lost only in slabs that contain cells.** Previously every gap in
+`unique(cell_df.z)` attenuated the beam, including layers with no cells in
+them, so an ion entering a spheroid padded by four empty layers arrived at the
+first real layer already degraded. With `absorb = :occupied` those slabs are
+skipped and the ion reaches the first occupied layer at its full entrance
+energy.
 
-Warms the range cache before the loop so later threaded code never triggers a
-first-touch build.
+`absorb`:
+* `:occupied` (default) — only slabs whose leading layer holds cells
+* `:span` — everything between the first and last occupied layer, so interior
+  voids still attenuate
+* `:all` — the original behaviour
+
+Physically this is right when the empty layers are vacuum, or when you are
+defining depth zero at the spheroid surface. If they represent culture medium
+or any water-equivalent material, the ion *does* lose energy crossing them and
+`:all` is the correct choice — the padding is then part of the beam path.
+
+Empty layers still receive a valid `AT` entry, carrying the current
+(unattenuated) energy, so `irrad_cond` stays indexable by layer.
+
+Other changes from the original: `sp` is an explicit argument (it was read from
+the enclosing scope); the trailing `ion = ion_original` was a no-op on a local
+binding and is gone; the LET stored per layer is the path average over that
+layer rather than the entrance value; and propagation stops cleanly once the
+ion runs out of range instead of feeding a sub-threshold energy into ATRadius.
 """
 function compute_energy_box!(irrad_cond::Array{AT}, ion::Ion, irrad::Irrad,
                              type_AT::String, cell_df::DataFrame, track_seg::Bool,
-                             sp::Dict{String,StoppingTable})
-    unique_z = sort(unique(cell_df.z))
+                             sp::Dict{String,StoppingTable};
+                             absorb::Symbol = :occupied)
+    unique_z = sort(unique(Float64.(cell_df.z)))
     n_layers = length(unique_z)
     n_layers == 0 && return nothing
 
@@ -394,7 +483,18 @@ function compute_energy_box!(irrad_cond::Array{AT}, ion::Ion, irrad::Irrad,
     tab      = table_for(sp, particle)
     rt       = range_table!(tab, A)          # warm cache, single-threaded
 
-    E, LET  = ion.E, ion.LET
+    occ      = occupied_layers(cell_df, unique_z)
+    absorbs  = absorbing_mask(occ, absorb)
+    n_occ    = count(occ)
+
+    if !track_seg
+        skipped = count(!, view(absorbs, 1:n_layers-1))
+        @info "compute_energy_box!: $n_occ/$n_layers layers occupied, " *
+              "$skipped slab(s) non-absorbing (absorb=:$absorb)"
+        n_occ == 0 && @warn "no occupied layers — the beam will not be attenuated at all"
+    end
+
+    E       = ion.E
     stopped = false
 
     for i in 1:n_layers
@@ -403,23 +503,31 @@ function compute_energy_box!(irrad_cond::Array{AT}, ion::Ion, irrad::Irrad,
             continue
         end
 
-        step = i < n_layers ? unique_z[i+1] - unique_z[i] : 0.0
+        # LOCAL LET at this layer's energy — not a slab average. Kp, Rc and Rp all
+        # derive from β(E), and the core dose is normalised against LET, so the
+        # three must refer to the same E or the normalisation is inconsistent.
+        LET_local = let_at(tab, E)
+        layer_ion = Ion(particle, E, A, Z, LET_local, 1.0)
 
-        # LET representing this layer: path average over the step when there is one
-        E_next, LET_layer = (track_seg || step <= 0) ?
-            (E, LET) : residual_energy_after_distance(E, step, tab, rt)
+        if !ATRadius_valid(layer_ion, type_AT)
+            stopped = true
+            @info "compute_energy_box!: $particle below AT validity at layer $i/$n_layers " *
+                  "(E=$(round(E, sigdigits=4)) MeV/u, $(round(E*A, sigdigits=4)) MeV " *
+                  "residual per ion unaccounted)"
+            irrad_cond[i] = AT(particle, 0.0, A, Z, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+            continue
+        end
 
-        layer_ion  = Ion(particle, E, A, Z, LET_layer, 1.0)
         Rc, Rp, Kp = ATRadius(layer_ion, irrad, type_AT)
-        irrad_cond[i] = AT(particle, E, A, Z, LET_layer, 1.0, Rc, Rp, Rp, Kp)
+        irrad_cond[i] = AT(particle, E, A, Z, LET_local, 1.0, Rc, Rp, Rp, Kp)
 
-        if !track_seg
-            E = E_next
+        # slab i → i+1 contributes path length only if it absorbs
+        step = (i < n_layers && absorbs[i]) ? unique_z[i+1] - unique_z[i] : 0.0
+        if !track_seg && step > 0
+            E, _ = residual_energy_after_distance(E, step, tab, rt)
             if E <= tab.Emin
                 stopped = true
                 i < n_layers && @info "compute_energy_box!: $particle stops at layer $i of $n_layers"
-            else
-                LET = let_at(tab, E)
             end
         end
     end
