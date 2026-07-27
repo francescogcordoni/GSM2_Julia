@@ -222,15 +222,14 @@ println("r: ", r_G1)
 #a: 0.012872261720543399
 #b: 0.04029756109753225
 #r: 2.780479661191086
-#Plots.scatter(sorted_df_G1.r, sorted_df_G1.a, marker_z = sorted_df_G1.err, colorbar = true, yaxis = :log10,
-#        xlabel = "r", ylabel = "a", label = "", title = "r vs a colored by err")
+Plots.scatter(sorted_df_G1.r, sorted_df_G1.a, marker_z = sorted_df_G1.err, colorbar = true, yaxis = :log10,
+        xlabel = "r", ylabel = "a", label = "", title = "r vs a colored by err")
 
 
 gsm2 = GSM2(r_G1, a_G1, b_G1, rd, Rn)
 println("--- Calculating Survival Probabilities ---")
 SP_cell_G1 = zeros(Float64, size(dose, 1), sim_)
-p = ProgressBar(1:size(dose, 1))
-for dj in p
+for dj in 1:size(dose, 1)
     @Threads.threads for s in 1:sim_
         current_X_dam = X_dam[dj, s, :]
         current_Y_dam = Y_dam[dj, s, :]
@@ -240,11 +239,11 @@ end
 println("--- Processing Results ---")
 SP_opt_G1 = vec(mean(SP_cell_G1, dims = 2))
 S_LQ_G1 = exp.(-alpha .* dose .- beta .* dose .* dose)
-err = mean(((S_LQ - SP_opt) .^ 2) ./ S_LQ)
+err = mean(((S_LQ_G1 - SP_opt_G1) .^ 2) ./ S_LQ_G1)
 
 default(palette = palette(:darktest))
-Plots.plot(dose, S_LQ, label = "LQ", yscale = :log10, seriestype = :scatter, color = :black)
-Plots.plot!(dose, SP_opt, label = "GSM2", yscale = :log10, linewidth = 3)
+Plots.plot(dose, S_LQ_G1, label = "LQ", yscale = :log10, seriestype = :scatter, color = :black)
+Plots.plot!(dose, SP_opt_G1, label = "GSM2", yscale = :log10, linewidth = 3)
 
 
 
@@ -264,8 +263,7 @@ for gj in 1:sim_grid
     gsm2 = GSM2(r, a, b, rd, Rn)
     println("--- Calculating Survival Probabilities ---")
     SP_cell = zeros(Float64, size(dose, 1), sim_)
-    p = ProgressBar(1:size(dose, 1))
-    for dj in p
+    for dj in 1:size(dose, 1)
         @Threads.threads for s in 1:sim_
             current_X_dam = X_dam[dj, s, :]
             current_Y_dam = Y_dam[dj, s, :]
@@ -301,8 +299,7 @@ println("r: ", r_S)
 gsm2 = GSM2(r_S, a_S, b_S, rd, Rn)
 println("--- Calculating Survival Probabilities ---")
 SP_cell_S = zeros(Float64, size(dose, 1), sim_)
-p = ProgressBar(1:size(dose, 1))
-for dj in p
+for dj in 1:size(dose, 1)    
     @Threads.threads for s in 1:sim_
         current_X_dam = X_dam[dj, s, :]
         current_Y_dam = Y_dam[dj, s, :]
@@ -312,11 +309,11 @@ end
 println("--- Processing Results ---")
 SP_opt_S = vec(mean(SP_cell_S, dims = 2))
 S_LQ_S = exp.(-alpha .* dose .- beta .* dose .* dose)
-err = mean(((S_LQ - SP_opt) .^ 2) ./ S_LQ)
+err = mean(((S_LQ_S - SP_opt_S) .^ 2) ./ S_LQ_S)
 
 default(palette = palette(:darktest))
-Plots.plot(dose, S_LQ, label = "LQ", yscale = :log10, seriestype = :scatter, color = :black)
-Plots.plot!(dose, SP_opt, label = "GSM2", yscale = :log10, linewidth = 3)
+Plots.plot(dose, S_LQ_S, label = "LQ", yscale = :log10, seriestype = :scatter, color = :black)
+Plots.plot!(dose, SP_opt_S, label = "GSM2", yscale = :log10, linewidth = 3)
 
 
 # G2 phase
@@ -335,8 +332,7 @@ for gj in 1:sim_grid
     gsm2 = GSM2(r, a, b, rd, Rn)
     println("--- Calculating Survival Probabilities ---")
     SP_cell = zeros(Float64, size(dose, 1), sim_)
-    p = ProgressBar(1:size(dose, 1))
-    for dj in p
+    for dj in 1:size(dose, 1)
         @Threads.threads for s in 1:sim_
             current_X_dam = X_dam[dj, s, :]
             current_Y_dam = Y_dam[dj, s, :]
@@ -354,7 +350,7 @@ for gj in 1:sim_grid
 end
 
 sorted_df_G2 = sort(results_df, :err)
-sel = 3
+sel = 1
 a_G2 = sorted_df_G2.a[sel]
 b_G2 = sorted_df_G2.b[sel]
 r_G2 = sorted_df_G2.r[sel]
@@ -372,8 +368,7 @@ println("r: ", r_G2)
 gsm2 = GSM2(r_G2, a_G2, b_G2, rd, Rn)
 println("--- Calculating Survival Probabilities ---")
 SP_cell_G2 = zeros(Float64, size(dose, 1), sim_)
-p = ProgressBar(1:size(dose, 1))
-for dj in p
+for dj in 1:size(dose, 1)
     @Threads.threads for s in 1:sim_
         current_X_dam = X_dam[dj, s, :]
         current_Y_dam = Y_dam[dj, s, :]
@@ -383,7 +378,7 @@ end
 println("--- Processing Results ---")
 SP_opt_G2 = vec(mean(SP_cell_G2, dims = 2))
 S_LQ_G2 = exp.(-alpha .* dose .- beta .* dose .* dose)
-err = mean(((S_LQ - SP_opt) .^ 2) ./ S_LQ)
+err = mean(((S_LQ_G2 - SP_opt_G2) .^ 2) ./ S_LQ_G2)
 
 default(palette = palette(:darktest))
 Plots.plot(dose, S_LQ_G1, label = "LQ G1", yscale = :log10, seriestype = :scatter)
@@ -459,8 +454,7 @@ for gj in 1:sim_grid
     gsm2 = GSM2(r, a, b, rd, Rn)
     println("--- Calculating Survival Probabilities ---")
     SP_cell = zeros(Float64, size(dose, 1), sim_)
-    p = ProgressBar(1:size(dose, 1))
-    for dj in p
+    for dj in 1:size(dose, 1)
         @Threads.threads for s in 1:sim_
             current_X_dam = X_dam[dj, s, :]
             current_Y_dam = Y_dam[dj, s, :]
@@ -496,8 +490,7 @@ println("r: ", r_mixed)
 gsm2 = GSM2(r_mixed, a_mixed, b_mixed, rd, Rn)
 println("--- Calculating Survival Probabilities ---")
 SP_cell_mixed = zeros(Float64, size(dose, 1), sim_)
-p = ProgressBar(1:size(dose, 1))
-for dj in p
+for dj in 1:size(dose, 1)
     @Threads.threads for s in 1:sim_
         current_X_dam = X_dam[dj, s, :]
         current_Y_dam = Y_dam[dj, s, :]
