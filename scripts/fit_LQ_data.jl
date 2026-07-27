@@ -14,6 +14,7 @@ using DifferentialEquations
 using OrdinaryDiffEq
 using StatsPlots
 using Sobol 
+using Printf
 
 nthreads() 
 
@@ -27,6 +28,12 @@ Nd = 1;
 #*initialize structures
 include("./utilities_structures_dr.jl")
 include("./utilities_dr.jl")
+
+println("Threads available: ", nthreads())
+
+# ── Load all source utilities ─────────────────────────────────────────────────
+include(joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
+sp = load_stopping_power()  
 
 #~###############################################################
 #~########## creation of a tumor-NT environment #################
@@ -124,14 +131,14 @@ rename!(at, Symbol.("center_$i" for i in 1:(size(df_center_y, 2) - 1)))
 at.index = df_center_y.index
 
 irrad_cond = at_start
-lets = irrad_cond.LET
-energies = irrad_cond.E
+lets = ion.LET
+energies = ion.E
 
-MC_loop_ions_singlecell_fast!(Npar, x_beam, y_beam, irrad_cond, gsm2, df_center_x, df_center_y, at, R_beam, type_AT, ion);
-mean(at[1, 1:(end - 1)])
+#MC_loop_ions_singlecell_fast!(Npar, x_beam, y_beam, irrad_cond, gsm2, df_center_x, df_center_y, at, R_beam, type_AT, ion);
+#mean(at[1, 1:(end - 1)])
 n_repeat = floor(Int64, gsm2.Rn / gsm2.rd)
 
-temp_cell = Cell(0.0, 0.0, 0.0, [], [], [], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, "", Matrix{Float64}(undef,0,0), Matrix{Float64}(undef,0,0), [], [], 21., 0.0, [], 0.0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0)
+#temp_cell = Cell(0.0, 0.0, 0.0, [], [], [], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, "", Matrix{Float64}(undef,0,0), Matrix{Float64}(undef,0,0), [], [], 21., 0.0, [], 0.0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0)
 kappa_base = 55/(n_repeat*domain)
 lambda_base = kappa_base * 1e-3 # Factor from original MC_loop_damage_domain!
 
@@ -185,7 +192,7 @@ for gj in 1:sim_grid
     gsm2 = GSM2(r, a, b, rd, Rn)
     println("--- Calculating Survival Probabilities ---")
     SP_cell = zeros(Float64, size(dose, 1), sim_)
-    p = ProgressBar(1:size(dose, 1))
+    p = 1:size(dose, 1)
     for dj in p
         @Threads.threads for s in 1:sim_
             current_X_dam = X_dam[dj, s, :]
