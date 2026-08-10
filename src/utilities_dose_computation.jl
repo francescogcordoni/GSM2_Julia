@@ -968,3 +968,392 @@ function check_lut_closure(a::AT, gsm2::GSM2, type_AT::String; n_lut::Int = 8192
     println("─────────────────────────────────────────────")
     return err
 end
+
+#! ============================================================================
+#! Particle budget
+#! ============================================================================
+
+"""
+    SpeciesPlan
+
+Result of turning a prescribed dose + energy spectrum into a concrete set of
+per-energy particle counts for one sampled realisation.
+"""
+struct SpeciesPlan
+    energies::Vector{Float64}   # MeV/u
+    probs::Vector{Float64}      # particle-number fractions, normalised
+    lets::Vector{Float64}       # keV/µm at each energy
+    Nbar::Float64               # mean total particles
+    Ntot::Int                   # sampled total (Poisson)
+    counts::Vector{Int}         # per-energy split (Multinomial), sums to Ntot
+end
+
+function Base.show(io::IO, sp::SpeciesPlan)
+    println(io, "  SpeciesPlan: N̄=$(round(sp.Nbar; digits=1)), sampled Ntot=$(sp.Ntot)")
+    for k in eachindex(sp.energies)
+        println(io, "    E=$(rpad(sp.energies[k], 8)) MeV/u  p=$(rpad(round(sp.probs[k]; digits=4), 8))" *
+                    "  LET=$(rpad(round(sp.lets[k]; digits=3), 9)) keV/µm  →  $(sp.counts[k]) particles")
+    end
+end
+
+"""
+    mean_particle_number(dose_Gy, R_beam, energies, probs, lets; weight)
+        -> (Nbar, probs_normalised)
+
+Mean number of primaries for a prescribed dose over a beam disc of radius
+`R_beam`, given the energy spectrum and its per-energy LET.
+
+`weight = :fluence` (default) sums the reciprocal-LET contributions, which is
+the fluence-correct budget. `:mean_energy` uses one LET at the mean energy and
+is provided only for comparison; it requires the caller to pass the LET at the
+mean energy as a one-element `lets` (see `plan_species`).
+"""
+function mean_particle_number(dose_Gy::Float64, R_beam::Float64,
+                              probs::Vector{Float64}, lets::Vector{Float64};
+                              weight::Symbol = :fluence)
+    area = π * R_beam^2
+    if weight === :fluence
+        # N̄ = D·A · Σ p_k / (LET_k · 0.1602)
+        s = 0.0
+        for k in eachindex(probs)
+            lets[k] > 0 || error("mean_particle_number: non-positive LET at species $k")
+            s += probs[k] / (lets[k] * 0.1602)
+        end
+        return dose_Gy * area * s
+    elseif weight === :mean_energy
+        length(lets) == 1 || error("mean_particle_number(:mean_energy): pass a single LET at ⟨E⟩")
+        return dose_Gy * area / (lets[1] * 0.1602)
+    else
+        error("mean_particle_number: unknown weight :$weight. Use :fluence or :mean_energy.")
+    end
+end
+
+"""
+    plan_species(dose_Gy, R_beam, energies, probs, particle, sp;
+                 weight, rng) -> SpeciesPlan
+
+Build the per-energy particle counts for one realisation.
+
+`energies` in MeV/u, `probs` are particle-number fractions (normalised here if
+they do not sum to 1). `particle` is the ion label ("1H"); `sp` the stopping
+tables. `let_at(table_for(sp, particle), E)` supplies each LET.
+
+Sampling: `Ntot ~ Poisson(N̄)`, then `counts ~ Multinomial(Ntot, probs)`. The
+multinomial (rather than independent Poissons per species) reproduces your
+worked example exactly: a single total is drawn, then partitioned.
+"""
+function plan_species(dose_Gy::Float64, R_beam::Float64,
+                      energies::Vector{Float64}, probs::Vector{Float64},
+                      particle::AbstractString, sp::Dict{String,StoppingTable};
+                      weight::Symbol = :fluence,
+                      rng::AbstractRNG = Random.default_rng())
+
+    length(energies) == length(probs) || error("plan_species: energies/probs length mismatch")
+    all(≥(0), probs) || error("plan_species: negative probability")
+    ps = sum(probs)
+    ps > 0 || error("plan_species: probabilities sum to zero")
+    pn = probs ./ ps
+
+    tab  = table_for(sp, particle)
+    lets = [let_at(tab, E) for E in energies]
+
+    Nbar = if weight === :fluence
+        mean_particle_number(dose_Gy, R_beam, pn, lets; weight = :fluence)
+    else
+        Ebar = sum(pn .* energies)
+        mean_particle_number(dose_Gy, R_beam, pn, [let_at(tab, Ebar)]; weight = :mean_energy)
+    end
+
+    Ntot   = rand(rng, Poisson(Nbar))
+    counts = Ntot == 0 ? zeros(Int, length(pn)) : rand(rng, Multinomial(Ntot, pn))
+
+    return SpeciesPlan(collect(float.(energies)), pn, lets, Nbar, Ntot, Vector{Int}(counts))
+end
+
+#! ============================================================================
+#! Polyenergetic driver
+#! ============================================================================
+
+"""
+    MC_dose_CPU_poly!(particle, dose_Gy, R_beam, energies, probs,
+                      cell_df, df_center_x, df_center_y, at,
+                      gsm2_cycle, irrad, type_AT, track_seg, sp;
+                      weight, x_cb, y_cb, seed, nchunks, n_lut, A) -> SpeciesPlan
+
+Polyenergetic version of `MC_dose_CPU!`. Instead of a single `Ion` + `Npar`,
+takes an energy spectrum and a prescribed dose, and superimposes one
+monoenergetic run per energy.
+
+Writes the SUMMED per-domain dose into `at`'s domain columns and into
+`cell_df.dose` / `cell_df.dose_cell`, matching what `MC_dose_CPU!` writes for a
+single energy. Returns the `SpeciesPlan` so the realised counts are inspectable.
+
+Arguments beyond `MC_dose_CPU!`:
+* `dose_Gy`   — prescribed macroscopic dose; sets the particle budget.
+* `energies`, `probs` — spectrum; `probs` are particle-number fractions.
+* `irrad`     — the `Irrad` passed to `compute_energy_box!` / `ATRadius`.
+* `sp`        — stopping tables.
+* `weight`    — `:fluence` (default, correct) or `:mean_energy` (comparison).
+* `A`         — mass number; defaults to `getA(particle)`.
+
+Each species is built through `compute_energy_box!`, so per-layer energy
+propagation, the occupied-layer absorption logic and AT validity all apply
+independently to every energy — a low-energy component that stops early simply
+contributes zero beyond its range.
+
+Reproducibility: with `seed` set, the species split and every monoenergetic run
+are seeded deterministically (`seed + k` for species k).
+"""
+function MC_dose_CPU_poly!(
+    particle::AbstractString, dose_Gy::Float64, R_beam::Float64,
+    energies::Vector{Float64}, probs::Vector{Float64},
+    cell_df::DataFrame, df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+    gsm2_cycle::Vector{GSM2}, irrad::Irrad, type_AT::String, track_seg::Bool,
+    sp::Dict{String,StoppingTable};
+    weight::Symbol = :fluence,
+    x_cb::Float64 = 0.0, y_cb::Float64 = 0.0,
+    seed::Union{Nothing,Integer} = nothing,
+    nchunks::Int = Threads.nthreads(),
+    n_lut::Int = 8192,
+    A::Int = getA(particle))
+
+    Z = getZ(particle)
+
+    println("\n═════════════════════════════════════════════")
+    println("MC_dose_CPU_poly!   $particle   dose=$dose_Gy Gy   weight=:$weight")
+    println("  $(length(energies)) energies, track_seg=$track_seg")
+    println("═════════════════════════════════════════════")
+    t0 = time()
+
+    rng  = seed === nothing ? Random.default_rng() : Xoshiro(UInt64(seed))
+    plan = plan_species(dose_Gy, R_beam, energies, probs, particle, sp;
+                        weight = weight, rng = rng)
+    show(stdout, plan)
+
+    n_layers  = length(unique(cell_df.z))
+    dom_cols  = names(at, Not(:index))
+    ndom      = length(dom_cols)
+
+    # accumulator for the summed per-domain dose, keyed by cell :index
+    acc = Dict{Int,Vector{Float64}}()
+    for idx in at.index
+        acc[idx] = zeros(Float64, ndom)
+    end
+
+    any_run = false
+    for k in eachindex(plan.energies)
+        Nk = plan.counts[k]
+        Nk == 0 && continue
+        Ek = plan.energies[k]
+
+        println("\n─ species $k/$(length(plan.energies)):  E=$Ek MeV/u,  $Nk particles ─")
+
+        # build irrad_cond for this energy through the normal layer propagation
+        ion_k = Ion(String(particle), Ek, A, Z, plan.lets[k], 1.0)
+        irrad_cond = Array{AT}(undef, n_layers)
+        compute_energy_box!(irrad_cond, ion_k, irrad, type_AT, cell_df, track_seg, sp)
+
+        # scratch copies so each species writes independently, then we sum
+        at_k      = copy(at)
+        cell_df_k = copy(cell_df)
+
+        MC_dose_CPU!(ion_k, Nk, R_beam, irrad_cond, cell_df_k,
+                     df_center_x, df_center_y, at_k,
+                     gsm2_cycle, type_AT, track_seg;
+                     x_cb = x_cb, y_cb = y_cb, single_particle = false,
+                     seed = seed === nothing ? nothing : UInt64(seed) + k,
+                     nchunks = nchunks, n_lut = n_lut)
+
+        # sum this species' per-domain dose into the accumulator
+        at_row = Dict(idx => r for (r, idx) in enumerate(at_k.index))
+        for idx in at.index
+            r = at_row[idx]
+            a = acc[idx]
+            @inbounds for (j, c) in enumerate(dom_cols)
+                a[j] += at_k[r, c]
+            end
+        end
+        any_run = true
+    end
+
+    any_run || @warn "MC_dose_CPU_poly!: no particles sampled (N̄=$(round(plan.Nbar; digits=3)))"
+
+    # write summed dose back into `at`, and into cell_df.dose / dose_cell
+    ncell = nrow(cell_df)
+    if !hasproperty(cell_df, :dose) || !(eltype(cell_df.dose) <: AbstractVector)
+        cell_df.dose = [zeros(Float64, ndom) for _ in 1:ncell]
+    end
+    if !hasproperty(cell_df, :dose_cell)
+        cell_df.dose_cell = zeros(Float64, ncell)
+    end
+    cell_row = Dict(idx => r for (r, idx) in enumerate(cell_df.index))
+
+    for idx in at.index
+        v  = acc[idx]
+        ar = findfirst(==(idx), at.index)
+        at[ar, dom_cols] .= v
+
+        cr = get(cell_row, idx, 0)
+        cr == 0 && continue
+        if cell_df.is_cell[cr] == 1
+            cell_df.dose[cr]      = copy(v)
+            cell_df.dose_cell[cr] = ndom == 0 ? 0.0 : sum(v) / ndom
+        else
+            cell_df.dose[cr]      = zeros(Float64, ndom)
+            cell_df.dose_cell[cr] = 0.0
+        end
+    end
+
+    println("\n═ poly done in $(round(time() - t0; digits=3)) s ═")
+    return plan
+end
+
+#! ============================================================================
+#! Verification
+#! ============================================================================
+
+"""
+    check_poly_dose(plan, cell_df; R_beam) -> Float64
+
+Compare the mean delivered dose over occupied cells against the prescription
+implied by the sampled counts,
+
+    D_expected = Σ_k N_k · LET_k · 0.1602 / (πR²)
+
+which is what the fluence actually carries for THIS realisation (using the
+sampled `counts`, not `Nbar`, so Poisson/multinomial scatter is not counted as
+error). A large gap points at edge starvation (pad `R_beam` by `Rp`) or a
+domain/beam-area mismatch, not at the spectrum handling.
+"""
+function check_poly_dose(plan::SpeciesPlan, cell_df::DataFrame, R_beam::Float64)
+    hasproperty(cell_df, :dose_cell) || error("check_poly_dose: run the poly driver first")
+    occ = cell_df.is_cell .== 1
+    any(occ) || (println("  no occupied cells"); return NaN)
+
+    delivered = sum(cell_df.dose_cell[occ]) / count(occ)
+    expected  = sum(plan.counts .* plan.lets) * 0.1602 / (π * R_beam^2)
+    rel = expected > 0 ? delivered / expected - 1 : NaN
+
+    println("── poly dose check ──────────────────────────")
+    println("  delivered ⟨D⟩ over cells : ", delivered, " Gy")
+    println("  expected from counts     : ", expected,  " Gy")
+    println("  relative error           : ", rel)
+    println("─────────────────────────────────────────────")
+    return rel
+end
+
+
+"""
+    MC_dose_damage_poly!(ion, Npar_vect, R_beam, irrad_cond,
+                         cell_df, df_center_x, df_center_y, at,
+                         gsm2_cycle, type_AT, track_seg) -> Nothing
+
+Run the full dose+damage chain once per species (energy component) and sum the
+per-species contributions in place.
+
+`ion[i]`, `Npar_vect[i]`, `irrad_cond[i]` describe species `i`; `cell_df` must
+already carry the `layer_i` / `energy_step_i` columns built by the vectorized
+`setup_irrad_conditions!`. For each `i` this:
+
+  1. points the unsuffixed `:layer` / `:energy_step` columns (the ones
+     `MC_dose_CPU!`/`MC_loop_damage!` read) at species `i`'s assignment;
+  2. zeroes the dose scratch (`at`, `cell_df.dose`, `cell_df.dose_cell`) so
+     species `i` deposits from a clean slate, not the previous species'
+     leftover dose;
+  3. runs `MC_dose_CPU!` then `MC_loop_damage!` for that species;
+  4. stashes the resulting per-cell state as `dose_i`, `dose_cell_i`,
+     `dam_X_dom_i`, `dam_Y_dom_i` columns on `cell_df`.
+
+After every species has run, the per-species columns are summed element-wise
+back into `cell_df.dose`, `.dose_cell`, `.dam_X_dom`, `.dam_Y_dom`, and
+`.dam_X_total` / `.dam_Y_total` are recomputed from the summed damage vectors.
+`cell_df.layer` / `cell_df.energy_step` are left holding the LAST species'
+assignment (needed by downstream `layer_plot=true` plotting) — there is no
+single canonical choice once multiple species have run.
+"""
+function MC_dose_damage_poly!(
+    ion::Vector{Ion}, Npar_vect::Vector{Int}, R_beam::Float64,
+    irrad_cond::Vector{Vector{AT}},
+    cell_df::DataFrame, df_center_x::DataFrame, df_center_y::DataFrame, at::DataFrame,
+    gsm2_cycle::Vector{GSM2}, type_AT::String, track_seg::Bool) where {AT}
+
+    n_species = length(ion)
+    length(Npar_vect)  == n_species || error("MC_dose_damage_poly!: Npar_vect length mismatch")
+    length(irrad_cond) == n_species || error("MC_dose_damage_poly!: irrad_cond length mismatch")
+
+    ncell    = nrow(cell_df)
+    dom_cols = names(at, Not(:index))
+    t0       = time()
+
+    for i in 1:n_species
+        println("\n═════════════════════════════════════════════")
+        println("MC_dose_damage_poly!   species $i/$n_species   E=$(ion[i].E) MeV/u   Npar=$(Npar_vect[i])")
+        println("═════════════════════════════════════════════")
+
+        # point the unsuffixed columns MC_dose_CPU!/MC_loop_damage! read at
+        # this species' per-step layer/energy_step assignment
+        cell_df.layer       = cell_df[!, Symbol("layer_", i)]
+        cell_df.energy_step = cell_df[!, Symbol("energy_step_", i)]
+
+        # clean scratch so this species deposits from zero, not the previous
+        # species' leftover dose
+        for c in dom_cols
+            fill!(at[!, c], 0.0)
+        end
+        for r in 1:ncell
+            fill!(cell_df.dose[r], 0.0)
+        end
+        fill!(cell_df.dose_cell, 0.0)
+
+        println("\n--- Monte Carlo dose deposition ---")
+        @time MC_dose_CPU!(ion[i], Npar_vect[i], R_beam, irrad_cond[i], cell_df,
+                            df_center_x, df_center_y, at,
+                            gsm2_cycle, type_AT, track_seg)
+
+        println("\n--- Poisson DNA damage sampling ---")
+        @time MC_loop_damage!(ion[i], cell_df, irrad_cond[i], gsm2_cycle)
+
+        # stash this species' contribution under an indexed column
+        cell_df[!, Symbol("dose_", i)]      = deepcopy(cell_df.dose)
+        cell_df[!, Symbol("dose_cell_", i)] = copy(cell_df.dose_cell)
+        cell_df[!, Symbol("dam_X_dom_", i)] = deepcopy(cell_df.dam_X_dom)
+        cell_df[!, Symbol("dam_Y_dom_", i)] = deepcopy(cell_df.dam_Y_dom)
+    end
+
+    #! ------------------------------------------------------------------
+    #! Sum every species' contribution back into the unsuffixed columns
+    #! ------------------------------------------------------------------
+    ndom = length(dom_cols)
+    cell_df.dose      = [zeros(Float64, ndom) for _ in 1:ncell]
+    cell_df.dose_cell = zeros(Float64, ncell)
+    cell_df.dam_X_dom = [Int[] for _ in 1:ncell]
+    cell_df.dam_Y_dom = [Int[] for _ in 1:ncell]
+
+    for i in 1:n_species
+        dose_i = cell_df[!, Symbol("dose_", i)]
+        damX_i = cell_df[!, Symbol("dam_X_dom_", i)]
+        damY_i = cell_df[!, Symbol("dam_Y_dom_", i)]
+        for r in 1:ncell
+            cell_df.dose[r]      .+= dose_i[r]
+            cell_df.dose_cell[r]  += cell_df[r, Symbol("dose_cell_", i)]
+            if isempty(cell_df.dam_X_dom[r])
+                cell_df.dam_X_dom[r] = copy(damX_i[r])
+                cell_df.dam_Y_dom[r] = copy(damY_i[r])
+            else
+                cell_df.dam_X_dom[r] .+= damX_i[r]
+                cell_df.dam_Y_dom[r] .+= damY_i[r]
+            end
+        end
+    end
+
+    # totals recomputed from the summed per-domain vectors, so they match exactly
+    cell_df.dam_X_total = [isempty(v) ? 0 : sum(v) for v in cell_df.dam_X_dom]
+    cell_df.dam_Y_total = [isempty(v) ? 0 : sum(v) for v in cell_df.dam_Y_dom]
+
+    # :layer/:energy_step are left holding the LAST species' assignment —
+    # downstream layer_plot=true grouping (plot_scalar_cell, plot_damage)
+    # needs them present; there's no single canonical choice across species.
+
+    println("\n═ poly dose+damage done in $(round(time() - t0; digits=3)) s ═")
+    return nothing
+end

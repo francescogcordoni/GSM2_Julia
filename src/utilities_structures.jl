@@ -37,8 +37,6 @@ begin
         is_stem::Int64      # is a stem cell
         proliferation::Int64
         cell_cycle::String  # cell cycle phase
-        dam_X::Matrix{Float64}
-        dam_Y::Matrix{Float64}
         dam_X_dom::Vector{Int64}
         dam_Y_dom::Vector{Int64}
         O::Float64          # Oxygenation [%]

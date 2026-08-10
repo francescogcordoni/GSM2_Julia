@@ -9,9 +9,20 @@
 #       Panel 1: density (all active cells, or grouped by energy_step when layer_plot=true).
 #       Panel 2: 3D scatter of (x,y,z) colored by col.
 #       Replaces the old plot_dose_cell and plot_survival_probability_cell.
+#?   plot_scalar_cell_poly(cell_df, col; pp, layer_plot) -> Plot
+#       Polyenergetic counterpart of plot_scalar_cell (cell_df from MC_dose_damage_poly!).
+#       pp=true: one density curve per particle species (col_1, col_2, ...).
+#       pp=false: combined col, grouped by the tuple of ALL species' energy_step_i
+#       when layer_plot=true (a single :energy_step can't represent every species).
 #?   plot_damage(cell_df; layer_plot) -> Plot
 #       Density of total X-damage per active cell.
 #       layer_plot=true: one curve per energy_step. layer_plot=false: single density + mean line.
+#?   plot_damage_poly(cell_df; pp, layer_plot) -> Plot
+#       Polyenergetic counterpart of plot_damage (cell_df from MC_dose_damage_poly!).
+#       pp=true: one density curve per particle species (dam_X_dom_1, dam_X_dom_2, ...).
+#       pp=false: combined dam_X_dom, grouped by the tuple of ALL species' energy_step_i
+#       when layer_plot=true. pp=true + layer_plot=true splits each particle by its own
+#       energy_step_i.
 #
 #~ Timing
 #?   plot_times(cell_df; show_means, summary, verbose, layout_tuple, size_px) -> Plot
@@ -55,6 +66,25 @@
 using Plots
 using Statistics
 using DataFrames
+using Printf
+
+"""
+    log10_colorbar_ticks(log_vals) -> (positions, labels)
+
+Colorbar tick positions (in log10 space) with labels showing the ORIGINAL
+(non-log) value at each integer decade spanning `log_vals`. Used so an
+`xscale=:log10` colorbar reads in the column's natural units instead of raw
+log10 numbers. Returns `:auto` if `log_vals` has no finite entries.
+"""
+function log10_colorbar_ticks(log_vals::AbstractVector)
+    finite = filter(isfinite, log_vals)
+    isempty(finite) && return :auto
+    lo, hi = extrema(finite)
+    exps = floor(Int, lo):ceil(Int, hi)
+    positions = Float64.(exps)
+    labels    = [@sprintf("%g", 10.0^e) for e in exps]
+    return (positions, labels)
+end
 
 """
     plot_scalar_cell(cell_df, col::Symbol = :dose_cell;
@@ -121,6 +151,153 @@ function plot_scalar_cell(cell_df, col::Symbol = :dose_cell;
     # Panel 2 — 3D scatter (half-sphere x≥0)
     # Apply log10 transform to color values when xscale=:log10 so the colorbar
     # reflects the same scale as the density panel.
+    df3   = df_active[df_active.x .>= 0, :]
+    c_vals = if xscale == :log10
+        [(!isnothing(v) && !ismissing(v) && v > 0) ? log10(Float64(v)) : NaN
+         for v in df3[!, col]]
+    else
+        [(!isnothing(v) && !ismissing(v)) ? Float64(v) : NaN
+         for v in df3[!, col]]
+    end
+
+    # Colorbar reads in the column's own units even under xscale=:log10 — ticks
+    # sit at integer log10 positions but are labelled with the original value.
+    cb_ticks = xscale == :log10 ? log10_colorbar_ticks(c_vals) : :auto
+
+    p2 = scatter(df3.x, df3.y, df3.z;
+                    markersize=4, markerstrokewidth=0.1,
+                    marker_z=c_vals, colorbar=true, colorbar_title=col_str,
+                    colorbar_ticks=cb_ticks,
+                    xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
+                    title="3D $col_str Distribution", legend=false,
+                    aspect_ratio=:equal, seriescolor=:viridis,
+                    size=(900, 700), camera=(320, 30))
+
+    return plot(p1, p2, layout=(1, 2), size=(1200, 500))
+end
+
+"""
+    plot_scalar_cell_poly(cell_df, col::Symbol = :dose_cell;
+                          pp=false, layer_plot=false, particles=nothing,
+                          xscale=:identity) -> Plot
+
+Polyenergetic counterpart of `plot_scalar_cell`, for a `cell_df` produced by
+`MC_dose_damage_poly!` (which writes per-species columns `col_1, col_2, ...`
+and `energy_step_1, energy_step_2, ...`, one per particle species, alongside
+the combined/summed `col`).
+
+Panel 1:
+- `pp=true`  → one density curve per PARTICLE SPECIES, drawn from that
+  species' own contribution column `Symbol(col, "_", i)`. `layer_plot` is
+  ignored in this mode.
+- `pp=false` → the combined (all-species-summed) `col`, as a single density
+  (`layer_plot=false`) or grouped by depth layer (`layer_plot=true`). Each
+  species bins depth into its OWN `energy_step_i` (different LET → different
+  bin edges), so a single `:energy_step` can't represent a shared layer
+  across species. Cells are instead grouped by the full tuple
+  `(energy_step_1, ..., energy_step_n)` — only cells where EVERY species
+  assigns the same energy step count as the same layer.
+
+Panel 2 (3-D scatter) is unchanged from `plot_scalar_cell`: always the
+combined `col`.
+
+`particles` optionally labels the per-species curves in `pp=true` mode
+(defaults to `"species i"`).
+
+Required columns: `:x, :y, :z, :is_cell, col`, plus `energy_step_1..n`
+(grouping) or `col_1..col_n` (`pp=true`).
+
+# Example
+```julia
+plot_scalar_cell_poly(cell_df, :dose_cell; pp=true, particles=PARTICLES)
+plot_scalar_cell_poly(cell_df, :dose_cell; layer_plot=true)
+```
+"""
+function plot_scalar_cell_poly(cell_df, col::Symbol = :dose_cell;
+                               pp::Bool = false,
+                               layer_plot::Bool = false,
+                               particles::Union{Nothing,Vector{String}} = nothing,
+                               xscale::Symbol = :identity)
+    for c in [:x, :y, :z, :is_cell, col]
+        hasproperty(cell_df, c) || error("cell_df must contain column :$c")
+    end
+
+    n_species = 0
+    while hasproperty(cell_df, Symbol("energy_step_", n_species + 1))
+        n_species += 1
+    end
+    n_species == 0 &&
+        error("plot_scalar_cell_poly: no energy_step_i columns found — is this a poly cell_df?")
+
+    labels = particles === nothing ? ["species $i" for i in 1:n_species] : particles
+    length(labels) == n_species ||
+        error("plot_scalar_cell_poly: particles has $(length(labels)) entries, expected $n_species")
+
+    df_active = cell_df[cell_df.is_cell .== 1, :]
+    isempty(df_active) && (@warn "No active cells (is_cell == 1)."; return nothing)
+
+    active_vals = [Float64(v) for v in df_active[!, col]
+                   if !isnothing(v) && !ismissing(v) && v > 0]
+    isempty(active_vals) && (@warn "No positive values in column :$col."; return nothing)
+
+    col_str = string(col)
+
+    # Panel 1 — density
+    if pp
+        for i in 1:n_species
+            hasproperty(cell_df, Symbol(col, "_", i)) ||
+                error("pp=true requires column :$(col)_$i")
+        end
+        if !layer_plot
+            p1 = plot(title="$col_str Density by particle",
+                      xlabel=col_str, ylabel="Density",
+                      legend=:topright, linewidth=2, xscale=xscale)
+            for i in 1:n_species
+                vals_i = [Float64(v) for v in df_active[!, Symbol(col, "_", i)]
+                          if !isnothing(v) && !ismissing(v) && v > 0]
+                isempty(vals_i) && continue
+                density!(p1, vals_i, label=labels[i])
+            end
+        else
+            # each particle further split into ITS OWN energy_step_i layers
+            p1 = plot(title="$col_str Density by particle × energy step",
+                      xlabel=col_str, ylabel="Density",
+                      legend=:topright, linewidth=2, xscale=xscale)
+            for i in 1:n_species
+                col_i  = df_active[!, Symbol(col, "_", i)]
+                step_i = df_active[!, Symbol("energy_step_", i)]
+                for E in sort(unique(step_i))
+                    sel = step_i .== E
+                    sub_pos = [Float64(v) for v in col_i[sel]
+                               if !isnothing(v) && !ismissing(v) && v > 0]
+                    isempty(sub_pos) && continue
+                    density!(p1, sub_pos, label="$(labels[i]) (step $E)")
+                end
+            end
+        end
+    elseif !layer_plot
+        p1 = density(active_vals;
+                        title="$col_str Density (all active cells)",
+                        xlabel=col_str, ylabel="Density",
+                        linewidth=2, legend=false, xscale=xscale)
+        vline!(p1, [mean(active_vals)], color=:red, linestyle=:dash)
+    else
+        # combined depth layer = full tuple of every species' own energy step
+        step_cols = [df_active[!, Symbol("energy_step_", i)] for i in 1:n_species]
+        group_key = [Tuple(step_cols[k][r] for k in 1:n_species) for r in 1:nrow(df_active)]
+        p1 = plot(title="$col_str Density grouped by combined energy step",
+                  xlabel=col_str, ylabel="Density",
+                  legend=:topright, linewidth=2, xscale=xscale)
+        for key in sort(unique(group_key))
+            sel = group_key .== Ref(key)
+            sub_pos = [Float64(v) for v in df_active[sel, col]
+                       if !isnothing(v) && !ismissing(v) && v > 0]
+            isempty(sub_pos) && continue
+            density!(p1, sub_pos, label="steps $key")
+        end
+    end
+
+    # Panel 2 — 3D scatter (half-sphere x≥0), always the combined column
     df3   = df_active[df_active.x .>= 0, :]
     c_vals = if xscale == :log10
         [(!isnothing(v) && !ismissing(v) && v > 0) ? log10(Float64(v)) : NaN
@@ -197,6 +374,129 @@ function plot_damage(cell_df::DataFrame; layer_plot::Bool = false)
             @warn "dam_X_dom at row $i is not a vector. Skipping."
         end
     end
+    isempty(damage_values) && (@warn "No valid damage vectors."; return nothing)
+
+    mean_damage = mean(damage_values)
+    println("Mean X-damage per active cell = $(round(mean_damage, digits=4))")
+
+    plt = density(damage_values;
+                  title="Density of X-Damage per Active Cell",
+                  xlabel="Total X-Damage", ylabel="Density",
+                  linewidth=2, legend=:topright)
+    vline!(plt, [mean_damage], color=:red, linestyle=:dash, label="Mean")
+    return plt
+end
+
+"""
+    plot_damage_poly(cell_df; pp=false, layer_plot=false, particles=nothing) -> Plot
+
+Polyenergetic counterpart of `plot_damage`, for a `cell_df` produced by
+`MC_dose_damage_poly!` (per-species `dam_X_dom_1, dam_X_dom_2, ...` and
+`energy_step_1, energy_step_2, ...` columns, alongside the combined/summed
+`dam_X_dom`).
+
+- `pp=false, layer_plot=false` → single density of total X-damage
+  (`sum(dam_X_dom[i])`) per active cell, combined across all species.
+- `pp=false, layer_plot=true`  → combined X-damage grouped by the tuple of
+  every species' own `energy_step_i` (a single `:energy_step` can't
+  represent a shared depth layer once multiple species have run).
+- `pp=true, layer_plot=false`  → one density curve per PARTICLE SPECIES,
+  using that species' own `sum(dam_X_dom_i[cell])` contribution.
+- `pp=true, layer_plot=true`   → each particle further split into its own
+  `energy_step_i` layers.
+
+`particles` optionally labels the per-species curves in `pp=true` mode
+(defaults to `"species i"`).
+
+Required columns: `:is_cell, :dam_X_dom`, plus `energy_step_1..n` (grouping)
+or `dam_X_dom_1..n` (`pp=true`).
+
+# Example
+```julia
+plot_damage_poly(cell_df)
+plot_damage_poly(cell_df; layer_plot=true)
+plot_damage_poly(cell_df; pp=true, particles=PARTICLES)
+plot_damage_poly(cell_df; pp=true, layer_plot=true, particles=PARTICLES)
+```
+"""
+function plot_damage_poly(cell_df::DataFrame;
+                          pp::Bool = false,
+                          layer_plot::Bool = false,
+                          particles::Union{Nothing,Vector{String}} = nothing)
+
+    for c in (:is_cell, :dam_X_dom)
+        hasproperty(cell_df, c) || error("plot_damage_poly: cell_df must contain column :$c")
+    end
+
+    n_species = 0
+    while hasproperty(cell_df, Symbol("energy_step_", n_species + 1))
+        n_species += 1
+    end
+    n_species == 0 &&
+        error("plot_damage_poly: no energy_step_i columns found — is this a poly cell_df?")
+
+    labels = particles === nothing ? ["species $i" for i in 1:n_species] : particles
+    length(labels) == n_species ||
+        error("plot_damage_poly: particles has $(length(labels)) entries, expected $n_species")
+
+    df_active = cell_df[cell_df.is_cell .== 1, :]
+    isempty(df_active) && (@warn "No active cells (is_cell == 1)."; return nothing)
+
+    total_damage(col) = [sum(v) for v in col if v isa AbstractVector]
+
+    if pp
+        for i in 1:n_species
+            hasproperty(cell_df, Symbol("dam_X_dom_", i)) ||
+                error("pp=true requires column :dam_X_dom_$i")
+        end
+
+        if !layer_plot
+            plt = plot(title="X-Damage Density by particle",
+                       xlabel="Total X-Damage", ylabel="Density",
+                       legend=:topright, linewidth=2)
+            for i in 1:n_species
+                vals_i = total_damage(df_active[!, Symbol("dam_X_dom_", i)])
+                isempty(vals_i) && continue
+                density!(plt, vals_i, label=labels[i])
+            end
+        else
+            # each particle further split into ITS OWN energy_step_i layers
+            plt = plot(title="X-Damage Density by particle × energy step",
+                       xlabel="Total X-Damage", ylabel="Density",
+                       legend=:topright, linewidth=2)
+            for i in 1:n_species
+                dam_i  = df_active[!, Symbol("dam_X_dom_", i)]
+                step_i = df_active[!, Symbol("energy_step_", i)]
+                for E in sort(unique(step_i))
+                    sel  = step_i .== E
+                    vals = total_damage(dam_i[sel])
+                    isempty(vals) && continue
+                    density!(plt, vals, label="$(labels[i]) (step $E)")
+                end
+            end
+        end
+        return plt
+    end
+
+    if layer_plot
+        # combined depth layer = full tuple of every species' own energy step
+        step_cols = [df_active[!, Symbol("energy_step_", i)] for i in 1:n_species]
+        group_key = [Tuple(step_cols[k][r] for k in 1:n_species) for r in 1:nrow(df_active)]
+
+        plt = plot(title="X-Damage Density grouped by combined energy step",
+                   xlabel="Total X-Damage", ylabel="Density",
+                   legend=:topright, linewidth=2)
+        for key in sort(unique(group_key))
+            sel  = group_key .== Ref(key)
+            vals = total_damage(df_active[sel, :dam_X_dom])
+            isempty(vals) && (@warn "steps $key has no valid damage vectors."; continue)
+            density!(plt, vals, label="steps $key")
+        end
+        return plt
+    end
+
+    # Single combined distribution
+    damage_values = total_damage(df_active.dam_X_dom)
     isempty(damage_values) && (@warn "No valid damage vectors."; return nothing)
 
     mean_damage = mean(damage_values)

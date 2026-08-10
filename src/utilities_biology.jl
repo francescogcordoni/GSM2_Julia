@@ -536,7 +536,6 @@ layer** in the z‑direction is populated. It assigns:
 - O₂ / hypoxia values
 - voxel indices `(i_voxel_x, i_voxel_y, i_voxel_z)`
 - cell cycle state (if `full_cycle == true`)
-- per‑domain damage matrices (`dam_X`, `dam_Y`)
 - per‑cell dose containers
 - neighbor lists (3D structured grid)
 
@@ -574,7 +573,7 @@ DataFrame‑based representation.
     Adds or overwrites columns such as:
     - `.is_cell`, `.is_stem`, `.proliferation`
     - `.i_voxel_x`, `.i_voxel_y`, `.i_voxel_z`
-    - `.dam_X`, `.dam_Y`, `.dose`, `.dose_cell`
+    -   `.dose`, `.dose_cell`
     - `.O` (oxygen)
     - `.sp` (stopping power)
     - `.cell_cycle`, `.apo_time`, `.death_time`, `.recover_time`, etc.
@@ -690,9 +689,6 @@ function create_cells_3D_voxel_1layervoxel_df!(N::Int64, nodes_positions::Vector
     cell_df.i_voxel_y = i_voxel_y_vec
     cell_df.i_voxel_z = i_voxel_z_vec
 
-    cell_df.dam_X = [Matrix{Float64}(undef, 0, Nd) for _ in 1:N]
-    cell_df.dam_Y = [Matrix{Float64}(undef, 0, Nd) for _ in 1:N]
-
     n_dom_sub = floor(Int64, gsm2.Rn / gsm2.rd)
     len_dom_vec = domain * n_dom_sub
     cell_df.dam_X_dom = [zeros(Int64, len_dom_vec) for _ in 1:N]
@@ -766,7 +762,7 @@ assigning:
 - proliferation parameters  
 - voxel indices `(i_voxel_x, i_voxel_y, i_voxel_z)`  
 - oxygenation level  
-- domain-damage structures (`dam_X`, `dam_Y`, `dam_X_dom`, `dam_Y_dom`)  
+- domain-damage structures (`dam_X_dom`, `dam_Y_dom`)  
 - dose containers (`dose`, `dose_cell`)  
 - structural/metadata fields (neighbors, can_divide, number_nei, timers, death flags)  
 
@@ -788,7 +784,6 @@ Each cell is initialized in a `Threads.@threads` loop:
 
 ## 3. Domain Initialization
 For each cell:
-- Empty 2D matrices `dam_X` and `dam_Y` are allocated
 - Vectors `dam_X_dom` and `dam_Y_dom` are initialized accordingly
 
 ## 4. DataFrame Population
@@ -798,7 +793,7 @@ The function writes (or overwrites) the following columns:
 - `.is_cell`, `.is_stem`, `.proliferation`, `.cell_cycle`  
 - `.O`  
 - `.i_voxel_x`, `.i_voxel_y`, `.i_voxel_z`  
-- `.dam_X`, `.dam_Y`, `.dam_X_dom`, `.dam_Y_dom`  
+- `.dam_X_dom`, `.dam_Y_dom`  
 - `.dose`, `.dose_cell`  
 - `.can_divide`, `.number_nei`  
 - `.apo_time`, `.death_time`, `.recover_time`, `.cycle_time`, `.is_death_rad`  
@@ -919,9 +914,6 @@ function create_cells_3D_voxel_df!(N::Int64, nodes_positions::Vector{Tuple{Float
     cell_df.i_voxel_x = i_voxel_x_vec
     cell_df.i_voxel_y = i_voxel_y_vec
     cell_df.i_voxel_z = i_voxel_z_vec
-
-    cell_df.dam_X = [Matrix{Float64}(undef, 0, Nd) for _ in 1:N]
-    cell_df.dam_Y = [Matrix{Float64}(undef, 0, Nd) for _ in 1:N]
 
     # dam_X_dom::Vector{Int64} initialized to fill(0, domain * floor(...))
     n_dom_sub = floor(Int64, gsm2.Rn / gsm2.rd)

@@ -146,6 +146,96 @@ function setup_IonIrrad!(dose::Float64, E::Float64, particle::String;
 end
 
 """
+    setup_IonIrrad!(dose, E, particle; type_AT="KC", kR=1.0, dose_rate=0.18) -> Nothing
+
+Interpolates LET, builds `Ion`/`Irrad` objects, computes AT track radii.
+Injects `type_AT`, `ion`, `irrad`, `LET`, `Rc`, `Rp`, `Rk`, `Kp`, `A`, `Z` into `Main`.
+`A` is the mass number extracted from `particle` (e.g. `12` for `"12C"`).
+
+Requires global `sp` (stopping power dict) to be in scope.
+
+# Example
+```julia
+setup_IonIrrad!(1.0, 100.0, "1H")
+setup_IonIrrad!(2.0, 150.0, "12C"; type_AT="LEM")
+```
+"""
+function setup_IonIrrad!(dose::Float64, E::Vector{Float64}, particle::Vector{String};
+        type_AT::String  = "KC",
+        kR::Float64      = 1.0,
+        dose_rate::Float64 = 0.18)
+
+
+    A_ = Float64[]
+    A  = Float64[]
+    Z  = Float64[]
+
+    LET_local  = Float64[]
+    ion_local  = Ion[]
+    irrad_local = Irrad[]
+
+    Rc_local = Float64[]
+    Rp_local = Float64[]
+    Kp_local = Float64[]
+
+    for i in 1:size(E, 1)
+        A_ = push!(A_, parse(Int, filter(isdigit, particle[i])))
+        A  = push!(A, Float64(parse(Int, filter(isdigit, particle[i]))))   # mass number in atomic mass units
+        Z  = push!(Z, getZ(particle[i]))
+
+        LET_local  = push!(LET_local, linear_interpolation(particle[i], E[i], sp))
+        ion_local  = push!(ion_local, Ion(particle[i], E[i],
+                        Float64(parse(Int, filter(isdigit, particle[i]))), 
+                        getZ(particle[i]), 
+                        linear_interpolation(particle[i], E[i], sp), 
+                        1.0))
+        irrad_local = push!(irrad_local, Irrad(dose, kR, dose_rate))
+
+        Rc_local_, Rp_local_, Kp_local_ = ATRadius(Ion(particle[i], E[i],
+                        Float64(parse(Int, filter(isdigit, particle[i]))), 
+                        getZ(particle[i]), 
+                        linear_interpolation(particle[i], E[i], sp), 
+                        1.0), 
+                        Irrad(dose, kR, dose_rate), type_AT)
+        Rc_local = push!(Rc_local, Rc_local_)
+        Rp_local = push!(Rp_local, Rp_local_)
+        Kp_local = push!(Kp_local, Kp_local_)
+    end
+    Rk_local = Rp_local  
+
+    @eval Main begin
+        type_AT    = $type_AT
+        dose       = $dose
+        A_         = $A_
+        A          = $A
+        Z          = $Z
+        LET        = $LET_local
+        ion        = $ion_local
+        irrad      = $irrad_local
+        Rc         = $Rc_local
+        Rp         = $Rp_local
+        Rk         = $Rk_local
+        Kp         = $Kp_local
+        DoseRate_h = 0.0
+        F          = 0.0
+        D          = 0.0
+        T          = 0.0
+    end
+
+    println("=========== Ion & Irradiation Setup ===========")
+    println(" Particle:         $particle  (A = $A_, Z = $Z)")
+    println(" Energy:           $E MeV/u")
+    println(" LET:              $LET_local keV/μm")
+    println(" Dose:             $dose Gy")
+    println(" Track model:      $type_AT")
+    println(" Rc = $(Rc_local), Rp = $(Rp_local), Rk = $(Rk_local), Kp = $(Kp_local)")
+    println(" Dose rate:        $dose_rate Gy/h")
+    println("===============================================")
+
+    return nothing
+end
+
+"""
     setup_cell_lattice!(target_geom, X_box, R_cell, N_sideVox, N_CellsSide;
                         ParIrr="false", track_seg=true, full_cycle=true) -> Nothing
 
@@ -295,7 +385,7 @@ Injects `irrad_cond`, `irrad_cond_original_layers`, `lets`, `energies`,
 setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
 ```
 """
-function setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+function setup_irrad_conditions!(ion::Ion, irrad::Irrad, type_AT::String, cell_df::DataFrame, track_seg::Bool)
     println(">>> Computing irradiation conditions per layer...")
 
     unique_z   = sort(unique(cell_df.z))
@@ -346,6 +436,100 @@ function setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
 end
 
 """
+    setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg) -> Nothing
+
+Computes per-layer AT conditions, assigns energy steps, and builds a reduced
+`irrad_cond` array indexed by energy step.
+
+Injects `irrad_cond`, `irrad_cond_original_layers`, `lets`, `energies`,
+`cell_df`, `num_energy_steps` into `Main`.
+
+# Example
+```julia
+setup_irrad_conditions!(ion, irrad, type_AT, cell_df, track_seg)
+```
+"""
+function setup_irrad_conditions!(ion::Vector{Ion}, irrad::Vector{Irrad}, 
+                type_AT::String, cell_df::DataFrame, track_seg::Bool)
+    println(">>> Computing irradiation conditions per layer...")
+
+    unique_z   = sort(unique(cell_df.z))
+    z_to_layer = Dict(z => i for (i, z) in enumerate(unique_z))
+
+    irrad_cond_local = Vector{Vector{AT}}(undef, size(ion, 1))
+    irrad_cond_reduced_vec = Vector{Vector{AT}}(undef, size(ion, 1))
+    lets_local = Vector{Vector{Float64}}(undef, size(ion, 1))
+    energies_local = Vector{Vector{Float64}}(undef, size(ion, 1))
+    num_steps = Vector{Int64}(undef, size(ion, 1))
+
+    for i in 1:size(ion, 1)
+        irrad_cond_local_ = Array{AT}(undef, length(unique_z))
+        compute_energy_box!(
+            irrad_cond_local_,
+            ion[i],
+            irrad[i],
+            type_AT,
+            cell_df,
+            track_seg,
+            sp
+        )
+        #irrad_cond_local[i] = irrad_cond_local_
+
+        lets_local[i]     = getfield.(irrad_cond_local_, :LET)
+        energies_local[i] = getfield.(irrad_cond_local_, :E)
+
+        cell_df[!, Symbol("layer_", i)] =[z_to_layer[z] for z in cell_df.z]
+
+        irrad_cond_local[i] = deepcopy(irrad_cond_local_)
+
+        println(">>> Assigning energy steps to each cell...")
+        @time set_energy_steps_poly!(cell_df, irrad_cond_local_, i)
+
+        energy_col = Symbol("energy_step_", i)
+        layer_col = Symbol("layer_", i)
+        unique_steps = unique(cell_df[!, energy_col])
+        num_steps[i]    = length(unique_steps)
+
+        # Reduced irrad_cond: one entry per energy step, using mid-layer condition
+        irrad_cond_reduced = Array{AT}(undef, num_steps[i])
+        for step in unique_steps
+            layers    = unique(cell_df[cell_df[!, energy_col] .== step, layer_col])
+            mid_layer = round(Int, 0.5 * (minimum(layers) + maximum(layers)))
+            irrad_cond_reduced[step] = irrad_cond_local[i][mid_layer]
+            println("Energy step $step covers layers: $layers  → using mid-layer $mid_layer")
+        end
+
+        irrad_cond_reduced_vec[i] = irrad_cond_reduced
+    end
+
+    if hasproperty(cell_df, :layer)
+        select!(cell_df, Not(:layer))
+    end
+
+    if hasproperty(cell_df, :energy_step)
+        select!(cell_df, Not(:energy_step))
+    end
+
+    @eval Main begin
+        irrad_cond                 = $irrad_cond_reduced_vec
+        irrad_cond_original_layers = $irrad_cond_local
+        lets                       = $lets_local
+        energies                   = $energies_local
+        cell_df                    = $cell_df
+        num_energy_steps           = $num_steps
+    end
+
+    println("=========== Irradiation Condition Setup COMPLETE ===========")
+    println(" Layers detected:       ", length(unique_z))
+    println(" Energy steps:          ", num_steps)
+    println(" LET range:             ", minimum(lets_local), " → ", maximum(lets_local))
+    println(" Energy range (MeV/u):  ", minimum(energies_local), " → ", maximum(energies_local))
+    println("=============================================================")
+
+    return nothing
+end
+
+"""
     set_energy_steps!(cell_df::DataFrame, irrad_cond::Vector{AT}) -> Nothing
 
 Assigns a discrete `energy_step` to each cell via log-spaced binning of layer energy.
@@ -370,6 +554,53 @@ function set_energy_steps!(cell_df::DataFrame, irrad_cond::Vector{AT})
     end
 
     cell_df.energy_step .= remap_bins(bin_energy)
+    return nothing
+end
+
+
+"""
+    set_energy_steps!(cell_df::DataFrame, irrad_cond::Vector{AT}) -> Nothing
+
+Assigns a discrete `energy_step` to each cell via log-spaced binning of layer energy.
+Bins span 1e-2 to 1e3 MeV/u with 50 bins/decade. Mutates `cell_df` in-place.
+
+# Example
+```julia
+set_energy_steps!(cell_df, irrad_cond)
+sort(unique(cell_df.energy_step))
+```
+"""
+function set_energy_steps_poly!(
+    cell_df::DataFrame,
+    irrad_cond::Vector{AT},
+    i::Int64
+)
+
+    min_val         = 1e-2
+    max_val         = 1e3
+    bins_per_decade = 50
+    num_bins = Int(round(log10(max_val / min_val) * bins_per_decade))
+
+    bins = vcat(
+        0,
+        10 .^ range(log10(min_val), log10(max_val), length=num_bins + 1)
+    )
+
+    bin_energy = zeros(Float64, nrow(cell_df))
+
+    layer_col = Symbol("layer_", i)
+
+    for j in 1:nrow(cell_df)
+        bin_energy[j] =
+            set_energy_bins(
+                irrad_cond[cell_df[j, layer_col]].E,
+                bins
+            )
+    end
+
+    energy_col = Symbol("energy_step_", i)
+    cell_df[!, energy_col] = remap_bins(bin_energy)
+
     return nothing
 end
 

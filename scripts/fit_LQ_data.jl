@@ -472,7 +472,7 @@ for gj in 1:sim_grid
 end
 
 sorted_df_mixed = sort(results_df, :err)
-sel = 1
+sel = 2
 a_mixed = sorted_df_mixed.a[sel]
 b_mixed = sorted_df_mixed.b[sel]
 r_mixed = sorted_df_mixed.r[sel]
