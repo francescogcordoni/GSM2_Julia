@@ -355,8 +355,13 @@ function setup_cell_population!(
         num_cols     = $num_cols_local
     end
 
-    compute_possible_division_df!(cell_df_local)
-    @eval Main cell_df = $cell_df_local
+    # NOTE: compute_possible_division_df! used to run here, but its can_divide
+    # rule (can_divide=1 only for cell_cycle=="M" cells with space) is a
+    # different, narrower concept than can_divide's meaning everywhere else in
+    # the ABM ("not blocked by lack of space", any phase) — it silently
+    # overwrote the correct can_divide/cell_cycle="G0" state that
+    # populate_cells_wrapper! just set, forcing every non-M cell to
+    # can_divide=0 regardless of real empty-neighbor count. Removed.
 
     N_alive = length(cell_df_local.index[cell_df_local.is_cell .== 1])
 

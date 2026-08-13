@@ -229,7 +229,7 @@ function set_oxygen_diffusion!(cell_df;
             println("set_oxygen_diffusion! [mean]")
             println("  R        = $(round(Rmax,   digits=1)) µm")
             println("  ρ_mean   = $(round(ρ_mean, digits=3))")
-            println("  q0       = $q0 %/s  (Freyer & Sutherland / Grimes)")
+            println("  q0       = $q0 %/s")
             println("  r_n      = $(round(r_n,    digits=1)) µm  (necrotic radius)")
             println("  rim      = $(round(Rmax-r_n,digits=1)) µm  (viable rim)")
             println("  O2 range = $(round(minimum(cell_df.O[alive]),digits=2)) – " *

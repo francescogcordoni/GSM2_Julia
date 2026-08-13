@@ -66,25 +66,6 @@
 using Plots
 using Statistics
 using DataFrames
-using Printf
-
-"""
-    log10_colorbar_ticks(log_vals) -> (positions, labels)
-
-Colorbar tick positions (in log10 space) with labels showing the ORIGINAL
-(non-log) value at each integer decade spanning `log_vals`. Used so an
-`xscale=:log10` colorbar reads in the column's natural units instead of raw
-log10 numbers. Returns `:auto` if `log_vals` has no finite entries.
-"""
-function log10_colorbar_ticks(log_vals::AbstractVector)
-    finite = filter(isfinite, log_vals)
-    isempty(finite) && return :auto
-    lo, hi = extrema(finite)
-    exps = floor(Int, lo):ceil(Int, hi)
-    positions = Float64.(exps)
-    labels    = [@sprintf("%g", 10.0^e) for e in exps]
-    return (positions, labels)
-end
 
 """
     plot_scalar_cell(cell_df, col::Symbol = :dose_cell;
@@ -149,31 +130,29 @@ function plot_scalar_cell(cell_df, col::Symbol = :dose_cell;
     end
 
     # Panel 2 — 3D scatter (half-sphere x≥0)
-    # Apply log10 transform to color values when xscale=:log10 so the colorbar
-    # reflects the same scale as the density panel.
+    # marker_z always holds the RAW (non-transformed) value; a log color axis
+    # is requested via colorbar_scale so Plots computes the color mapping AND
+    # the tick positions/labels itself, in the column's own units.
     df3   = df_active[df_active.x .>= 0, :]
     c_vals = if xscale == :log10
-        [(!isnothing(v) && !ismissing(v) && v > 0) ? log10(Float64(v)) : NaN
+        [(!isnothing(v) && !ismissing(v) && v > 0) ? Float64(v) : NaN
          for v in df3[!, col]]
     else
         [(!isnothing(v) && !ismissing(v)) ? Float64(v) : NaN
          for v in df3[!, col]]
     end
 
-    # Colorbar reads in the column's own units even under xscale=:log10 — ticks
-    # sit at integer log10 positions but are labelled with the original value.
-    cb_ticks = xscale == :log10 ? log10_colorbar_ticks(c_vals) : :auto
-
     p2 = scatter(df3.x, df3.y, df3.z;
                     markersize=4, markerstrokewidth=0.1,
                     marker_z=c_vals, colorbar=true, colorbar_title=col_str,
-                    colorbar_ticks=cb_ticks,
+                    colorbar_scale=xscale, colorbar_tickfontsize=8,
+                    right_margin=10Plots.mm,
                     xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
                     title="3D $col_str Distribution", legend=false,
                     aspect_ratio=:equal, seriescolor=:viridis,
                     size=(900, 700), camera=(320, 30))
 
-    return plot(p1, p2, layout=(1, 2), size=(1200, 500))
+    return plot(p1, p2, layout=(1, 2), size=(1300, 550))
 end
 
 """
@@ -297,26 +276,30 @@ function plot_scalar_cell_poly(cell_df, col::Symbol = :dose_cell;
         end
     end
 
-    # Panel 2 — 3D scatter (half-sphere x≥0), always the combined column
+    # Panel 2 — 3D scatter (half-sphere x≥0), always the combined column.
+    # marker_z holds the RAW value; colorbar_scale requests a log color axis
+    # so Plots computes both the color mapping and the tick labels itself,
+    # in the column's own units.
     df3   = df_active[df_active.x .>= 0, :]
     c_vals = if xscale == :log10
-        [(!isnothing(v) && !ismissing(v) && v > 0) ? log10(Float64(v)) : NaN
+        [(!isnothing(v) && !ismissing(v) && v > 0) ? Float64(v) : NaN
          for v in df3[!, col]]
     else
         [(!isnothing(v) && !ismissing(v)) ? Float64(v) : NaN
          for v in df3[!, col]]
     end
-    cb_title = xscale == :log10 ? "log₁₀($col_str)" : col_str
 
     p2 = scatter(df3.x, df3.y, df3.z;
                     markersize=4, markerstrokewidth=0.1,
-                    marker_z=c_vals, colorbar=true, colorbar_title=cb_title,
+                    marker_z=c_vals, colorbar=true, colorbar_title=col_str,
+                    colorbar_scale=xscale, colorbar_tickfontsize=8,
+                    right_margin=10Plots.mm,
                     xlabel="x (µm)", ylabel="y (µm)", zlabel="z",
                     title="3D $col_str Distribution", legend=false,
                     aspect_ratio=:equal, seriescolor=:viridis,
                     size=(900, 700), camera=(320, 30))
 
-    return plot(p1, p2, layout=(1, 2), size=(1200, 500))
+    return plot(p1, p2, layout=(1, 2), size=(1300, 550))
 end
 
 """

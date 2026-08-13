@@ -46,11 +46,16 @@
 #       Recomputes number_nei for all cells in a DataFrame from scratch.
 #
 #~ ABM Event Handlers
+#?   _sync_block_state!(pop, idx) -> Nothing
+#       Recounts number_nei for idx and syncs can_divide/cell_cycle: blocks into
+#       G0 if it just lost its last empty neighbor, unblocks back to G1 if it
+#       gained one (and has no pending death_time). Shared by both handlers below
+#       so a cell can't gain/lose space via one event type and never get synced.
 #?   _perform_division!(pop, parent_idx, nat_apo) -> Nothing
-#       Divides parent into first empty neighbor. Resets both to G1.
-#       Updates number_nei and can_divide for all affected neighbors.
+#       Divides parent into a random empty neighbor. Resets both to G1.
+#       Syncs block state (via _sync_block_state!) for all affected neighbors.
 #?   _handle_cell_removal!(pop, removed_idx, is_natural_apoptosis) -> Nothing
-#       Marks cell dead, decrements n_alive, unblocks neighbors (sets G1 + cycle_time).
+#       Marks cell dead, decrements n_alive, syncs block state for neighbors.
 #       Respects recover_time when computing new cycle_time for unblocked neighbors.
 #
 #~ ABM Time Stepping
@@ -233,13 +238,13 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
                     end
                 elseif phase == "G2"
                     ct = rand(Gamma(2*5, 0.5))
-                    cell_df.cycle_time[i]   = max(ct, recover_time_sample)
+                    cell_df.cycle_time[i]   = ct < recover_time_sample ? recover_time_sample : (ct + recover_time_sample)
                 elseif phase == "S"
                     ct = rand(Gamma(2*7, 0.5))
-                    cell_df.cycle_time[i]   = max(ct, recover_time_sample)
+                    cell_df.cycle_time[i]   = ct < recover_time_sample ? recover_time_sample : (ct + recover_time_sample)
                 elseif phase == "G1"
                     ct = rand(Gamma(2*11, 0.5))
-                    cell_df.cycle_time[i]   = max(ct, recover_time_sample)
+                    cell_df.cycle_time[i]   = ct < recover_time_sample ? recover_time_sample : (ct + recover_time_sample)
                 end
             else
                 cell_df.cycle_time[i] = Inf
@@ -271,13 +276,28 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
         cell_df.apo_time[i] = Inf
     end
 
-    # Serial neighbor merge
+    # Serial neighbor merge — also syncs cell_cycle/can_divide, not just
+    # number_nei: a neighbor that started G0 (fully packed at setup) can gain
+    # its first-ever empty slot right here, from an immediate removal, before
+    # the ABM loop (and _sync_block_state!) ever runs on it.
     affected = Set{Int}()
     for updates in neighbor_updates, nei_idx in updates
         push!(affected, nei_idx)
     end
     for i in affected
         cell_df.number_nei[i] = length(cell_df.nei[i]) - sum(cell_df.is_cell[cell_df.nei[i]])
+        cell_df.is_cell[i] == 1 || continue
+        if cell_df.number_nei[i] == 0 && cell_df.can_divide[i] == 1
+            cell_df.cell_cycle[i] = "G0"
+            cell_df.cycle_time[i] = Inf
+            cell_df.can_divide[i] = 0
+        elseif cell_df.number_nei[i] > 0 && cell_df.can_divide[i] == 0 && isinf(cell_df.death_time[i])
+            cell_df.cell_cycle[i] = "G1"
+            new_ct = generate_cycle_time("G1")
+            cell_df.cycle_time[i] = isinf(cell_df.recover_time[i]) ?
+                new_ct : max(new_ct, cell_df.recover_time[i])
+            cell_df.can_divide[i] = 1
+        end
     end
 
     if summary
@@ -318,7 +338,7 @@ function compute_repair_domain(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
                                 rng::AbstractRNG          = Random.default_rng(),
                                 verbose::Bool             = false,
                                 max_events_log::Int       = 0,
-                                au::Float64               = 4.0)
+                                au::Float64               = 8.0)
 
     if any(>(0), Y)
         verbose && println("[compute_repair_domain] Y-lesion detected → immediate lethal.")
@@ -438,7 +458,7 @@ Inputs X, Y are not mutated.
 """
 function compute_repair_domain_trajectory(X::Vector{Int64}, Y::Vector{Int64}, gsm2::GSM2;
                                            rng::AbstractRNG = Random.default_rng(),
-                                           au::Float64      = 4.0)
+                                           au::Float64      = 8.0)
 
     times  = Float64[]
     X_traj = Vector{Int}[]
@@ -727,11 +747,58 @@ end
 #! ============================================================================
 
 """
+    _sync_block_state!(pop, idx) -> Nothing
+
+Recomputes `number_nei[idx]` from the ground truth and syncs `can_divide` /
+`cell_cycle` against it:
+- loses its last empty neighbor (`number_nei==0`, currently cycling) → blocked
+  into `"G0"` (`cycle_time=Inf, can_divide=0`).
+- gains an empty neighbor (`number_nei>0`, currently `can_divide==0`) AND has
+  no pending scheduled death (`death_time==Inf`) → unblocked back to `"G1"`
+  with a fresh `cycle_time` (respects an existing `recover_time`, taking
+  whichever is later). A cell with a finite `death_time` is left blocked —
+  it's going to die on schedule regardless, so resurrecting its cycle isn't
+  worth the behavior change.
+
+Call this on `idx` after ANY event that can change its empty-neighbor count —
+a division nearby (fills a slot) or a neighbor's death (frees one) — so both
+directions stay in sync regardless of which kind of event caused the change.
+Previously the block direction only ran from `_perform_division!` and the
+(gated) unblock direction only from `_handle_cell_removal!`, so a cell that
+gained space purely as a side effect of a nearby division (not a death) had
+no path back to G1 even once its `death_time` was `Inf`.
+
+# Example
+```julia
+_sync_block_state!(pop, Int32(17))
+```
+"""
+function _sync_block_state!(pop::CellPopulation, idx::Int32)
+    pop.number_nei[idx] = recount_empty_neighbors(pop, idx)
+    if pop.number_nei[idx] == 0 && pop.can_divide[idx] == 1
+        pop.cell_cycle[idx] = String7("G0")
+        pop.cycle_time[idx] = Inf
+        pop.can_divide[idx] = 0
+    elseif pop.number_nei[idx] > 0 && pop.can_divide[idx] == 0 && isinf(pop.death_time[idx])
+        pop.cell_cycle[idx] = String7("G1")
+        new_ct = generate_cycle_time("G1")
+        pop.cycle_time[idx] = isinf(pop.recover_time[idx]) ?
+            new_ct : max(new_ct, pop.recover_time[idx])
+        pop.can_divide[idx] = 1
+    end
+    return nothing
+end
+
+"""
     _perform_division!(pop, parent_idx, nat_apo) -> Nothing
 
-Divides parent cell into first empty neighbor. Resets both to G1 with fresh
-cycle times. Recounts `number_nei` for parent, daughter, and all their neighbors.
-Blocks neighbors with `number_nei==0` (sets `cycle_time=Inf, can_divide=0`).
+Divides parent cell into random empty neighbor. Resets both to G1 with fresh
+cycle times. Recounts `number_nei` for parent, daughter, and all their
+neighbors, syncing each via `_sync_block_state!` — a neighbor left with
+`number_nei==0` is blocked into `"G0"` (the primary path into quiescence: a
+neighbor losing its last empty slot to THIS division, not just a cell finding
+no space when its own cycle timer fires), while one that regains space is
+unblocked back to `"G1"`.
 
 # Example
 ```julia
@@ -744,11 +811,11 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
     is_cell         = pop.is_cell
     daughter_idx    = Int32(0)
 
+    empty_neighbors = Int32[]
     @inbounds for n_idx in parent_neighbors
-        if is_valid_index(n_idx, n) && is_cell[n_idx] == 0
-            daughter_idx = n_idx; break
-        end
+        is_valid_index(n_idx, n) && is_cell[n_idx] == 0 && push!(empty_neighbors, n_idx)
     end
+    daughter_idx = isempty(empty_neighbors) ? Int32(0) : rand(empty_neighbors)
 
     daughter_idx == 0 && (@warn "Division attempted but no empty neighbor" parent=parent_idx; return nothing)
 
@@ -772,22 +839,27 @@ function _perform_division!(pop::CellPopulation, parent_idx::Int32, nat_apo::Flo
     end
 
     daughter_neighbors = pop.nei[daughter_idx]
-    number_nei = pop.number_nei
-    can_divide = pop.can_divide
-    cycle_times = pop.cycle_time
 
     pop.number_nei[parent_idx]   = recount_empty_neighbors(pop, parent_idx)
     pop.number_nei[daughter_idx] = recount_empty_neighbors(pop, daughter_idx)
+
+    # Parent/daughter can themselves end up with zero empty neighbors right
+    # after this division (e.g. the parent had exactly one free slot, now
+    # taken by the daughter) — block them into G0 immediately rather than
+    # leaving the unconditional G1/can_divide=1 set above in place.
+    for idx in (parent_idx, daughter_idx)
+        if pop.number_nei[idx] == 0
+            pop.cell_cycle[idx] = String7("G0")
+            pop.cycle_time[idx] = Inf
+            pop.can_divide[idx] = 0
+        end
+    end
 
     for neighbors in (parent_neighbors, daughter_neighbors)
         @inbounds for n_idx in neighbors
             is_valid_index(n_idx, n) && is_cell[n_idx] == 1 &&
             n_idx != parent_idx && n_idx != daughter_idx || continue
-            number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
-            if number_nei[n_idx] == 0 && can_divide[n_idx] == 1
-                cycle_times[n_idx] = Inf
-                can_divide[n_idx]  = 0
-            end
+            _sync_block_state!(pop, n_idx)
         end
     end
 
@@ -799,8 +871,10 @@ end
     _handle_cell_removal!(pop, removed_idx, is_natural_apoptosis) -> Nothing
 
 Marks cell dead (`is_cell=0`), decrements `n_alive`, clears timers.
-For each alive neighbor: recounts `number_nei` and unblocks cells with
-`number_nei>0 && can_divide==0` → resets to G1 (respects existing `recover_time`).
+For each alive neighbor: syncs block state via `_sync_block_state!` — a
+neighbor left with `number_nei==0` is blocked into `"G0"`; one that gains
+space (and has no pending scheduled death, `death_time==Inf`) is unblocked
+back to `"G1"` (respects an existing `recover_time`).
 
 # Example
 ```julia
@@ -825,24 +899,12 @@ function _handle_cell_removal!(pop::CellPopulation, removed_idx::Int32,
 
     pop.n_alive -= 1
 
-    n           = pop.n_cells
-    is_cell     = pop.is_cell
-    number_nei  = pop.number_nei
-    can_divide  = pop.can_divide
-    cell_cycle  = pop.cell_cycle
-    cycle_times = pop.cycle_time
-    recover_times = pop.recover_time
+    n       = pop.n_cells
+    is_cell = pop.is_cell
 
     @inbounds for n_idx in pop.nei[removed_idx]
         is_valid_index(n_idx, n) && is_cell[n_idx] == 1 || continue
-        number_nei[n_idx] = recount_empty_neighbors(pop, n_idx)
-        if number_nei[n_idx] > 0 && can_divide[n_idx] == 0 && isinf(pop.death_time[n_idx])
-            cell_cycle[n_idx] = String7("G1")
-            new_ct = generate_cycle_time("G1")
-            cycle_times[n_idx] = isinf(recover_times[n_idx]) ?
-                new_ct : max(new_ct, recover_times[n_idx])
-            can_divide[n_idx] = 1
-        end
+        _sync_block_state!(pop, n_idx)
     end
     return nothing
 end

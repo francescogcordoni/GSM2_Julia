@@ -53,8 +53,8 @@ sp = load_stopping_power()                 # now returns Dict{String,StoppingTab
 # ============================================================================
 
 # Irradiation
-PARTICLE      = "1H"      # ion species: "1H", "4He", "12C", "16O"
-ENERGY_MEV_U  = 5.0      # kinetic energy per nucleon (MeV/u)
+PARTICLE      = "12C"      # ion species: "1H", "4He", "12C", "16O"
+ENERGY_MEV_U  = 80.0      # kinetic energy per nucleon (MeV/u)
 DOSE_GY       = 1.        # prescribed dose (Gy)
 validate_stopping(sp, PARTICLE, parse(Int, match(r"\d+", PARTICLE).match))
 
@@ -77,7 +77,7 @@ const A_AVG= 0.01481;  const B_AVG= 0.01266;  const R_AVG= 2.5657
 
 # Simulation options
 const TYPE_AT        = "KC"         # track structure: "KC" (Kiefer-Chatterjee) or "LEM"
-const TRACK_SEG      = false         # true = fixed LET across depth (no Bragg-peak buildup)
+const TRACK_SEG      = true         # true = fixed LET across depth (no Bragg-peak buildup)
 const TARGET_GEOM    = "circle"     # spheroid cross-section for beam geometry
 const CALC_TYPE      = "full"       # beam radius mode: "full" (whole spheroid) or "fast"
 const TERMINAL_TIME  = 72.0         # post-irradiation ABM window (h)
@@ -290,10 +290,6 @@ SF_abm  = N_final / N_init
 println("\nFinal alive: $N_final / $N_init  (ABM SF = $(round(SF_abm, digits=4)))")
 
 print_simulation_summary(ts)
-
-# Convert snapshots to DataFrames for plotting
-snap_df = Dict(t => to_dataframe(snaps[t]; alive_only=true)
-                for t in SNAPSHOT_HOURS if haskey(snaps, t))
 
 # ============================================================================
 # 7. OUTPUT — time-series plots
