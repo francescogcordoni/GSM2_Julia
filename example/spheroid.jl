@@ -26,7 +26,7 @@ using CSV, DataFrames
 using Distributions
 using Random
 using Plots
-using StatsPlots            # required for density() used in plot_times, plot_damage, etc.
+using StatsPlots
 using ProgressBars
 using GLM
 using JLD2
