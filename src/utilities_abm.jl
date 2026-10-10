@@ -6,7 +6,11 @@
 #~ Radiation Damage & Repair
 #?   compute_times_domain!(cell_df, gsm2_cycle; nat_apo, terminal_time, verbose, print_every, summary)
 #       Threaded per-cell GSM2 survival + stochastic repair scheduling.
-#       Updates sp, death_time, recover_time, cycle_time, is_cell in place.
+#       Lethally committed cells are "doomed": kept on the lattice, no cycling or
+#       division, removed after a Gamma-distributed delay (sample_death_delay).
+#       Updates sp, death_time, recover_time, cycle_time, can_divide in place.
+#?   sample_death_delay(phase) -> Float64
+#       Delay (h) from lethal commitment to removal; mean DEATH_DELAY_MEAN_CYCLES × T_CYCLE.
 #       Dispatches gsm2 by cell_cycle phase. Deferred neighbor updates applied serially.
 #?   compute_repair_domain(X, Y, gsm2; terminal_time, rng, verbose, max_events_log)
 #           -> (death_time, recover_time, death_code, X_final, Y_final)
@@ -89,83 +93,127 @@
 #       DataFrame wrapper: AoS→SoA, runs simulation, optionally writes back and converts snapshots.
 #! ============================================================================
 
+#! ---------------------------------------------------------------------------
+#! CONSTANTS + HELPERS
+#! ---------------------------------------------------------------------------
+
+"""
+Mean unperturbed cycle length (h), computed from PHASE_DURATIONS so that the
+death delays rescale automatically if the cycle times are changed (e.g. V79).
+"""
+const T_CYCLE = sum(PHASE_DURATIONS[p].shape * PHASE_DURATIONS[p].scale
+                    for p in ("G1", "S", "G2", "M"))
+
+"""
+Shape of the Gamma death-delay distribution. k = 3 gives CV = 1/√3 ≈ 0.58,
+i.e. a broad, right-skewed spread of death times, as seen in time-lapse data.
+"""
+const DEATH_DELAY_SHAPE = 3.0
+
+"""
+Mean delay between lethal commitment and removal, in units of T_CYCLE.
+Cells committed in G2/M reach (abortive) mitosis soonest and die first;
+quiescent G0 cells have no mitosis to trigger death and persist longest.
+"""
+const DEATH_DELAY_MEAN_CYCLES = Dict(
+    "G2" => 1.0,
+    "M"  => 1.0,
+    "S"  => 1.25,
+    "G1" => 1.5,
+    "G0" => 2.5,
+)
+
+"""
+    sample_death_delay(phase) -> Float64
+
+Random delay (h) between lethal commitment and removal of a doomed cell.
+"""
+@inline function sample_death_delay(phase::AbstractString)::Float64
+    m = get(DEATH_DELAY_MEAN_CYCLES, String(phase), 1.5) * T_CYCLE
+    return rand(Gamma(DEATH_DELAY_SHAPE, m / DEATH_DELAY_SHAPE))
+end
+
+"""
+    _doom_cell!(cell_df, i, t_commit, phase, death_type) -> Nothing
+
+Marks cell `i` as doomed: removal at `t_commit + delay`, no further cycling,
+no division (`can_divide = 0` also protects it from being unblocked by
+`_sync_block_state!`, which requires `death_time == Inf`).
+"""
+@inline function _doom_cell!(cell_df::DataFrame, i::Int, t_commit::Float64,
+                             phase::AbstractString, death_type::Int)
+    cell_df.death_time[i]   = t_commit + sample_death_delay(phase)
+    cell_df.cycle_time[i]   = Inf
+    cell_df.recover_time[i] = Inf
+    cell_df.can_divide[i]   = 0
+    cell_df.is_death_rad[i] = 1
+    cell_df.death_type[i]   = death_type
+    cell_df.dam_X_dom[i]  .*= 0
+    cell_df.dam_Y_dom[i]  .*= 0
+    return nothing
+end
+
+#! ---------------------------------------------------------------------------
+#! REPLACEMENT for compute_times_domain!
+#! ---------------------------------------------------------------------------
+
 """
     compute_times_domain!(cell_df, gsm2_cycle;
-                            nat_apo=1e-10,
-                            terminal_time=Inf, verbose=false, print_every=0, summary=true)
-        -> Nothing
+                          nat_apo=1e-10, terminal_time=Inf,
+                          verbose=false, print_every=0, summary=true) -> Nothing
 
-Threaded per-cell GSM2 survival + stochastic repair scheduling for all active
-cells (`is_cell==1`). Updates `cell_df` in place.
+Threaded per-cell GSM2 survival + stochastic repair scheduling.
 
-Thread safety: each cell writes only to its own row index, so column-level writes
-are race-free. Neighbor updates (which touch other rows) are deferred into
-per-thread buffers and merged serially at the end.
+Outcomes per cell:
+- **Doomed at t=0** (direct Y lesion): death at `0 + T_death`.
+- **Doomed by SSA lethal event** at `t_L`: death at `t_L + T_death`.
+  In M with free space, commitment is `min(t_L, end of mitosis)`.
+- **Survivor**: recovery + phase-dependent cycle time. An M cell that
+  finishes mitosis before repair completes is doomed (mitotic catastrophe).
+- **Timeout**: residual X/Y damage written back.
 
-For each cell:
-1. Computes `sp` via `domain_GSM2`.
-2. Runs `compute_repair_domain` → one of four outcomes:
-   - **Immediate removal** (`death_time==0`) → `is_cell=0`, deferred neighbor update.
-   - **Radiogenic death** (finite `death_time`) → schedules death; clears damage arrays.
-   - **Survivor** (finite `recover_time`) → schedules recovery + phase-dependent cycle_time.
-   - **Timeout** (`death_time=Inf, recover_time=Inf`) → writes back residual X/Y damage.
-
-GSM2 model selected per phase: G1/G0→gsm2_cycle[1], S→gsm2_cycle[2], G2/M→gsm2_cycle[3].
-Neighbor updates are deferred per-thread and merged serially at the end.
-
-Required columns: `:index, :is_cell, :dam_X_dom, :dam_Y_dom, :sp, :apo_time,
-:death_time, :recover_time, :cycle_time, :is_death_rad, :death_type,
-:cell_cycle, :is_stem, :number_nei, :nei`.
-
-# Example
-```julia
-compute_times_domain!(cell_df, gsm2_cycle, 0.01; terminal_time=24.0, summary=true)
-```
+`T_death ~ Gamma(DEATH_DELAY_SHAPE, ·)` with phase-dependent mean
+(`DEATH_DELAY_MEAN_CYCLES × T_CYCLE`). Doomed cells keep their lattice site
+until removal, so neighbours gain space only when the cell actually dies.
 """
 function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
                                 nat_apo::Float64 = 1e-10,
                                 terminal_time::Float64 = Inf,
-                                verbose::Bool = false, print_every::Int = 0, summary::Bool = true)
+                                verbose::Bool = false, print_every::Int = 0,
+                                summary::Bool = true)
 
     (0.0 < nat_apo < 1.0) || error("nat_apo must be in (0, 1); got $nat_apo")
-
-    λ     = -log(nat_apo)
-    inv_λ = 1.0 / λ
 
     active_cells = @view cell_df.index[cell_df.is_cell .== 1]
     n_active     = length(active_cells)
 
-    # Reset output columns
-    cell_df.sp          .= 1.0
-    cell_df.apo_time    .= Inf
-    cell_df.death_time  .= Inf
+    cell_df.sp           .= 1.0
+    cell_df.apo_time     .= Inf
+    cell_df.death_time   .= Inf
     cell_df.recover_time .= Inf
-    cell_df.cycle_time  .= Inf
+    cell_df.cycle_time   .= Inf
     cell_df.is_death_rad .= 0
-    cell_df.death_type  .= -1
+    cell_df.death_type   .= -1
 
     if n_active == 0
         println("[compute_times_domain!] No active cells. Nothing to do.")
         return nothing
     end
 
-    start_t    = time()
-    max_threads = Threads.maxthreadid()
-    println("[compute_times_domain!] Starting | active=$n_active | threads=$(Threads.nthreads()) | nat_apo=$nat_apo")
+    start_t = time()
+    plock   = ReentrantLock()
+    println("[compute_times_domain!] Starting | active=$n_active | threads=$(Threads.nthreads()) | T_cycle=$(T_CYCLE) h")
 
-    neighbor_updates = [Int[] for _ in 1:max_threads]
-    plock            = ReentrantLock()
-
-    immediate_removed = Threads.Atomic{Int}(0)
-    scheduled_death   = Threads.Atomic{Int}(0)
-    survived          = Threads.Atomic{Int}(0)
-    timeout_cells     = Threads.Atomic{Int}(0)
+    doomed_direct = Threads.Atomic{Int}(0)
+    doomed_ssa    = Threads.Atomic{Int}(0)
+    doomed_mitotic = Threads.Atomic{Int}(0)
+    survived      = Threads.Atomic{Int}(0)
+    timeout_cells = Threads.Atomic{Int}(0)
 
     @Threads.threads for k in eachindex(active_cells)
         i   = active_cells[k]
         tid = Threads.threadid()
 
-        # Select GSM2 by phase
         phase = cell_df.cell_cycle[i]
         gsm2  = if phase == "G1" || phase == "G0"
             gsm2_cycle[1]
@@ -178,48 +226,27 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
             gsm2_cycle[4]
         end
 
-        # 1) GSM2 survival probability
-        SP_cell        = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
-        cell_df.sp[i]  = SP_cell
+        SP_cell       = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2)
+        cell_df.sp[i] = SP_cell
 
-        # 2) Stochastic repair
         death_time, recover_time_sample, death_type, X_gsm2, Y_gsm2 =
             compute_repair_domain(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gsm2;
-                                    terminal_time=terminal_time)
+                                  terminal_time = terminal_time)
 
-        # ── Immediate removal ────────────────────────────────────────────────
-        if death_time == 0.0
-            cell_df.is_cell[i]    = 0
-            cell_df.death_type[i] = death_type
-            cell_df.apo_time[i]   = Inf
-            append!(neighbor_updates[tid], cell_df.nei[i])
-            Threads.atomic_add!(immediate_removed, 1)
-            verbose && print_every > 0 && k % print_every == 0 &&
-                lock(plock) do
-                    println("[k=$k|cell=$i|thr=$tid] SP=$(round(SP_cell,digits=4)) | immediate removal | type=$death_type")
-                end
-            continue
-        end
-
-        # ── Radiation death scheduled ───────────────────────────────────────
         if isfinite(death_time)
-            cell_df.recover_time[i] = Inf
-            cell_df.cycle_time[i]   = Inf
-            cell_df.death_type[i]   = death_type
-            cell_df.dam_X_dom[i]  .*= 0
-            cell_df.dam_Y_dom[i]  .*= 0
+            # ── Lethal commitment (direct Y at t=0, or SSA lethal event) ────
+            t_commit = (phase == "M" && cell_df.number_nei[i] > 0) ?
+                min(death_time, rand(Gamma(2 * 1.0, 0.5))) : death_time
+            _doom_cell!(cell_df, i, t_commit, phase, death_type)
+            Threads.atomic_add!(death_time == 0.0 ? doomed_direct : doomed_ssa, 1)
 
-            cell_df.death_time[i] = (phase == "M" && cell_df.number_nei[i] > 0) ?
-                min(death_time, rand(Gamma(2*1., 0.5))) : death_time
-
-            Threads.atomic_add!(scheduled_death, 1)
             verbose && print_every > 0 && k % print_every == 0 &&
                 lock(plock) do
-                    println("[k=$k|cell=$i|thr=$tid] SP=$(round(SP_cell,digits=4)) | death=$(round(cell_df.death_time[i],digits=4)) | type=$death_type")
+                    println("[k=$k|cell=$i|thr=$tid] SP=$(round(SP_cell,digits=4)) | doomed | commit=$(round(t_commit,digits=3)) | death=$(round(cell_df.death_time[i],digits=2))")
                 end
 
-        # ── Survivor ─────────────────────────────────────────────────────────
         elseif isfinite(recover_time_sample)
+            # ── Survivor ────────────────────────────────────────────────────
             cell_df.death_time[i]   = Inf
             cell_df.recover_time[i] = recover_time_sample
             cell_df.death_type[i]   = death_type
@@ -228,36 +255,29 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
 
             if cell_df.number_nei[i] > 0
                 if phase == "M"
-                    ct = rand(Gamma(2*1., 0.5))
+                    ct = rand(Gamma(2 * 1.0, 0.5))
                     if ct < recover_time_sample
-                        cell_df.recover_time[i] = Inf
-                        cell_df.cycle_time[i]   = Inf
-                        cell_df.death_time[i]   = ct
+                        # Mitosis completes with unrepaired damage → doomed
+                        _doom_cell!(cell_df, i, ct, "M", 1)
+                        Threads.atomic_add!(doomed_mitotic, 1)
                     else
                         cell_df.cycle_time[i] = ct
+                        Threads.atomic_add!(survived, 1)
                     end
-                elseif phase == "G2"
-                    ct = rand(Gamma(2*5, 0.5))
-                    cell_df.cycle_time[i]   = ct < recover_time_sample ? recover_time_sample : (ct + recover_time_sample)
-                elseif phase == "S"
-                    ct = rand(Gamma(2*7, 0.5))
-                    cell_df.cycle_time[i]   = ct < recover_time_sample ? recover_time_sample : (ct + recover_time_sample)
-                elseif phase == "G1"
-                    ct = rand(Gamma(2*11, 0.5))
-                    cell_df.cycle_time[i]   = ct < recover_time_sample ? recover_time_sample : (ct + recover_time_sample)
+                else
+                    shape = phase == "G2" ? 2 * 5 : phase == "S" ? 2 * 7 : 2 * 11
+                    ct    = rand(Gamma(shape, 0.5))
+                    cell_df.cycle_time[i] = ct < recover_time_sample ?
+                        recover_time_sample : (ct + recover_time_sample)
+                    Threads.atomic_add!(survived, 1)
                 end
             else
                 cell_df.cycle_time[i] = Inf
+                Threads.atomic_add!(survived, 1)
             end
 
-            Threads.atomic_add!(survived, 1)
-            verbose && print_every > 0 && k % print_every == 0 &&
-                lock(plock) do
-                    println("[k=$k|cell=$i|thr=$tid] SP=$(round(SP_cell,digits=4)) | survive | recover=$(recover_time_sample) | cycle=$(cell_df.cycle_time[i])")
-                end
-
-        # ── Timeout ───────────────────────────────────────────────────────────
         else
+            # ── Timeout: keep residual damage ───────────────────────────────
             cell_df.death_time[i]   = Inf
             cell_df.recover_time[i] = Inf
             cell_df.cycle_time[i]   = Inf
@@ -267,50 +287,25 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
             cell_df.dam_X_total[i]  = sum(X_gsm2)
             cell_df.dam_Y_total[i]  = sum(Y_gsm2)
             Threads.atomic_add!(timeout_cells, 1)
-            verbose && print_every > 0 && k % print_every == 0 &&
-                lock(plock) do
-                    println("[k=$k|cell=$i|thr=$tid] SP=$(round(SP_cell,digits=4)) | timeout T=$terminal_time")
-                end
         end
 
         cell_df.apo_time[i] = Inf
     end
 
-    # Serial neighbor merge — also syncs cell_cycle/can_divide, not just
-    # number_nei: a neighbor that started G0 (fully packed at setup) can gain
-    # its first-ever empty slot right here, from an immediate removal, before
-    # the ABM loop (and _sync_block_state!) ever runs on it.
-    affected = Set{Int}()
-    for updates in neighbor_updates, nei_idx in updates
-        push!(affected, nei_idx)
-    end
-    for i in affected
-        cell_df.number_nei[i] = length(cell_df.nei[i]) - sum(cell_df.is_cell[cell_df.nei[i]])
-        cell_df.is_cell[i] == 1 || continue
-        if cell_df.number_nei[i] == 0 && cell_df.can_divide[i] == 1
-            cell_df.cell_cycle[i] = "G0"
-            cell_df.cycle_time[i] = Inf
-            cell_df.can_divide[i] = 0
-        elseif cell_df.number_nei[i] > 0 && cell_df.can_divide[i] == 0 && isinf(cell_df.death_time[i])
-            cell_df.cell_cycle[i] = "G1"
-            new_ct = generate_cycle_time("G1")
-            cell_df.cycle_time[i] = isinf(cell_df.recover_time[i]) ?
-                new_ct : max(new_ct, cell_df.recover_time[i])
-            cell_df.can_divide[i] = 1
-        end
-    end
+    # No cell is removed here any more, so no neighbour bookkeeping is needed:
+    # space is freed later by _handle_cell_removal! when death_time fires.
 
     if summary
         elapsed = time() - start_t
-        mean_sp = mean(cell_df.sp[active_cells])
         println("\n[compute_times_domain!] Summary")
-        println("  Active cells          : $n_active")
-        println("  Immediate removals    : $(immediate_removed[])")
-        println("  Scheduled death       : $(scheduled_death[])")
-        println("  Survivors             : $(survived[])")
-        println("  Timeout (T=$terminal_time) : $(timeout_cells[])")
-        println("  Mean SP               : $(round(mean_sp, digits=6))")
-        println("  Elapsed               : $(round(elapsed, digits=3)) s")
+        println("  Active cells             : $n_active")
+        println("  Doomed, direct Y (t=0)   : $(doomed_direct[])")
+        println("  Doomed, SSA lethal event : $(doomed_ssa[])")
+        println("  Doomed, mitotic          : $(doomed_mitotic[])")
+        println("  Survivors                : $(survived[])")
+        println("  Timeout (T=$terminal_time)    : $(timeout_cells[])")
+        println("  Mean SP                  : $(round(mean(cell_df.sp[active_cells]), digits=6))")
+        println("  Elapsed                  : $(round(elapsed, digits=3)) s")
     end
     return nothing
 end

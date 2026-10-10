@@ -167,7 +167,8 @@ end
     perform_migration!(pop, mig_times, idx, D, h) -> Nothing
 
 Move cell idx to a uniformly chosen empty neighbour.
-Updates neighbor counts, unblocks G0 cells that gain free space,
+Updates neighbor counts via _sync_block_state! (unblocks G0 cells that gain
+free space unless they carry a scheduled death; blocks cells left without space),
 and resamples migration times for the moved cell and affected neighbors.
 """
 function perform_migration!(pop::CellPopulation,
@@ -214,8 +215,13 @@ function perform_migration!(pop::CellPopulation,
         mig_times[idx]        = Inf
     end
 
-    # recount neighbors for target and all cells that share a neighborhood
-    pop.number_nei[target] = recount_empty_neighbors(pop, target)
+    # Recount neighbours for the moved cell and every cell sharing a
+    # neighbourhood, and sync block state with the shared handler.
+    # _sync_block_state! only unblocks cells with death_time == Inf, so doomed
+    # cells (and G0 cells with a scheduled radiation death) are never
+    # resurrected by a neighbour's hop. It also blocks a cycling cell into G0
+    # if the hop left it with no empty neighbour.
+    _sync_block_state!(pop, target)
 
     affected = union(pop.nei[idx], pop.nei[target])
     @inbounds for nb in affected
@@ -223,18 +229,7 @@ function perform_migration!(pop::CellPopulation,
         pop.is_cell[nb] == 1  || continue
         nb == target           && continue
 
-        pop.number_nei[nb] = recount_empty_neighbors(pop, nb)
-
-        # unblock a G0 cell that now has free space
-        if pop.number_nei[nb] > 0 && pop.can_divide[nb] == 0
-            pop.cell_cycle[nb] = String7("G1")
-            new_ct             = generate_cycle_time("G1")
-            pop.cycle_time[nb] = isinf(pop.recover_time[nb]) ?
-                                      new_ct : max(new_ct, pop.recover_time[nb])
-            pop.death_time[nb] = Inf
-            pop.can_divide[nb] = 1
-        end
-
+        _sync_block_state!(pop, nb)
         schedule_migration!(mig_times, pop, nb, D, h)
     end
 
