@@ -729,10 +729,10 @@ function plot_phase_proportions_alive(cell_df::DataFrame;
     p = bar(phases, percents;
             xlabel="Cell Cycle Phase", ylabel="Percentage (%)",
             title="$title_text\n(n=$total alive cells)",
-            legend=false, color=ph_colors, alpha=0.7, ylims=(0, 100))
+            legend=false, color=ph_colors, alpha=0.7, ylims=(0, 115))
 
     for (i, pct) in enumerate(percents)
-        pct > 2 && annotate!(i, pct + 2, text("$(round(pct, digits=1))%", 8))
+        pct > 2 && annotate!(i, pct + 4, text("$(round(pct, digits=1))%", 8))
     end
     return p
 end
@@ -802,7 +802,7 @@ function plot_cell_cycle_distribution(cell_df; phase_plot::Bool = false, half_sp
                  title="Cell Cycle Distribution\n(n=$total active cells)",
                  xlabel="Cell Cycle Phase", ylabel="Number of Cells",
                  legend=false, color=[ph_colors[p] for p in phases],
-                 alpha=0.7, bar_width=0.6)
+                 alpha=0.7, bar_width=0.6, ylims=(0, 1.15 * max(maximum(vals), 1)))
         for (i, (ph, c)) in enumerate(zip(phases, vals))
             c > 0 && annotate!(p1, [(i, c + total*0.02,
                                     text("$(round(100.0*c/total, digits=1))%", 8, :center))])
@@ -813,9 +813,9 @@ function plot_cell_cycle_distribution(cell_df; phase_plot::Bool = false, half_sp
                  title="Cell Cycle Distribution (%)\n(n=$total active cells)",
                  xlabel="Cell Cycle Phase", ylabel="Percentage (%)",
                  legend=false, color=[ph_colors[p] for p in phases],
-                 alpha=0.7, bar_width=0.6, ylims=(0, 100))
+                 alpha=0.7, bar_width=0.6, ylims=(0, 115))
         for (i, pct) in enumerate(percents)
-            pct > 2 && annotate!(p1, [(i, pct+2,
+            pct > 2 && annotate!(p1, [(i, pct+4,
                                       text("$(round(pct, digits=1))%", 8, :center))])
         end
     end

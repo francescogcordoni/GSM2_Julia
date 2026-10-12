@@ -24,6 +24,8 @@
 #!   2.  Call run_simulation_abm_migration!(pop, D, h; ...) instead of
 #!       run_simulation_abm!(pop; ...)
 #!   3.  Set D = 0.0 to disable migration entirely (recovers original behaviour)
+#!   4.  include("utilities_abm_fast.jl") after this file; fast=true (default)
+#!       uses its heap-based engine, fast=false the original loop below.
 #!
 #! FUNCTIONS
 #! ---------
@@ -312,6 +314,11 @@ end
 
 Drop-in replacement for run_simulation_abm! with random-walk migration.
 
+`fast = true` (default) runs the heap-based engine of utilities_abm_fast.jl
+(include it after this file); `fast = false` runs the original loop below,
+which scans every lattice site at every event. `record_dt > 0` (fast only)
+records the time series at most once per `record_dt` hours.
+
 # Arguments
 - `D`  : random-motility coefficient [µm²/h].  Set D=0 to disable migration.
 - `h`  : lattice spacing [µm]  (typically 2·R_cell)
@@ -325,7 +332,21 @@ function run_simulation_abm_migration!(pop::CellPopulation,
                                         terminal_time::Float64      = 48.0,
                                         snapshot_times::Vector{Int} = [1, 6, 12, 24],
                                         print_interval::Float64     = 1.0,
-                                        verbose::Bool               = true)
+                                        verbose::Bool               = true,
+                                        fast::Bool                  = true,
+                                        record_dt::Float64          = 0.0)
+
+    # Fast engine (utilities_abm_fast.jl): heap + local 2-ring updates, cost per
+    # event independent of population size. fast=false keeps the original loop.
+    if fast
+        return run_simulation_abm_fast!(pop; D = D, h = h,
+                   nat_apo        = nat_apo,
+                   terminal_time  = terminal_time,
+                   snapshot_times = snapshot_times,
+                   print_interval = print_interval,
+                   verbose        = verbose,
+                   record_dt      = record_dt)
+    end
 
     # if migration is disabled fall back to the original runner
     if D == 0.0

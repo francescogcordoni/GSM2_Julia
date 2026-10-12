@@ -276,13 +276,13 @@ p_times = plot_times(cell_df; show_means=true, summary=true)
 # ============================================================================
 
 println("\n--- Agent-based model ($TERMINAL_TIME h) ---")
-ts, snaps = @time run_simulation_abm!(cell_df;
+ts, snap_df = @time run_simulation_abm!(cell_df;
                 nat_apo           = NAT_APO,
                 terminal_time     = TERMINAL_TIME,
                 snapshot_times    = SNAPSHOT_HOURS,
                 print_interval    = 6.0,
                 verbose           = true,
-                return_dataframes = false,
+                return_dataframes = true,
                 update_input      = true)
 
 N_final = count(cell_df.is_cell .== 1)
