@@ -6,13 +6,22 @@
 #
 # PIPELINE
 # --------
-#   1. PARAMETERS       — dose, particle, energy, geometry (edit here)
+#   1. PARAMETERS       — dose, particle, energy, geometry, fate model (edit here)
 #   2. SETUP            — GSM2, ion/irrad, cell lattice, population, O₂
 #   3. DOSE & DAMAGE    — Monte Carlo dose deposition + DNA damage sampling
 #   4. SURVIVAL         — GSM2 survival probability per cell
 #   5. TIMERS           — stochastic repair / death time assignment
 #   6. ABM              — post-irradiation cell dynamics simulation
 #   7. OUTPUT           — plots + CSVs saved to example/output/spheroid/
+#
+# FATE MODEL (FATE below)
+#   :legacy       lethally damaged cells are removed within hours (direct lethal
+#                 lesions at t = 0, the others at the time of the lethal SSA event)
+#   :incremental  lethally damaged cells are "doomed": they stay in the spheroid,
+#                 do not divide, and are removed after a phase-dependent delay
+#                 (~1–1.5 cell cycles for cycling cells, ~2.5 for G0)
+#   The clonogenic survival (alive and not doomed) is the same in both; only the
+#   time at which killed cells disappear from the cell count differs.
 #
 # HOW TO RUN
 # ----------
@@ -61,7 +70,7 @@ validate_stopping(sp, PARTICLE, parse(Int, match(r"\d+", PARTICLE).match))
 # Spheroid and cell geometry
 TUMOR_RADIUS  = 350.0     # spheroid radius (µm)
 R_CELL        = 15.0      # cell radius (µm)
-X_BOX         = 550.0     # simulation box half-size (µm); match TUMOR_RADIUS
+X_BOX         = 550.0     # simulation box half-size (µm); keep ≥ TUMOR_RADIUS + ~150 µm
 X_VOXEL       = 700.0     # voxel side length for beam-geometry calculation (µm)
 
 # GSM2 domain geometry
@@ -83,6 +92,7 @@ const CALC_TYPE      = "full"       # beam radius mode: "full" (whole spheroid) 
 const TERMINAL_TIME  = 72.0         # post-irradiation ABM window (h)
 const SNAPSHOT_HOURS = [0, 6, 12, 24, 48, 72]   # save population snapshots at these times (h)
 const NAT_APO        = 1e-10        # natural apoptosis rate (h⁻¹, background only)
+const FATE           = :incremental # :incremental (delayed death) or :legacy (removal within hours)
 
 # Output directory
 const OUTDIR = joinpath(@__DIR__, "output", "spheroid")
@@ -92,7 +102,7 @@ println("\n", "="^65)
 println("  Spheroid Irradiation + ABM Example")
 println("  Particle  : $PARTICLE  |  E = $ENERGY_MEV_U MeV/u  |  D = $DOSE_GY Gy")
 println("  Spheroid  : radius = $TUMOR_RADIUS µm")
-println("  ABM window: $TERMINAL_TIME h")
+println("  ABM window: $TERMINAL_TIME h  |  fate model: $FATE")
 println("  Output    : $OUTDIR")
 println("="^65, "\n")
 
@@ -156,6 +166,13 @@ setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
 # Assign oxygenation (pO₂) profile across the spheroid (analytic diffusion)
 set_oxygen_diffusion!(cell_df; density=:mean, plot_oxygen=true, verbose=true)
 
+# Fate model (set_fate_model! exists in the current utilities_abm.jl)
+if isdefined(Main, :set_fate_model!)
+    set_fate_model!(FATE)
+else
+    @warn "utilities_abm.jl has no set_fate_model!: compute_times_domain! is used as defined there."
+end
+
 # Print and plot initial (pre-irradiation) state
 N_init = count(cell_df.is_cell .== 1)
 println("Spheroid: $N_init cells")
@@ -198,6 +215,11 @@ println("\n--- Monte Carlo dose deposition ---")
 println("\n--- Poisson DNA damage sampling ---")
 @time MC_loop_damage!(ion, cell_df, irrad_cond, gsm2_cycle)
 
+let a = cell_df.is_cell .== 1
+    println("Mean cell dose: $(round(mean(cell_df.dose_cell[a]), digits = 3)) Gy  |  " *
+            "cells with zero dose: $(count(==(0.0), cell_df.dose_cell[a]))")
+end
+
 # ── Plot 4 — dose distribution (density + 3-D spatial) ───────────────────────
 p_dose = plot_scalar_cell(cell_df, :dose_cell)
 
@@ -238,6 +260,16 @@ end
 println("\n--- GSM2 survival probability ---")
 @time compute_cell_survival_GSM2!(cell_df, gsm2_cycle)
 
+# compute_cell_survival_GSM2! resets death_time, cycle_time and recover_time of
+# EVERY cell. The legacy fate model reassigns all of them in compute_times_domain!,
+# the incremental model only reassigns damaged cells: put back the pre-irradiation
+# clocks so that undamaged cells keep cycling (sp is kept).
+if FATE === :incremental
+    for col in (:death_time, :cycle_time, :recover_time)
+        cell_df[!, col] .= cell_df_pristine[!, col]
+    end
+end
+
 alive_mask = cell_df.is_cell .== 1
 SF_mean    = mean(cell_df.sp[alive_mask])
 p_hat, ci_lo, ci_hi = survival_ci(cell_df.sp[alive_mask])
@@ -268,6 +300,12 @@ println("\n--- Stochastic repair and death timers ---")
                                 verbose       = false,
                                 summary       = true)
 
+# Clonogenic survival: cells alive and not doomed, right after fate assignment.
+# This is the radiobiological survival fraction (it should agree with SF_mean).
+SF_clono = count((cell_df.is_cell .== 1) .& .!isfinite.(cell_df.death_time)) / N_init
+println("Clonogenic SF: $(round(SF_clono, digits = 4))  " *
+        "(GSM2 mean SP: $(round(SF_mean, digits = 4)))")
+
 # ── Plot 9 — timer densities (death / recovery / cycle / X-damage) ───────────
 p_times = plot_times(cell_df; show_means=true, summary=true)
 
@@ -285,9 +323,13 @@ ts, snap_df = @time run_simulation_abm!(cell_df;
                 return_dataframes = true,
                 update_input      = true)
 
-N_final = count(cell_df.is_cell .== 1)
-SF_abm  = N_final / N_init
-println("\nFinal alive: $N_final / $N_init  (ABM SF = $(round(SF_abm, digits=4)))")
+# Cell number at the end of the ABM window: includes regrowth and, with the
+# incremental fate model, doomed cells not yet removed. It is NOT a survival fraction.
+N_final  = count(cell_df.is_cell .== 1)
+N_doomed = count((cell_df.is_cell .== 1) .& isfinite.(cell_df.death_time))
+SF_abm   = N_final / N_init
+println("\nFinal alive: $N_final / $N_init  (cell ratio = $(round(SF_abm, digits=4)), " *
+        "of which doomed: $N_doomed)")
 
 print_simulation_summary(ts)
 
@@ -377,14 +419,17 @@ summary_df = DataFrame(
     particle          = [PARTICLE],
     energy_MeV_u      = [ENERGY_MEV_U],
     dose_Gy           = [DOSE_GY],
+    fate_model        = [String(FATE)],
     tumor_radius_um   = [TUMOR_RADIUS],
     N_cells_init      = [N_init],
     N_cells_final     = [N_final],
+    N_doomed_final    = [N_doomed],
     Npar              = [Npar],
     SF_GSM2_mean      = [round(SF_mean,  digits=5)],
     SF_GSM2_CI_lo     = [round(ci_lo,    digits=5)],
     SF_GSM2_CI_hi     = [round(ci_hi,    digits=5)],
-    SF_ABM            = [round(SF_abm,   digits=5)],
+    SF_clonogenic     = [round(SF_clono, digits=5)],
+    cell_ratio_ABM    = [round(SF_abm,   digits=5)],
     ABM_hours         = [TERMINAL_TIME],
 )
 #CSV.write(joinpath(OUTDIR, "summary.csv"), summary_df)
@@ -397,10 +442,12 @@ println("\n", "="^65)
 println("  DONE")
 println("  Particle   : $PARTICLE  |  E = $ENERGY_MEV_U MeV/u  |  D = $DOSE_GY Gy")
 println("  Spheroid   : radius = $TUMOR_RADIUS µm  |  N cells = $N_init")
+println("  Fate model : $FATE")
 println("  Npar       : $Npar")
 println("  SF (GSM2)  : $(round(SF_mean, digits=4))  " *
         "(95% CI $(round(ci_lo,digits=4)) – $(round(ci_hi,digits=4)))")
-println("  SF (ABM)   : $(round(SF_abm, digits=4))")
+println("  SF (clono) : $(round(SF_clono, digits=4))")
+println("  Cells at $(Int(TERMINAL_TIME)) h / N0 : $(round(SF_abm, digits=4))  (doomed still present: $N_doomed)")
 println("  Output     : $OUTDIR/")
 println("  Plots      : 28 figures (01_…28_) + 2 CSVs + snapshots")
 println("="^65)
