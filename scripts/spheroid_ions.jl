@@ -121,6 +121,9 @@ const DFX = df_center_x
 const DFY = df_center_y
 const AT0 = at
 # lattice positions (fixed) by cell index, for the 3-D plots of the snapshots
+CSV.write(joinpath(OUTDIR, "lattice_positions.csv"),
+          DataFrame(index = cell_df_pristine.index, x = cell_df_pristine.x,
+                    y = cell_df_pristine.y, z = cell_df_pristine.z))
 const POS = Dict(cell_df_pristine.index[i] => (cell_df_pristine.x[i], cell_df_pristine.y[i],
                  cell_df_pristine.z[i]) for i in 1:nrow(cell_df_pristine))
 
@@ -166,6 +169,17 @@ for c in CONDITIONS
                               verbose = false, summary = true)
     end
     sfc = count((df.is_cell .== 1) .& .!isfinite.(df.death_time)) / N_INIT
+
+    # per-cell state right after fate assignment (for the multipanel 3-D figure)
+    a0 = findall(==(1), df.is_cell)
+    ndam(v) = sum(v; init = 0)
+    CSV.write(joinpath(OUTDIR, "cells_t0_$(c.tag).csv"),
+              DataFrame(index = df.index[a0], x = df.x[a0], y = df.y[a0], z = df.z[a0],
+                        phase = String.(df.cell_cycle[a0]), dose = df.dose_cell[a0],
+                        sp = c.dose > 0 ? df.sp[a0] : ones(length(a0)),
+                        X = ndam.(df.dam_X_dom[a0]), Y = ndam.(df.dam_Y_dom[a0]),
+                        recover_time = df.recover_time[a0], death_time = df.death_time[a0],
+                        O2 = df.O[a0]))
     @printf("mean cell dose %.3f Gy | GSM2 SF %.4f | clonogenic SF %.4f\n", dmean, sfg, sfc)
 
     Random.seed!(hash((SEED, :abm)))                          # same ABM stream for every condition
@@ -178,6 +192,12 @@ for c in CONDITIONS
     tsdf = DataFrame(time = ts.time, total = ts.total_cells, G0 = ts.g0_cells, G1 = ts.g1_cells,
                      S = ts.s_cells, G2 = ts.g2_cells, M = ts.m_cells)
     CSV.write(joinpath(OUTDIR, "timeseries_$(c.tag).csv"), tsdf)
+    # snapshots: alive cells with phase and doom status (positions from cells_t0 / lattice)
+    for (h, sd) in snaps
+        CSV.write(joinpath(OUTDIR, "snap_$(c.tag)_t$(h)h.csv"),
+                  DataFrame(index = sd.index, phase = String.(sd.cell_cycle),
+                            doomed = isfinite.(Float64.(sd.death_time))))
+    end
     results[c.tag] = (ts = tsdf, snaps = snaps)
     push!(summary_df, (c.tag, c.particle, c.E, c.dose, Npar, dmean, sfg, sfc, N_INIT,
                        count(==(1), df.is_cell)))
