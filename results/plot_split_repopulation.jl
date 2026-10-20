@@ -13,6 +13,7 @@
 #
 # Run: julia scripts/plot_split_repopulation.jl
 # ============================================================================
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using CSV, DataFrames, Printf, Plots
 gr()
 
@@ -30,17 +31,18 @@ surv_df  = sort(surv_df[surv_df.time .<= T_MAX, :], :time)
 pre_full = sort(pre_full[pre_full.time .<= T_MAX, :], :time)
 pre_G1   = sort(pre_G1[pre_G1.time .<= T_MAX, :], :time)
 particle, E, dose = meta.particle[1], meta.E[1], meta.dose[1]
-nice(p) = replace(string(p), "12C" => "¹²C", "1H" => "¹H")
-cond = "$(nice(particle)) $(E) MeV, $(dose) Gy + $(dose) Gy"
+nice(p) = ion_label(p)
+cond = tex("$(nice(particle)) $(E) MeV, $(dose) Gy + $(dose) Gy")
 println("condition: $cond | intervals: $(length(surv_df.time)) up to $(T_MAX) h")
 
 # ── Style (shared with the other figures) ──────────────────────────────────
-default(framestyle = :box, grid = false, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
+default(framestyle = :box, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
         legendfontsize = 9, legendtitlefontsize = 10, dpi = 300, size = (640, 460),
         markerstrokewidth = 0.5, ms = 4,
         left_margin = 8Plots.mm, bottom_margin = 7Plots.mm, right_margin = 5Plots.mm,
         top_margin = 3Plots.mm, foreground_color_legend = nothing,
         background_color_legend = RGBA(1, 1, 1, 0.85))
+paper_style!()
 const C_FULL = :steelblue          # full ABM
 const C_G1   = :darkorange         # radiosensitivity of G1 only
 const C_NOAB = :seagreen           # standard GSM2, no repopulation
@@ -51,7 +53,7 @@ save(p, name) = (savefig(p, joinpath(FDIR, name)); println("  ", name))
 
 # ── Survival vs inter-fraction time ────────────────────────────────────────
 p1 = plot(xlabel = XL, ylabel = "Survival probability", legend = :topleft,
-          legendtitle = cond, xlims = (0, T_MAX))
+          legendtitle = tex(cond), xlims = (0, T_MAX))
 plot!(p1, surv_df.time, surv_df.surv_abm_full; color = C_FULL, marker = :circle,  label = "ABM, full cycle")
 plot!(p1, surv_df.time, surv_df.surv_abm_G1;   color = C_G1,   marker = :diamond, label = "ABM, G1 only")
 plot!(p1, surv_df.time, surv_df.surv_noabm;    color = C_NOAB, marker = :rect,    label = "No repopulation")
@@ -59,7 +61,7 @@ save(p1, "surv_vs_time.pdf")
 
 # ── Alive cells before the second fraction ─────────────────────────────────
 p2 = plot(xlabel = XL, ylabel = "Mean alive cells before fraction 2", legend = :topleft,
-          legendtitle = cond, xlims = (0, T_MAX))
+          legendtitle = tex(cond), xlims = (0, T_MAX))
 plot!(p2, pre_full.time, pre_full.Nalive; color = C_FULL, marker = :circle,  label = "Full cycle")
 plot!(p2, pre_G1.time,   pre_G1.Nalive;   color = C_G1,   marker = :diamond, label = "G1 only")
 save(p2, "alive_vs_time.pdf")

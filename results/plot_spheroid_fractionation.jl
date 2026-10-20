@@ -16,11 +16,12 @@
 #
 # Run: julia example/plot_spheroid_fractionation.jl
 # ============================================================================
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using CSV, DataFrames, Statistics, Printf, Plots, StatsPlots
 gr()
 
-const DIR  = joinpath(@__DIR__, "..", "scripts", "output", "spheroid_fractionation")
-const FDIR = joinpath(@__DIR__, "output", "spheroid_fractionation", "figures"); mkpath(FDIR)
+const DIR  = joinpath(@__DIR__, "output", "spheroid_fractionation")
+const FDIR = joinpath(DIR, "figures"); mkpath(FDIR)
 const REP_SHOWN = 1                     # realisation used for the single-trajectory plots
 
 hourly = CSV.read(joinpath(DIR, "hourly_all.csv"), DataFrame)
@@ -43,15 +44,15 @@ nrep   = length(unique(hourly.rep))
 println("conditions: $(tags) | realisations: $nrep | N0 = $N0 | fractions at $(FXT) h")
 
 # ── Style: large margins so axis labels and legends stay inside the figure ──
-default(framestyle = :box, grid = false, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
+default(framestyle = :box, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
         legendfontsize = 9, legendtitlefontsize = 10, dpi = 300, size = (640, 460),
         left_margin = 8Plots.mm, bottom_margin = 7Plots.mm, right_margin = 5Plots.mm,
         top_margin = 3Plots.mm, foreground_color_legend = nothing,
         background_color_legend = RGBA(1, 1, 1, 0.85))
+paper_style!()
 const COL = Dict("control" => :gray40, "1H_100MeV" => :steelblue, "12C_80MeVu" => :firebrick)
 col(t)  = get(COL, t, :black)
-nice(t) = t == "control" ? "Control" :
-          replace(t, "12C_" => "¹²C ", "1H_" => "¹H ", "MeVu" => " MeV/u", "MeV" => " MeV")
+nice(t) = ion_label(t)
 const PH     = ["G0", "G1", "S", "G2", "M"]
 const PH_COL = [:gray70 :steelblue :seagreen :darkorange :firebrick]
 fxlines!(p) = vline!(p, FXT; color = :black, ls = :dash, lw = 0.8, label = "")
@@ -62,9 +63,8 @@ xl = "Time (h)"
 single = Dict{String,Any}(); phases = Dict{String,Any}()
 for t in tags
     r = sort(hourly[(hourly.tag .== t) .& (hourly.rep .== REP_SHOWN), :], :t)
-    p = plot(xlabel = xl, ylabel = "Number of cells",
-             legend = startswith(t, "12C") ? :topright : :topleft,
-             legendtitle = "$(nice(t)), realisation $REP_SHOWN")
+    p = plot(xlabel = xl, ylabel = "Number of cells", legend = :topleft,
+             legendtitle = tex("$(nice(t)), realisation $REP_SHOWN"))
     plot!(p, r.t, r.total; color = :black, label = "all cells")
     plot!(p, r.t, r.clonogenic; color = col(t), label = "clonogenic")
     plot!(p, r.t, r.doomed; color = col(t), ls = :dot, label = "doomed")
@@ -85,7 +85,7 @@ end
 repl = Dict{String,Any}()
 ymax = maximum(hourly.clonogenic) / N0 * 1.05
 for t in tags
-    p = plot(xlabel = xl, ylabel = "Clonogenic cells / N₀", legend = :topleft,
+    p = plot(xlabel = xl, ylabel = tex("Clonogenic cells / \$N_0\$"), legend = :topleft,
              legendtitle = nice(t), ylims = (0, ymax))
     for rep in sort(unique(hourly.rep))
         r = sort(hourly[(hourly.tag .== t) .& (hourly.rep .== rep), :], :t)
@@ -94,12 +94,12 @@ for t in tags
     end
     s = summ[summ.tag .== t, :]
     plot!(p, s.t, s.clono_mean ./ N0; ribbon = s.clono_sd ./ N0, fillalpha = 0.25,
-          color = col(t), lw = 2.4, label = "mean ± SD")
+          color = col(t), lw = 2.4, label = tex("mean \$\\pm\$ SD"))
     fxlines!(p)
     repl[t] = p; save(p, "replicates_$(t).pdf")
 end
 
-pcmp = plot(xlabel = xl, ylabel = "Clonogenic cells / N₀", legend = :topleft, ylims = (0, ymax))
+pcmp = plot(xlabel = xl, ylabel = tex("Clonogenic cells / \$N_0\$"), legend = :topleft, ylims = (0, ymax))
 for t in tags
     s = summ[summ.tag .== t, :]
     plot!(pcmp, s.t, s.clono_mean ./ N0; ribbon = s.clono_sd ./ N0, fillalpha = 0.25,
@@ -122,7 +122,7 @@ save(psd, "variability_sd.pdf"); save(pcv, "variability_cv.pdf")
 irr  = [t for t in tags if any(fx.mean_dose[fx.tag .== t] .> 0)]
 nfx  = maximum(fx.fraction)
 psf  = plot(xlabel = "Fraction", ylabel = "Surviving fraction", xticks = 1:nfx,
-            xlims = (0.6, nfx + 0.4), legend = :right)
+            xlims = (0.6, nfx + 0.4), legend = :bottomright)
 for (j, t) in enumerate(irr)
     g  = fx[fx.tag .== t, :]
     dx = 0.1 * (j - (length(irr) + 1) / 2)
@@ -131,9 +131,9 @@ for (j, t) in enumerate(irr)
                 :mean_sp_GSM2 => mean => :sp)
     sort!(m, :fraction)
     plot!(psf, m.fraction .+ dx, m.SF; yerror = m.sd, color = col(t), marker = :diamond,
-          ms = 6, lw = 2, label = "$(nice(t)), ABM")
+          ms = 6, lw = 2, label = tex("$(nice(t)), ABM"))
     scatter!(psf, m.fraction .+ dx, m.sp; color = :white, msc = col(t), msw = 1.5,
-             marker = :circle, ms = 6, label = "$(nice(t)), GSM2 mean")
+             marker = :circle, ms = 6, label = tex("$(nice(t)), GSM2 mean"))
 end
 save(psf, "fraction_sf.pdf")
 

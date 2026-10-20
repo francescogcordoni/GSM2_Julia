@@ -29,6 +29,7 @@
 # Run:  julia -t auto scripts/continuous_dr_events.jl
 # ============================================================================
 
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using Base.Threads
 using CSV, DataFrames
 using Distributions
@@ -536,6 +537,7 @@ end
 # ============================================================================
 # Plots
 # ============================================================================
+paper_style!()
 rate_label(Ḋ) = Ḋ >= 1e2 ? "acute" : @sprintf("%.0e Gy/s", Ḋ)
 
 """SF vs dose for one ion: simulation ± SE (points), LQ fit (solid), Lea–Catcheside (dashed)."""
@@ -552,8 +554,8 @@ function plot_sf(surv::DataFrame, tag::String)
         plot!(p, D, vcat(1.0, s.SF_LQ); color = cols[k], lw = 1.5, label = "")
         plot!(p, D, vcat(1.0, s.SF_LC); color = cols[k], ls = :dash, lw = 1, label = "")
     end
-    plot!(p, [NaN], [NaN]; color = :black, lw = 1.5, label = "LQ fit (α fixed)")
-    plot!(p, [NaN], [NaN]; color = :black, ls = :dash, label = "Lea–Catcheside")
+    plot!(p, [NaN], [NaN]; color = :black, lw = 1.5, label = tex("LQ fit (\$\\alpha\$ fixed)"))
+    plot!(p, [NaN], [NaN]; color = :black, ls = :dash, label = "Lea-Catcheside")
     return p
 end
 
@@ -574,20 +576,20 @@ CSV.write(joinpath(OUTDIR, "lq_all.csv"), all_lq)
 
 # β(Ḋ): simulation ± SE vs Lea–Catcheside (acute reference column excluded)
 let
-    p = plot(xscale = :log10, xlabel = "Dose rate (Gy/s)", ylabel = "β (Gy⁻²)",
+    p = plot(xscale = :log10, xlabel = "Dose rate (Gy/s)", ylabel = tex("\$\\beta\$ (Gy\$^{-2}\$)"),
              legend = :topleft, size = (750, 450))
     for (i, g) in enumerate(groupby(all_lq, :tag))
         s = sort(g[g.dose_rate_Gys .< 1e2, :], :dose_rate_Gys)
-        scatter!(p, s.dose_rate_Gys, s.beta; yerror = s.beta_se, color = i, label = "$(g.tag[1]) ABM")
-        plot!(p, s.dose_rate_Gys, s.beta_LC; color = i, ls = :dash, label = "$(g.tag[1]) Lea–Catcheside")
+        scatter!(p, s.dose_rate_Gys, s.beta; yerror = s.beta_se, color = i, label = tex("$(g.tag[1]) ABM"))
+        plot!(p, s.dose_rate_Gys, s.beta_LC; color = i, ls = :dash, label = tex("$(g.tag[1]) Lea-Catcheside"))
     end
     hline!(p, [0.0]; color = :gray, lw = 0.5, label = "")
     savefig(p, joinpath(OUTDIR, "beta_vs_doserate.png"))
 
     # α(Ḋ) and β(Ḋ) from constrained LQ fits at each dose rate; dashed = acute reference
-    pa = plot(xscale = :log10, xlabel = "Dose rate (Gy/s)", ylabel = "α (Gy⁻¹)",
+    pa = plot(xscale = :log10, xlabel = "Dose rate (Gy/s)", ylabel = tex("\$\\alpha\$ (Gy\$^{-1}\$)"),
               legend = :best, size = (750, 450))
-    pb = plot(xscale = :log10, xlabel = "Dose rate (Gy/s)", ylabel = "β (Gy⁻²)",
+    pb = plot(xscale = :log10, xlabel = "Dose rate (Gy/s)", ylabel = tex("\$\\beta\$ (Gy\$^{-2}\$)"),
               legend = :best, size = (750, 450))
     for (i, g) in enumerate(groupby(all_lq, :tag))
         s  = sort(g[g.dose_rate_Gys .< 1e2, :], :dose_rate_Gys)

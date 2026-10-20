@@ -17,6 +17,7 @@
 #   julia --threads auto example/spheroid_ions.jl
 # ============================================================================
 
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using Base.Threads
 using Distributed
 using CSV, DataFrames
@@ -49,13 +50,13 @@ sp = load_stopping_power()
 const DOSE_GY = 2.0
 const CONDITIONS = [
     (tag = "control",    particle = "1H",  E = 100.0, dose = 0.0,     label = "control"),
-    (tag = "1H_100MeV",  particle = "1H",  E = 100.0, dose = DOSE_GY, label = "¹H 100 MeV"),
-    (tag = "12C_80MeVu", particle = "12C", E = 80.0,  dose = DOSE_GY, label = "¹²C 80 MeV/u"),
+    (tag = "1H_100MeV",  particle = "1H",  E = 100.0, dose = DOSE_GY, label = tex("\$^{1}\$H 100 MeV")),
+    (tag = "12C_80MeVu", particle = "12C", E = 80.0,  dose = DOSE_GY, label = tex("\$^{12}\$C 80 MeV/u")),
 ]
 
 TUMOR_RADIUS  = 350.0
 R_CELL        = 15.0
-X_BOX         = 650.0
+X_BOX         = 550.0
 X_VOXEL       = 700.0
 RD            = 0.8
 RN            = 7.2
@@ -187,9 +188,10 @@ show(stdout, summary_df; allcols = true); println()
 # ============================================================================
 # 7. FIGURES (vector PDF, no titles)
 # ============================================================================
-default(framestyle = :box, grid = false, lw = 2.0, guidefontsize = 12, tickfontsize = 10,
+default(framestyle = :box, lw = 2.0, guidefontsize = 12, tickfontsize = 10,
         legendfontsize = 9, legendtitlefontsize = 10, size = (600, 450), dpi = 300,
         left_margin = 5Plots.mm, bottom_margin = 5Plots.mm, right_margin = 3Plots.mm)
+paper_style!()
 const COND_COL  = Dict("control" => :gray40, "1H_100MeV" => :steelblue, "12C_80MeVu" => :firebrick)
 const PHASES    = ["G0", "G1", "S", "G2", "M"]
 const PHASE_COL = Dict("G0" => :gray60, "G1" => :steelblue, "S" => :seagreen,
@@ -217,11 +219,8 @@ phase_plots = map(CONDITIONS) do c
     save(p, "phases_$(c.tag).pdf")
     p
 end
-save(plot(phase_plots...; layout = (1, length(phase_plots)), size = (650 * length(phase_plots), 500),
-          link = :y, left_margin = 9Plots.mm, bottom_margin = 9Plots.mm,
-          right_margin = 6Plots.mm, top_margin = 5Plots.mm,
-          legend = :topleft, legend_background_color = RGBA(1, 1, 1, 0.8)),
-     "phases_all.pdf")
+save(plot(phase_plots...; layout = (1, length(phase_plots)), size = (600 * length(phase_plots), 450),
+          link = :y), "phases_all.pdf")
 
 # 3-D half spheroid (cells with y ≤ 0), coloured by phase
 lim = (-TUMOR_RADIUS * 1.6, TUMOR_RADIUS * 1.6)
@@ -229,8 +228,8 @@ function half_spheroid(snap::DataFrame, tlabel::String)
     pos = [POS[i] for i in snap.index]
     x = first.(pos); y = getindex.(pos, 2); z = last.(pos)
     keep = y .<= 0
-    p = plot(xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)", xlims = lim, ylims = lim,
-             zlims = lim, camera = (210, 25), legend = :topright, legendtitle = tlabel,
+    p = plot(xlabel = tex("x (\$\\mu\$m)"), ylabel = tex("y (\$\\mu\$m)"), zlabel = tex("z (\$\\mu\$m)"), xlims = lim, ylims = lim,
+             zlims = lim, camera = (30, 25), legend = :topright, legendtitle = tex(tlabel),
              size = (600, 550), framestyle = :box)
     for ph in PHASES
         m = keep .& (String.(snap.cell_cycle) .== ph)

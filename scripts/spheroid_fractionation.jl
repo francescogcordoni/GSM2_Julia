@@ -30,6 +30,7 @@
 #   julia --threads auto example/spheroid_fractionation.jl
 # ============================================================================
 
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using Base.Threads
 using Distributed
 using CSV, DataFrames
@@ -314,7 +315,8 @@ CSV.write(joinpath(OUTDIR, "hourly_summary.csv"), summ)
 # ============================================================================
 # 5. PLOTS
 # ============================================================================
-default(framestyle = :box, grid = false, lw = 1.6)
+default(framestyle = :box, lw = 1.6)
+paper_style!()
 col  = Dict("control" => :gray40, "1H_100MeV" => :steelblue, "12C_80MeVu" => :firebrick)
 tags = [c.tag for c in CONDITIONS]
 fxlines!(p) = vline!(p, FX_TIMES; color = :black, ls = :dash, lw = 0.8, label = "")
@@ -340,17 +342,17 @@ savefig(plot(pA...; layout = (1, length(pA)), size = (560 * length(pA), 650),
 
 # B. all realisations (thin) + mean ± SD; comparison panel
 pB = map(tags) do t
-    p = plot(xlabel = "Time (h)", ylabel = "clonogenic / N₀", title = t, legend = :topleft)
+    p = plot(xlabel = "Time (h)", ylabel = tex("clonogenic / \$N_0\$"), title = t, legend = :topleft)
     for rep in 1:N_REP
         r = hourly_all[(hourly_all.tag .== t) .& (hourly_all.rep .== rep), :]
         plot!(p, r.t, r.clonogenic ./ N_INIT; color = col[t], alpha = 0.3, lw = 0.8, label = "")
     end
     s = summ[summ.tag .== t, :]
     plot!(p, s.t, s.clono_mean ./ N_INIT; ribbon = s.clono_sd ./ N_INIT, fillalpha = 0.25,
-          color = col[t], lw = 2.4, label = "mean ± SD")
+          color = col[t], lw = 2.4, label = tex("mean \$\\pm\$ SD"))
     fxlines!(p)
 end
-pB2 = plot(xlabel = "Time (h)", ylabel = "clonogenic / N₀", title = "mean ± SD", legend = :topleft)
+pB2 = plot(xlabel = "Time (h)", ylabel = tex("clonogenic / \$N_0\$"), title = tex("mean \$\\pm\$ SD"), legend = :topleft)
 for t in tags
     s = summ[summ.tag .== t, :]
     plot!(pB2, s.t, s.clono_mean ./ N_INIT; ribbon = s.clono_sd ./ N_INIT, fillalpha = 0.25,

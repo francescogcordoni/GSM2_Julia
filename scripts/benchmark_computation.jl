@@ -18,9 +18,13 @@
 #
 # HOW TO RUN
 #   julia --threads auto example/benchmark_computation.jl
+# Stress test: STRESS_RADII (up to 1000 µm) for the worst case (1H 100 MeV) and
+# 12C 80 MeV/u, one repeat; radii whose estimated memory exceeds the free memory
+# are skipped. Stress-test points are drawn as open symbols.
 # Outputs: example/output/benchmark/  timings.csv, timings_summary.csv, figures (PDF)
 # ============================================================================
 
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using Base.Threads
 using Distributed
 using CSV, DataFrames
@@ -59,6 +63,12 @@ const IONS = [
     (tag = "12C_80MeVu", particle = "12C", E = 80.0),
     (tag = "12C_10MeVu", particle = "12C", E = 10.0),
 ]
+# Stress test: large spheroids, worst-case (1H 100 MeV) and carbon only, one repeat each.
+# A radius is skipped if its estimated memory exceeds MEM_FRACTION of the free memory.
+const STRESS_RADII = [600.0, 800.0, 1000.0]                     # µm
+const STRESS_IONS  = ["1H_100MeV", "12C_80MeVu"]
+const N_REP_STRESS = 1
+const MEM_FRACTION = 0.7
 const DOSE   = 2.0
 const T_ABM  = 72.0
 const N_REP  = 3
@@ -174,18 +184,40 @@ warm = build(R_WARM)
 for ion_ in IONS
     run_once(ion_, R_WARM, warm[5], warm[1], warm[2], warm[3], warm[4], 0)
 end
+# memory per lattice site (cell_df with dose and damage vectors), for the stress-test estimate
+const BYTES_PER_SITE = Base.summarysize(warm[1]) / nrow(warm[1])
+@printf("memory per lattice site ≈ %.1f kB\n", BYTES_PER_SITE / 1024)
 warm = nothing; GC.gc()
 
+"""Estimated memory (GB) for radius R: ~3 copies of the lattice (setup, pristine, run)."""
+function mem_estimate_GB(R)
+    X_box = ceil((R + MARGIN) / (2R_CELL)) * 2R_CELL
+    nsites = (2 * floor(Int, X_box / (2R_CELL)))^3
+    return 3.0 * nsites * BYTES_PER_SITE / 2^30, nsites
+end
+
 isfile(CSVFILE) && mv(CSVFILE, CSVFILE * "." * Dates.format(now(), "yyyymmdd_HHMMSS") * ".bak")
-for R in RADII
-    println("\n=== radius $(R) µm ===")
+for R in vcat(RADII, STRESS_RADII)
+    stress = R in STRESS_RADII
+    memGB, nsites_est = mem_estimate_GB(R)
+    freeGB = Sys.free_memory() / 2^30
+    println("\n=== radius $(R) µm", stress ? " (stress test)" : "", " ===")
+    @printf("  estimated memory %.1f GB for %d lattice sites (free %.1f GB)\n", memGB, nsites_est, freeGB)
+    if memGB > MEM_FRACTION * freeGB
+        @warn "radius $R µm skipped: estimated memory $(round(memGB, digits = 1)) GB > $(MEM_FRACTION) × free memory"
+        continue
+    end
+    ions_R = stress ? filter(i -> i.tag in STRESS_IONS, IONS) : IONS
+    nrep_R = stress ? N_REP_STRESS : N_REP
+    GC.gc()
     pristine, dfx, dfy, at0, X_box, t_setup = build(R)
     Ncells = count(==(1), pristine.is_cell)
     @printf("  %d cells, %d lattice sites, box half-size %.0f µm, setup %.1f s\n",
             Ncells, nrow(pristine), X_box, t_setup)
-    for ion_ in IONS, rep in 1:N_REP
+    for ion_ in ions_R, rep in 1:nrep_R
         r = run_once(ion_, R, X_box, pristine, dfx, dfy, at0, rep)
-        row = DataFrame(radius_um = R, n_cells = Ncells, n_sites = nrow(pristine), X_box_um = X_box,
+        row = DataFrame(radius_um = R, stress = stress, n_cells = Ncells, n_sites = nrow(pristine), X_box_um = X_box,
+                        mem_lattice_GB = Base.summarysize(pristine) / 2^30,
                         ion = ion_.tag, LET = r.LET, Npar = r.Npar, rep = rep, threads = nthreads(),
                         t_setup = t_setup, t_dose = r.t_dose, t_damage = r.t_damage,
                         t_fate = r.t_fate, t_abm = r.t_abm, t_total = r.t_total, N_final = r.N_final)
@@ -205,32 +237,39 @@ summ = combine(groupby(tim, [:ion, :radius_um, :n_cells, :Npar]),
                [s => median => Symbol(s, :_med) for s in stages]...,
                [s => minimum => Symbol(s, :_min) for s in stages]...,
                [s => maximum => Symbol(s, :_max) for s in stages]...,
-               :t_setup => first => :t_setup)
+               :t_setup => first => :t_setup, :stress => first => :stress,
+               :mem_lattice_GB => first => :mem_lattice_GB)
 sort!(summ, [:ion, :radius_um])
 CSV.write(joinpath(OUTDIR, "timings_summary.csv"), summ)
 
-default(framestyle = :box, grid = false, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
+default(framestyle = :box, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
         legendfontsize = 9, size = (600, 450), dpi = 300,
         left_margin = 5Plots.mm, bottom_margin = 5Plots.mm, right_margin = 3Plots.mm)
+paper_style!()
 const ION_COL = Dict("1H_100MeV" => :steelblue, "1H_30MeV" => :deepskyblue,
                      "12C_80MeVu" => :firebrick, "12C_10MeVu" => :darkorange)
-nice(t) = replace(t, "12C_" => "¹²C ", "1H_" => "¹H ", "MeVu" => " MeV/u", "MeV" => " MeV")
+nice(t) = ion_label(t)
 const STAGE_LAB = Dict(:t_dose => "dose (MC)", :t_damage => "damage", :t_fate => "fate (GSM2)",
                        :t_abm => "ABM ($(Int(T_ABM)) h)", :t_total => "total")
 save(p, name) = (savefig(p, joinpath(OUTDIR, name)); println("  ", name))
 
-for (xcol, xlab, tagx) in ((:n_cells, "Number of cells", "cells"), (:radius_um, "Spheroid radius (µm)", "radius"))
+for (xcol, xlab, tagx) in ((:n_cells, "Number of cells", "cells"), (:radius_um, tex("Spheroid radius (\$\\mu\$m)"), "radius"))
     panels = []
     for st in stages
         p = plot(xscale = :log10, yscale = :log10, xlabel = xlab, ylabel = "Time (s)",
-                 legend = :topleft, legendtitle = STAGE_LAB[st])
+                 legend = :topleft, legendtitle = tex(STAGE_LAB[st]))
         for ion_ in IONS
             g = summ[summ.ion .== ion_.tag, :]
             med = g[!, Symbol(st, :_med)]
             lo  = med .- g[!, Symbol(st, :_min)]; hi = g[!, Symbol(st, :_max)] .- med
             plot!(p, g[!, xcol], med; yerror = (lo, hi), marker = :circle, ms = 4,
                   color = ION_COL[ion_.tag], label = nice(ion_.tag))
+            st_ = g.stress
+            any(st_) && scatter!(p, g[st_, xcol], med[st_]; marker = :circle, ms = 6, mc = :white,
+                                 msc = ION_COL[ion_.tag], msw = 1.5, label = "")
         end
+        any(summ.stress) && scatter!(p, [NaN], [NaN]; marker = :circle, mc = :white, msc = :black,
+                                     msw = 1.5, label = "stress test")
         save(p, "time_$(st)_vs_$(tagx).pdf")
         push!(panels, p)
     end
@@ -243,7 +282,7 @@ bars = map(IONS) do ion_
     M = hcat([g[!, Symbol(st, :_med)] for st in stages[1:4]]...)
     groupedbar(string.(Int.(g.radius_um)), M ./ sum(M, dims = 2); bar_position = :stack,
                label = permutedims([STAGE_LAB[s] for s in stages[1:4]]),
-               xlabel = "Spheroid radius (µm)", ylabel = "Share of computation time",
+               xlabel = tex("Spheroid radius (\$\\mu\$m)"), ylabel = "Share of computation time",
                legend = :outerright, legendtitle = nice(ion_.tag), ylims = (0, 1),
                color = [:steelblue :seagreen :darkorange :firebrick])
 end
@@ -263,8 +302,9 @@ println("\nScaling exponents k (time ∝ cells^k, log-log fit):")
 for ion_ in IONS, st in stages
     g = summ[summ.ion .== ion_.tag, :]
     nrow(g) >= 3 || continue
-    x = log.(g.n_cells); y = log.(max.(g[!, Symbol(st, :_med)], 1e-6))
-    k = cov(x, y) / var(x)
-    @printf("  %-11s %-12s k = %.2f\n", ion_.tag, STAGE_LAB[st], k)
+    slope(gg) = (x = log.(gg.n_cells); y = log.(max.(gg[!, Symbol(st, :_med)], 1e-6)); cov(x, y) / var(x))
+    gr_ = g[.!g.stress, :]
+    @printf("  %-11s %-12s k = %.2f (standard sizes)%s\n", ion_.tag, STAGE_LAB[st], slope(gr_),
+            any(g.stress) ? @sprintf("   k = %.2f (incl. stress test)", slope(g)) : "")
 end
 println("\nSaved in $OUTDIR")

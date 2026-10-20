@@ -9,6 +9,7 @@
 # Run: julia -t auto scripts/spheroid_lineage.jl
 # Outputs: data/spheroid_lineage/{initial_cells,final_cells}.csv + figures
 # ============================================================================
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 include(joinpath(@__DIR__, "spheroid_common.jl"))
 
 # ── Settings ────────────────────────────────────────────────────────────────
@@ -88,7 +89,8 @@ for g in groupby(init_rows, :tag)
 end
 
 # ── Plots ───────────────────────────────────────────────────────────────────
-default(framestyle = :box, grid = false, lw = 1.8)
+default(framestyle = :box, lw = 1.8)
+paper_style!()
 tags  = [c.tag for c in CONDITIONS]
 tcol  = Dict("1H_100MeV" => :steelblue, "12C_80MeVu" => :firebrick, "control" => :gray40)
 slab  = R_CELL                                  # equatorial slice half-thickness (µm)
@@ -98,10 +100,10 @@ Rmax  = maximum(init_rows.r)
 pA = map(tags) do t
     g = init_rows[(init_rows.tag .== t) .& (init_rows.rep .== 1) .& (abs.(init_rows.z .- zc) .<= slab), :]
     p = scatter(g.x, g.y; color = :lightgray, ms = 3, msw = 0, label = "", aspect_ratio = 1,
-                title = t, xlabel = "x (µm)", ylabel = "y (µm)")
+                title = t, xlabel = tex("x (\$\\mu\$m)"), ylabel = tex("y (\$\\mu\$m)"))
     f = g[g.n_desc .> 0, :]
     isempty(f) || scatter!(p, f.x, f.y; zcolor = log10.(f.n_desc), color = :plasma, ms = 4, msw = 0,
-                           colorbar_title = "log₁₀ descendants", label = "")
+                           colorbar_title = tex("log\$_{10}\$ descendants"), label = "")
     p
 end
 savefig(plot(pA...; layout = (1, length(pA)), size = (520 * length(pA), 470)),
@@ -111,9 +113,9 @@ savefig(plot(pA...; layout = (1, length(pA)), size = (520 * length(pA), 470)),
 edges = range(0, Rmax + 1e-6; length = 9)
 mid   = (edges[1:end-1] .+ edges[2:end]) ./ 2
 prof(v, r) = [mean(v[(r .>= edges[k]) .& (r .< edges[k + 1])]) for k in 1:length(mid)]
-pB1 = plot(xlabel = "Radial position at irradiation (µm)", ylabel = "Fraction of cells",
+pB1 = plot(xlabel = tex("Radial position at irradiation (\$\\mu\$m)"), ylabel = "Fraction of cells",
            legend = :topleft, title = "Survival and founding")
-pB2 = plot(xlabel = "Radial position at irradiation (µm)", ylabel = "Share of regrown spheroid",
+pB2 = plot(xlabel = tex("Radial position at irradiation (\$\\mu\$m)"), ylabel = "Share of regrown spheroid",
            legend = :topleft, title = "Origin of the regrown spheroid")
 for t in tags
     g = init_rows[init_rows.tag .== t, :]
@@ -140,7 +142,7 @@ pC = groupedbar(phs, bars; bar_position = :dodge, xlabel = "Phase of the founder
 
 # D. Clone-size distribution (complementary CDF)
 pD = plot(xscale = :log10, yscale = :log10, xlabel = "Clone size (descendants)",
-          ylabel = "P(size ≥ n)", legend = :bottomleft)
+          ylabel = tex("P(size \$\\geq\$ n)"), legend = :bottomleft)
 for t in tags
     s = sort(init_rows.n_desc[(init_rows.tag .== t) .& (init_rows.n_desc .> 0)])
     isempty(s) && continue

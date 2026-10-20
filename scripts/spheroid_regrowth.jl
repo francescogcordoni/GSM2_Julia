@@ -21,6 +21,7 @@
 #   curves.csv  runs.csv  summary.csv  dose_check.csv  + figures
 # ============================================================================
 
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using Base.Threads
 using Distributed
 using CSV, DataFrames
@@ -298,13 +299,14 @@ haskey(D50, "1H_100MeV") && haskey(D50, "12C_80MeVu") &&
 # ============================================================================
 # 6. PLOTS
 # ============================================================================
-default(framestyle = :box, grid = false, lw = 1.8)
+default(framestyle = :box, lw = 1.8)
+paper_style!()
 ion_col = Dict("1H_100MeV" => :steelblue, "12C_80MeVu" => :firebrick)
 
 # A. growth curves: clonogenic(t)/N0, median + IQR, one panel per ion
 panels = map(IONS) do ion_
     p = plot(yscale = :log10, xlabel = "Time after irradiation (h)",
-             ylabel = "Clonogenic cells / N₀", title = ion_.tag, legend = :bottomright,
+             ylabel = tex("Clonogenic cells / \$N_0\$"), title = ion_.tag, legend = :bottomright,
              ylims = (0.5 / N0, 2 * STOP_FOLD))
     cols = palette(:viridis, length(ion_.doses))
     for (k, D) in enumerate(ion_.doses)
@@ -316,7 +318,7 @@ panels = map(IONS) do ion_
         sort!(agg, :t)
         y = max.(agg.med, 0.5) ./ N0
         plot!(p, agg.t, y; ribbon = (y .- max.(agg.lo, 0.5) ./ N0, max.(agg.hi, 0.5) ./ N0 .- y),
-              fillalpha = 0.2, color = cols[k], label = "$(D) Gy")
+              fillalpha = 0.2, color = cols[k], label = tex("$(D) Gy"))
     end
     hline!(p, [GROWTH_FOLD]; color = :gray, ls = :dash, lw = 1, label = "regrowth endpoint")
 end
@@ -338,7 +340,7 @@ for t in unique(summ.tag)
                     marker = :circle, color = c, label = t)
     plot!(pC, s.dose, s.SCP; yerror = (s.SCP .- s.SCP_lo, s.SCP_hi .- s.SCP),
           marker = :circle, color = c, label = "$t (ABM)")
-    plot!(pC, s.dose, s.SCP_poisson; ls = :dash, color = c, label = "$t (Poisson, exp(−N₀·SF_GSM2))")
+    plot!(pC, s.dose, s.SCP_poisson; ls = :dash, color = c, label = tex("$t (Poisson, exp(-\$N_0\$\$\\cdot\$SF_GSM2))"))
     m = s.SF0 .> 0
     plot!(pD, s.dose[m], s.SF0[m]; marker = :circle, color = c, label = "$t ABM")
     plot!(pD, s.dose, s.GSM2_SF; ls = :dash, color = c, label = "$t GSM2 mean")

@@ -15,8 +15,12 @@
 #   4. PHYSICS    for every (condition, dose): MC_dose_CPU! once, MC_loop_damage!
 #                 N_DAMAGE times; the lesions are stored compactly (histogram of X
 #                 lesions per domain + "any Y" flag per cell). Done ONCE.
-#   5. FIT        survival = mean over cells of the exact GSM2 completion
-#                 probability Π_d f(X_d; a, b, r); only a, b (and r if FIT_R) vary
+#   5. FIT        survival = mean over cells of exp(−ρ·mX)·Π_d f(X_d; a, b, r):
+#                 exact GSM2 completion probability of the sublethal lesions times
+#                 the probability of no directly lethal lesion (ρ = λ/κ). Free: the
+#                 kinetic factors (a, b; r if FIT_R) and, if FIT_LETHAL, ρ for the two
+#                 carbon qualities. Default: fit on the three AEROBIC curves, predict
+#                 the three hypoxic ones (OER and hypoxic RBE are predictions).
 #   6. RESULTS    predictions, LQ fits, OER and RBE vs Table 1, PDF figures
 #
 # Parameters: the phase-specific GSM2 sets are kept and multiplied by global
@@ -29,6 +33,7 @@
 #   julia --threads auto example/staab_calibration.jl
 # ============================================================================
 
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using Base.Threads
 using Distributed
 using CSV, DataFrames
@@ -61,7 +66,10 @@ sp = load_stopping_power()
 # ============================================================================
 const MODE      = :phase_scaled     # :phase_scaled (factors on G1/S/G2 sets) or :single
 const FIT_R     = false             # r is not identifiable from acute survival
-const TRAIN     = ["X_145"]         # conditions used in the fit (others are predictions)
+const TRAIN     = ["X_145"]         # calibration on aerobic X rays only; everything else is predicted
+const FIT_LETHAL = false            # true: also fit ρ = λ/κ per carbon quality (then that curve is fitted)
+const USE_BRAGG = false             # extended Bragg peak: mixed field, LET spectrum not reported → off
+const RHO_X     = 1e-3              # ρ for X rays (code default λ = 10⁻³ κ), kept fixed
 const N_DAMAGE  = 3                 # lesion realisations per (condition, dose)
 const N_STARTS  = 4
 const MAX_ITER  = 300
@@ -77,7 +85,7 @@ mmHg_to_pct(p) = p == 0 ? O2_FLOOR : 100 * p / 760
 const QUALITIES = Dict(
     "X"       => (particle = "1H",  LET = 1.7),    # 250 kV X rays: low-LET proxy
     "C_plat"  => (particle = "12C", LET = 18.0),   # 227 MeV/u plateau (measured LET)
-    "C_bragg" => (particle = "12C", LET = 60.0),   # extended Bragg peak
+    "C_bragg" => (particle = "12C", LET = 150.0),  # extended Bragg peak: effective LET reproducing the OER (table: 60)
 )
 # Conditions: name => (quality, pO2 in mmHg, doses in Gy)
 const CONDITIONS = [
@@ -88,6 +96,7 @@ const CONDITIONS = [
     "C_bragg_690" => ("C_bragg", 690.0, [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
     "C_bragg_0"   => ("C_bragg",   0.0, [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0]),
 ]
+filter!(c -> USE_BRAGG || !startswith(first(c), "C_bragg"), CONDITIONS)
 
 # Published values (Staab et al. 2004)
 const ALPHA_X, BETA_X = 0.092, 0.0301                # X rays, spheroids, 145 mmHg
@@ -197,25 +206,37 @@ Compact lesion record of one realisation: for every cell, the counts of domains
 with k = 1, 2, … X lesions (pairs k => n_k) and whether any Y lesion is present.
 """
 struct Lesions
-    hist::Vector{Vector{Pair{Int,Int}}}
-    anyY::BitVector
+    hist::Vector{Vector{Pair{Int,Int}}}   # per cell: (X lesions in a domain => number of such domains)
+    anyY::BitVector                       # per cell: a Y lesion was sampled (λ = 10⁻³ κ)
+    mX::Vector{Float64}                   # per cell: expected number of X lesions (κ_cell · dose)
 end
 
-function compact(df::DataFrame)
-    hist = Vector{Vector{Pair{Int,Int}}}(undef, length(ALIVE))
-    anyY = falses(length(ALIVE))
+"""
+Compact record of the lesions of every cell. `mX` allows the directly lethal
+lesions to be treated analytically, P(no Y) = exp(−ρ·mX), so that the ratio
+ρ = λ/κ can be fitted without resampling the damage.
+"""
+function compact(df::DataFrame, ion_name::String, LET::Float64)
+    n = length(ALIVE)
+    hist = Vector{Vector{Pair{Int,Int}}}(undef, n); anyY = falses(n); mX = zeros(n)
     for (k, i) in enumerate(ALIVE)
         anyY[k] = any(>(0), df.dam_Y_dom[i])
         cm = countmap(filter(>(0), df.dam_X_dom[i]))
-        hist[k] = [x => n for (x, n) in cm]
+        hist[k] = [x => c for (x, c) in cm]
+        mX[k] = 9.0 * calculate_kappa(ion_name, LET, Float64(df.O[i])) * df.dose_cell[i]
     end
-    return Lesions(hist, anyY)
+    return Lesions(hist, anyY, mX)
 end
 
+# The cache key includes EVERYTHING that changes the lesions (radiation qualities and
+# energies included), so editing QUALITIES or O2_FLOOR triggers a new computation.
+const LIB_KEY  = (CONDITIONS, sort(collect(QUALITIES); by = first), sort(collect(ENERGY); by = first),
+                  N_DAMAGE, TUMOR_RADIUS, R_CELL, X_BOX, RD, RN, O2_FLOOR, SEED, TYPE_AT, TRACK_SEG, :lesions_v2)
 const LIB_FILE = joinpath(@__DIR__, "output", "staab_calibration",
-                          "lesions_" * string(hash((CONDITIONS, N_DAMAGE, TUMOR_RADIUS, R_CELL, RD, RN, O2_FLOOR, SEED)); base = 16) * ".jld2")
+                          "lesions_" * string(hash(LIB_KEY); base = 16) * ".jld2")
+const FORCE_RECOMPUTE = false      # true: ignore any cached lesion library
 lib = Dict{Tuple{String,Float64},Vector{Lesions}}()
-if isfile(LIB_FILE)
+if isfile(LIB_FILE) && !FORCE_RECOMPUTE
     println("\n--- Loading lesion library $LIB_FILE ---")
     lib = load(LIB_FILE, "lib")
 else
@@ -230,21 +251,23 @@ else
         Npar = round(Int, G(:irrad).dose / (1.602e-9 * G(:LET)) * π * R_beam^2 * 1e-8)
         t = @elapsed MC_dose_CPU!(G(:ion), Npar, R_beam, G(:irrad_cond), df, DFX, DFY, deepcopy(AT0),
                                   gsm2_cycle, TYPE_AT, TRACK_SEG; seed = hash((SEED, cond, D)))
+        LETused = G(:irrad_cond)[df.energy_step[ALIVE[1]]].LET
         reals = Lesions[]
         for k in 1:N_DAMAGE
             Random.seed!(hash((SEED, cond, D, k)))
             MC_loop_damage!(G(:ion), df, G(:irrad_cond), gsm2_cycle; show_progress = false)
-            push!(reals, compact(df))
+            push!(reals, compact(df, G(:ion).ion, LETused))
         end
         lib[(cond, D)] = reals
-        @printf("  %-12s D = %5.1f Gy  Npar = %9d  mean cell dose %.3f Gy  X/cell %.0f  (%.1f s)\n",
-                cond, D, Npar, mean(df.dose_cell[ALIVE]), mean(sum.(df.dam_X_dom[ALIVE])), t)
+        @printf("  %-12s D = %5.1f Gy  LET used %.1f keV/µm  O2 %.2f%%  Npar = %9d  mean cell dose %.3f Gy  X/cell %.0f  Y/cell %.2f  (%.1f s)\n",
+                cond, D, LETused, df.O[ALIVE[1]], Npar, mean(df.dose_cell[ALIVE]),
+                mean(sum.(df.dam_X_dom[ALIVE])), mean(sum.(df.dam_Y_dom[ALIVE])), t)
     end
     jldsave(LIB_FILE; lib)
 end
 
 # ============================================================================
-# 5. MODEL SURVIVAL AND FIT (only a, b, r change)
+# 5. MODEL SURVIVAL AND FIT (a, b, r and, if FIT_LETHAL, ρ = λ/κ of the carbon qualities)
 # ============================================================================
 const KMAX = 1 + maximum(maximum(first.(h); init = 0) for v in values(lib) for L in v for h in L.hist)
 
@@ -268,17 +291,31 @@ function phase_sets(θ)
     end
 end
 
-"""Mean survival of the spheroid cells for (condition, dose) at θ."""
+const NK = FIT_R ? 3 : 2                       # number of kinetic parameters in θ
+const QUAL_OF = Dict(c => v[1] for (c, v) in CONDITIONS)
+const RHO_IDX = Dict("C_plat" => NK + 1, "C_bragg" => NK + 2)   # ρ_Bragg unused when USE_BRAGG = false
+
+"""Ratio ρ = λ/κ of directly lethal to sublethal lesion yield for a radiation quality."""
+rho(θ, q) = (q == "X" || !FIT_LETHAL) ? RHO_X : exp(θ[RHO_IDX[q]])
+
+"""Initial parameter vector: scale factors 1 (or the average set), ρ = 10⁻³."""
+theta0() = vcat(MODE === :phase_scaled ? zeros(NK) : log.([BASE_AVG.a, BASE_AVG.b, BASE_AVG.r][1:NK]),
+                FIT_LETHAL ? fill(log(RHO_X), 2) : Float64[])
+
+"""
+Mean survival of the spheroid cells for (condition, dose) at θ:
+S = mean_cells [ exp(−ρ·mX) · Π_d f(X_d; a, b, r) ]  (directly lethal lesions analytic).
+"""
 function model_S(θ, cond, D)
     sets = phase_sets(θ)
     tabs = Dict(p => logf_table(s.r, s.a, s.b) for (p, s) in sets)
+    ρ = rho(θ, QUAL_OF[cond])
     acc = 0.0; n = 0
     for L in lib[(cond, D)]
         for k in eachindex(L.hist)
             n += 1
-            L.anyY[k] && continue
             t = tabs[PHASE[k]]
-            lp = 0.0
+            lp = -ρ * L.mX[k]
             for (x, c) in L.hist[k]; lp += c * t[x + 1]; end
             acc += exp(lp)
         end
@@ -297,7 +334,7 @@ function loss(θ, idx)
 end
 
 # self-check of the fast survival against domain_GSM2 on a few cells
-let θ0 = zeros(FIT_R ? 3 : 2), key0 = first(keys(lib)), L = lib[key0][1]
+let θ0 = theta0(), key0 = first(keys(lib)), L = lib[key0][1]
     sets = phase_sets(θ0); maxdiff = 0.0
     for k in 1:min(20, length(ALIVE))
         L.anyY[k] && continue
@@ -311,10 +348,10 @@ let θ0 = zeros(FIT_R ? 3 : 2), key0 = first(keys(lib)), L = lib[key0][1]
     @printf("\nself-check: |fast − domain_GSM2| ≤ %.2e on 20 cells\n", maxdiff)
 end
 
-np = FIT_R ? 3 : 2
-starts = [zeros(np)]
+np = length(theta0())
+starts = [theta0()]
 rng = Xoshiro(SEED)
-while length(starts) < N_STARTS; push!(starts, 0.8 .* randn(rng, np)); end
+while length(starts) < N_STARTS; push!(starts, theta0() .+ 0.8 .* randn(rng, np)); end
 trace = DataFrame(start = Int[], iter = Int[], loss = Float64[])
 best = nothing
 println("\n--- Fit on $(TRAIN) ($(length(rows("train"))) points), $(np) parameters, MODE = $MODE ---")
@@ -339,6 +376,10 @@ end
 show(stdout, pars); println()
 MODE === :phase_scaled && @printf("scale factors: s_a = %.3f  s_b = %.3f%s\n", exp(θbest[1]), exp(θbest[2]),
                                   FIT_R ? @sprintf("  s_r = %.3f", exp(θbest[3])) : "")
+for q in ("X", "C_plat", "C_bragg")
+    @printf("ρ = λ/κ  %-8s %.3e  (×%.1f the default 10⁻³)%s\n", q, rho(θbest, q), rho(θbest, q) / 1e-3,
+            q == "X" || !FIT_LETHAL ? "  fixed" : "  fitted")
+end
 
 targets.model = [model_S(θbest, targets.condition[i], targets.dose[i]) for i in 1:nrow(targets)]
 targets.log_residual = log.(max.(targets.model, 1e-12)) .- log.(targets.S)
@@ -360,13 +401,15 @@ for (cond, _) in CONDITIONS
 end
 meanratio(c1, c2) = mean(Dof(lq[c1]..., S) / Dof(lq[c2]..., S) for S in SLEV)
 cmp = DataFrame(quantity = String[], model = Float64[], Staab2004 = Float64[])
-push!(cmp, ("OER X rays",          meanratio("X_0", "X_145"),               TABLE1.OER["X"]))
-push!(cmp, ("OER 12C plateau",     meanratio("C_plat_0", "C_plat_145"),     TABLE1.OER["C_plat"]))
-push!(cmp, ("OER 12C Bragg peak",  meanratio("C_bragg_0", "C_bragg_690"),   TABLE1.OER["C_bragg"]))
-push!(cmp, ("RBE plateau, aerobic", meanratio("X_145", "C_plat_145"),       TABLE1.RBE_aer["C_plat"]))
-push!(cmp, ("RBE Bragg, aerobic",   meanratio("X_145", "C_bragg_690"),      TABLE1.RBE_aer["C_bragg"]))
-push!(cmp, ("RBE plateau, hypoxic", meanratio("X_0", "C_plat_0"),           TABLE1.RBE_hyp["C_plat"]))
-push!(cmp, ("RBE Bragg, hypoxic",   meanratio("X_0", "C_bragg_0"),          TABLE1.RBE_hyp["C_bragg"]))
+for (name, c1, c2, ref) in (("OER X rays",           "X_0",       "X_145",       TABLE1.OER["X"]),
+                            ("OER 12C plateau",      "C_plat_0",  "C_plat_145",  TABLE1.OER["C_plat"]),
+                            ("OER 12C Bragg peak",   "C_bragg_0", "C_bragg_690", TABLE1.OER["C_bragg"]),
+                            ("RBE plateau, aerobic", "X_145",     "C_plat_145",  TABLE1.RBE_aer["C_plat"]),
+                            ("RBE Bragg, aerobic",   "X_145",     "C_bragg_690", TABLE1.RBE_aer["C_bragg"]),
+                            ("RBE plateau, hypoxic", "X_0",       "C_plat_0",    TABLE1.RBE_hyp["C_plat"]),
+                            ("RBE Bragg, hypoxic",   "X_0",       "C_bragg_0",   TABLE1.RBE_hyp["C_bragg"]))
+    haskey(lq, c1) && haskey(lq, c2) && push!(cmp, (name, meanratio(c1, c2), ref))
+end
 println("\n--- OER and RBE: model vs Staab et al. 2004 (Table 1) ---"); show(stdout, cmp); println()
 
 CSV.write(joinpath(OUTDIR, "best_parameters.csv"), pars)
@@ -378,31 +421,35 @@ CSV.write(joinpath(OUTDIR, "lq_model.csv"),
           DataFrame(condition = first.(CONDITIONS), alpha = [lq[c][1] for c in first.(CONDITIONS)],
                     beta = [lq[c][2] for c in first.(CONDITIONS)]))
 CSV.write(joinpath(OUTDIR, "settings.csv"),
-          DataFrame(setting = ["MODE", "FIT_R", "TRAIN", "N_DAMAGE", "O2_FLOOR", "TUMOR_RADIUS", "N_cells", "targets"],
-                    value = string.([MODE, FIT_R, join(TRAIN, ";"), N_DAMAGE, O2_FLOOR, TUMOR_RADIUS, length(ALIVE),
+          DataFrame(setting = ["MODE", "FIT_R", "FIT_LETHAL", "rho_X", "rho_C_plat", "rho_C_bragg", "LET_C_bragg",
+                               "TRAIN", "N_DAMAGE", "O2_FLOOR", "TUMOR_RADIUS", "N_cells", "targets"],
+                    value = string.([MODE, FIT_R, FIT_LETHAL, rho(θbest, "X"), rho(θbest, "C_plat"),
+                                     rho(θbest, "C_bragg"), QUALITIES["C_bragg"].LET,
+                                     join(TRAIN, ";"), N_DAMAGE, O2_FLOOR, TUMOR_RADIUS, length(ALIVE),
                                      dig === nothing ? "Table 1 derived" : "digitised"])))
 
 # Figures (vector PDF, no titles)
-default(framestyle = :box, grid = false, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
+default(framestyle = :box, lw = 1.8, guidefontsize = 12, tickfontsize = 10,
         legendfontsize = 9, legendtitlefontsize = 10, dpi = 300,
         left_margin = 8Plots.mm, bottom_margin = 7Plots.mm, right_margin = 4Plots.mm,
         background_color_legend = RGBA(1, 1, 1, 0.85), foreground_color_legend = nothing)
+paper_style!()
 const PCOL = Dict(145.0 => :steelblue, 690.0 => :steelblue, 35.0 => :seagreen, 0.0 => :firebrick)
-const QLAB = Dict("X" => "250 kV X rays", "C_plat" => "¹²C plateau (LET 18)", "C_bragg" => "¹²C Bragg peak (LET 60)")
-panels = map(["X", "C_plat", "C_bragg"]) do q
+const QLAB = Dict("X" => "250 kV X rays", "C_plat" => "\$^{12}\$C plateau (LET 18 keV/\$\\mu\$m)", "C_bragg" => "\$^{12}\$C Bragg peak")
+panels = map(unique(QUAL_OF[c] for (c, _) in CONDITIONS)) do q
     p = plot(yscale = :log10, xlabel = "Dose (Gy)", ylabel = "Surviving fraction",
-             legend = :bottomleft, legendtitle = QLAB[q], ylims = (S_MIN / 2, 1.5))
+             legend = :bottomleft, legendtitle = tex(QLAB[q]), ylims = (S_MIN / 2, 1.5))
     for (cond, (qq, pO2, _)) in CONDITIONS
         qq == q || continue
         g = sort(targets[targets.condition .== cond, :], :dose)
         tag = g.set[1] == "train" ? "fit" : "prediction"
-        scatter!(p, g.dose, g.S; color = PCOL[pO2], ms = 5, label = "$(Int(pO2)) mmHg, data")
+        scatter!(p, g.dose, g.S; color = PCOL[pO2], ms = 5, label = tex("$(Int(pO2)) mmHg, data"))
         plot!(p, vcat(0.0, g.dose), vcat(1.0, g.model); color = PCOL[pO2],
-              ls = tag == "fit" ? :solid : :dash, label = "$(Int(pO2)) mmHg, model ($tag)")
+              ls = tag == "fit" ? :solid : :dash, label = tex("$(Int(pO2)) mmHg, model ($tag)"))
     end
     p
 end
-savefig(plot(panels...; layout = (1, 3), size = (1800, 480)), joinpath(OUTDIR, "survival_fit_prediction.pdf"))
+savefig(plot(panels...; layout = (1, length(panels)), size = (600 * length(panels), 480)), joinpath(OUTDIR, "survival_fit_prediction.pdf"))
 
 pc = scatter(cmp.Staab2004, cmp.model; ms = 6, color = :black, label = "",
              xlabel = "Staab et al. 2004", ylabel = "Model", legend = false, size = (520, 480))

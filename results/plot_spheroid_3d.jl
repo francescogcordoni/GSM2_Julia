@@ -19,6 +19,7 @@
 #
 # Run: julia scripts/plot_spheroid_3d.jl
 # ============================================================================
+include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using CSV, DataFrames, Printf, Plots
 gr()
 
@@ -64,10 +65,11 @@ println("conditions: $labels | times: $hours h")
 default(guidefontsize = 11, tickfontsize = 9, legendfontsize = 9, legendtitlefontsize = 10,
         dpi = 300, left_margin = 6Plots.mm, bottom_margin = 6Plots.mm,
         right_margin = 6Plots.mm, top_margin = 2Plots.mm)
+paper_style!()
 const PHASES = ["G0", "G1", "S", "G2", "M"]
 const PCOL   = Dict("G0" => :gray65, "G1" => :steelblue, "S" => :seagreen,
                     "G2" => :darkorange, "M" => :firebrick, "doomed" => :black)
-nice(t) = replace(t, "12C_" => "¹²C ", "1H_" => "¹H ", "MeVu" => " MeV/u", "MeV" => " MeV")
+nice(t) = ion_label(t)
 
 """Half-width of the plotted cube, from the largest snapshot radius (+ one cell)."""
 function plot_limit()
@@ -94,10 +96,10 @@ function half_spheroid(file::String, legtitle::String)
     keep = findall(y .>= 0)                 # back half; the cut face y = 0 faces the camera
     keep = keep[sortperm(y[keep]; rev = true)][1:EVERY:end]   # far cells first, cut face drawn last
 
-    p = plot(xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)",
+    p = plot(xlabel = tex("x (\$\\mu\$m)"), ylabel = tex("y (\$\\mu\$m)"), zlabel = tex("z (\$\\mu\$m)"),
              xlims = (-LIM, LIM), ylims = (0, LIM), zlims = (-LIM, LIM),
-             camera = CAMERA, legend = :outerright, legendtitle = legtitle,
-             size = (720, 560), framestyle = :box, grid = false)
+             camera = CAMERA, legend = :outerright, legendtitle = tex(legtitle),
+             size = (720, 560), framestyle = :box)
     cats = SHOW_DOOMED ? vcat(PHASES, "doomed") : PHASES
     for cat in cats
         sel = cat == "doomed" ? keep[doomed[keep]] : keep[(phase[keep] .== cat) .& .!doomed[keep]]
