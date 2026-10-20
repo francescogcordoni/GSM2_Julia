@@ -1,7 +1,7 @@
 # ============================================================================
 # plot_benchmark.jl
 #
-# Six-panel timing figure from example/output/benchmark/timings_summary.csv
+# Six-panel timing figure from scripts/output/benchmark/timings_summary.csv
 # (written by benchmark_computation.jl). Nothing is rerun. Vector PDF, no titles.
 #
 #   top row    : total, dose and ABM time vs number of cells
@@ -12,13 +12,14 @@
 #
 # Also writes scaling_exponents.csv (time ∝ cells^k and ∝ radius^m per ion, stage).
 #
-# Run: julia example/plot_benchmark.jl
+# Run: julia results/plot_benchmark.jl   (data in scripts/output/benchmark/)
 # ============================================================================
 include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))   # paper figure style
 using CSV, DataFrames, Statistics, Printf, Plots
 gr()
 
-const DIR = joinpath(@__DIR__, "output", "benchmark")
+const DIR     = joinpath(@__DIR__, "..", "scripts", "output", "benchmark")   # data (scripts/output)
+const FIG_DIR = joinpath(@__DIR__, "figures", "benchmark"); mkpath(FIG_DIR)   # figures (results/figures)
 summ = CSV.read(joinpath(DIR, "timings_summary.csv"), DataFrame)
 summ.ion = String.(summ.ion)
 hasproperty(summ, :stress) || (summ.stress = falses(nrow(summ)))   # older timing files
@@ -68,8 +69,6 @@ for (xc, xl) in XS, (st, yl) in STAGES
             push!(expo, (i, String(st), String(xc), k))
         end
     end
-    any(summ.stress) && scatter!(p, [NaN], [NaN]; marker = :circle, mc = :white, msc = :black,
-                                 msw = 1.5, label = "stress test")
     push!(panels, p)
 end
 for (k, p) in enumerate(panels)
@@ -77,11 +76,11 @@ for (k, p) in enumerate(panels)
 end
 
 fig = plot(panels...; layout = (2, 3), size = (1800, 1000))
-savefig(fig, joinpath(DIR, "benchmark_6panel.pdf"))
-CSV.write(joinpath(DIR, "scaling_exponents.csv"), expo)
+savefig(fig, joinpath(FIG_DIR, "benchmark_6panel.pdf"))
+CSV.write(joinpath(FIG_DIR, "scaling_exponents.csv"), expo)
 
 println("Scaling exponents (time ∝ x^k):")
 for r in eachrow(sort(expo, [:x, :stage, :ion]))
     @printf("  %-10s %-8s %-12s k = %.2f\n", r.x, r.stage, r.ion, r.exponent)
 end
-println("Saved ", joinpath(DIR, "benchmark_6panel.pdf"))
+println("Saved ", joinpath(FIG_DIR, "benchmark_6panel.pdf"))
