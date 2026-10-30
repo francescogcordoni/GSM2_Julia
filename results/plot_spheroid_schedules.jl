@@ -1,34 +1,29 @@
 # ============================================================================
 # results/plot_spheroid_schedules.jl
 #
-# Figures for scripts/spheroid_schedules.jl (data in scripts/output/spheroid_schedules/).
+# Figures for scripts/spheroid_schedules.jl (data in scripts/output/spheroid_schedules/<study>/).
 # Vector PDF, paper style, no titles; saved in results/figures/spheroid_schedules/.
 #
-#   dose_response.pdf          total cells / N0 (top) and clonogenic cells / N0 (bottom) after
-#                              0, 2, 4, 6 Gy, for 1H 100 MeV (left) and 12C 80 MeV/u (right)
-#   schedules.pdf              the same for 6 Gy delivered as 1 × 6, 3 × 2 Gy / 24 h, 4 × 1.5 Gy / 10.75 h
-#   schedule_summary.pdf       clonogenic cells / N0 at the end and at the minimum, per schedule and ion
-#   single panels:             dose_<metric>_<ion>.pdf, schedule_<metric>_<ion>.pdf
-#   schedule_summary.csv       the numbers of schedule_summary.pdf
+# Study :dose (single shot of 0, 2, 4, 6 Gy):
+#   dose_phases.pdf            grid ions × doses: total cells and cells in G0, G1, S, G2, M vs time
+#   dose_phases_<ion>_<d>.pdf  the single panels
+#   dose_total.pdf             total and clonogenic cells / N0 vs time, all doses, one panel per ion
+# Study :fractionation (6 Gy as 1 × 6, 3 × 2 Gy / 24 h, 2 × 3 Gy / 48 h):
+#   fx_total.pdf               total and clonogenic cells / N0 vs time, one panel per ion
+#   fx_phases.pdf              grid ions × schedules: total cells and cell-cycle phases
+#   fx_phases_<ion>_<sched>.pdf the single panels
+#   fx_summary.pdf / .csv      clonogenic cells / N0: minimum and at the end, per schedule and ion
 #
-# Run: julia results/plot_spheroid_schedules.jl
+# Run: julia results/plot_spheroid_schedules.jl   (plots whatever study has data)
 # ============================================================================
 include(joinpath(@__DIR__, "..", "src", "plot_style.jl"))
 using CSV, DataFrames, Statistics, Printf, Plots, StatsPlots
 gr()
 
-const DIR  = joinpath(@__DIR__, "..", "scripts", "output", "spheroid_schedules")
+const BASE = joinpath(@__DIR__, "..", "scripts", "output", "spheroid_schedules")
 const FDIR = joinpath(@__DIR__, "figures", "spheroid_schedules"); mkpath(FDIR)
-isfile(joinpath(DIR, "hourly.csv")) || error("hourly.csv not found in $DIR (run scripts/spheroid_schedules.jl)")
-
-h  = CSV.read(joinpath(DIR, "hourly.csv"), DataFrame)
-fx = CSV.read(joinpath(DIR, "fractions.csv"), DataFrame)
-for d in (h, fx); d.ion = String.(d.ion); d.schedule = String.(d.schedule); end
-h.rel_total = h.total ./ h.N0
-h.rel_clono = h.clonogenic ./ h.N0
 const IONS = ["1H_100MeV", "12C_80MeVu"]
-const T_END = maximum(h.t)
-println("data: $DIR | realisations: $(length(unique(h.rep))) | follow-up $(T_END) h")
+const PHASES = ["G0", "G1", "S", "G2", "M"]
 
 default(lw = 2.0, guidefontsize = 12, tickfontsize = 10, legendfontsize = 9, legendtitlefontsize = 10,
         size = (640, 470), left_margin = 8Plots.mm, bottom_margin = 7Plots.mm, right_margin = 5Plots.mm,
@@ -36,98 +31,116 @@ default(lw = 2.0, guidefontsize = 12, tickfontsize = 10, legendfontsize = 9, leg
         background_color_legend = RGBA(1, 1, 1, 0.85))
 paper_style!()
 save(p, name) = (savefig(p, joinpath(FDIR, name)); println("  saved ", joinpath(FDIR, name)))
-const XT = 0:24:Int(T_END)
+letter!(ps) = foreach(((k, p),) -> plot!(p; annotations = ((0.02, 0.97),
+                      text("($(Char('a' + k - 1)))", 12, :left, :top))), enumerate(ps))
 
-# condition styles
-const DOSE_SC = [("control", "0 Gy", :gray40), ("1x2Gy", "2 Gy", "#3b6ea8"),
-                 ("1x4Gy", "4 Gy", "#e9a23b"), ("1x6Gy", "6 Gy", "#c0392b")]
-const FX_SC   = [("control", "control", :gray40), ("1x6Gy", "1 × 6 Gy", "#c0392b"),
-                 ("3x2Gy_24h", "3 × 2 Gy, every 24 h", "#3b6ea8"),
-                 ("4x1.5Gy_10.75h", "4 × 1.5 Gy, every 10.75 h", "#2a9d8f")]
-
-"""Rows of one condition: the control is shared by both ions."""
-cond(ion, sc) = sc == "control" ? h[(h.schedule .== "control"), :] : h[(h.ion .== ion) .& (h.schedule .== sc), :]
-
-"""Mean ± SD over realisations of a column, per time."""
-function meansd(d, col)
-    g = combine(groupby(d, :t), col => mean => :m, col => std => :s)
-    g.s = coalesce.(replace(g.s, NaN => 0.0), 0.0)
-    sort!(g, :t)
+function load(study)
+    d = joinpath(BASE, study)
+    isfile(joinpath(d, "hourly.csv")) || return nothing
+    h  = CSV.read(joinpath(d, "hourly.csv"), DataFrame)
+    fx = CSV.read(joinpath(d, "fractions.csv"), DataFrame)
+    for x in (h, fx); x.ion = String.(x.ion); x.schedule = String.(x.schedule); end
+    h.rel_total = h.total ./ h.N0; h.rel_clono = h.clonogenic ./ h.N0
+    println("$study: $(length(unique(h.rep))) realisations, follow-up $(maximum(h.t)) h")
+    return h, fx
 end
 
-"""One panel: `metric` = :rel_total (linear) or :rel_clono (log)."""
-function panel(ion, styles, metric; legend = :topleft, fraction_marks = false)
-    logy = metric === :rel_clono
-    p = plot(xlabel = "Time after the first fraction (h)", xticks = XT, xlims = (0, T_END),
-             ylabel = logy ? tex("Clonogenic cells / \$N_0\$") : tex("Total cells / \$N_0\$"),
-             yscale = logy ? :log10 : :identity, legend = legend, legendtitle = ion_label(ion))
-    for (sc, lab, c) in styles
-        d = cond(ion, sc); isempty(d) && continue
-        g = meansd(d, metric)
-        y = logy ? max.(g.m, 1e-3) : g.m
-        lo = logy ? max.(g.m .- g.s, 1e-3) : g.m .- g.s
-        hi = g.m .+ g.s
-        plot!(p, g.t, y; ribbon = (y .- lo, hi .- y), fillalpha = 0.18, color = c, label = lab)
-        if fraction_marks && sc != "control"
-            tf = sort(unique(fx.t[(fx.ion .== ion) .& (fx.schedule .== sc)]))
-            vline!(p, tf; color = c, ls = :dash, lw = 0.9, alpha = 0.7, label = "")
-        end
+cond(h, ion, sc) = sc == "control" ? h[h.schedule .== "control", :] : h[(h.ion .== ion) .& (h.schedule .== sc), :]
+function meansd(d, col)
+    g = combine(groupby(d, :t), col => mean => :m, col => std => :s)
+    g.s = coalesce.(replace(g.s, NaN => 0.0), 0.0); sort!(g, :t)
+end
+fxtimes(fx, ion, sc) = sort(unique(fx.t[(fx.ion .== ion) .& (fx.schedule .== sc)]))
+
+"""Total cells (black) and cells in each phase (all cells, doomed included), mean over realisations."""
+function phase_panel(h, fx, ion, sc, legtitle; legend = :topleft)
+    d = cond(h, ion, sc)
+    T = maximum(h.t)
+    p = plot(xlabel = "Time after irradiation (h)", ylabel = "Number of cells", xticks = 0:24:Int(T),
+             xlims = (0, T), legend = legend, legendtitle = tex(legtitle))
+    g = meansd(d, :total)
+    plot!(p, g.t, g.m; ribbon = g.s, fillalpha = 0.15, color = :black, lw = 2.4, label = "total")
+    for ph in PHASES
+        g = meansd(d, Symbol(ph, "_all"))
+        plot!(p, g.t, g.m; color = PHASE_COLOURS[ph], lw = 1.6, ls = ph == "G0" ? :dash : :solid, label = ph)
     end
-    logy || hline!(p, [1.0]; color = :gray, lw = 0.6, label = "")
+    sc == "control" || vline!(p, fxtimes(fx, ion, sc); color = :black, ls = :dot, lw = 0.8, label = "")
     return p
 end
 
-# ── 1. dose response ────────────────────────────────────────────────────────
-dpan = Any[]
-for (k, metric) in enumerate((:rel_total, :rel_clono)), ion in IONS
-    p = panel(ion, DOSE_SC, metric; legend = metric === :rel_total ? :topleft : :bottomright)
-    save(p, "dose_$(metric === :rel_total ? "total" : "clonogenic")_$(ion).pdf")
-    push!(dpan, deepcopy(p))
-end
-foreach(((k, p),) -> plot!(p; annotations = ((0.02, 0.97), text("($(Char('a' + k - 1)))", 12, :left, :top))),
-        enumerate(dpan))
-save(plot(dpan...; layout = (2, 2), size = (1300, 960)), "dose_response.pdf")
-
-# ── 2. schedules with the same total dose ───────────────────────────────────
-span = Any[]
-for metric in (:rel_total, :rel_clono), ion in IONS
-    p = panel(ion, FX_SC, metric; legend = metric === :rel_total ? :topleft : :bottomright,
-              fraction_marks = true)
-    save(p, "schedule_$(metric === :rel_total ? "total" : "clonogenic")_$(ion).pdf")
-    push!(span, deepcopy(p))
-end
-foreach(((k, p),) -> plot!(p; annotations = ((0.02, 0.97), text("($(Char('a' + k - 1)))", 12, :left, :top))),
-        enumerate(span))
-save(plot(span...; layout = (2, 2), size = (1300, 960)), "schedules.pdf")
-
-# ── 3. summary of the schedules ─────────────────────────────────────────────
-summ = DataFrame(ion = String[], schedule = String[], label = String[], end_mean = Float64[], end_sd = Float64[],
-                 min_mean = Float64[], min_sd = Float64[], t_min = Float64[], t_regrow = Float64[])
-for ion in IONS, (sc, lab, _) in FX_SC
-    sc == "control" && continue
-    d = cond(ion, sc)
-    per = combine(groupby(d, :rep)) do g
-        g = sort(g, :t)
-        imin = argmin(g.rel_clono)
-        after = findfirst(i -> i > imin && g.rel_clono[i] >= 1.0, eachindex(g.t))
-        (end_ = g.rel_clono[end], min_ = g.rel_clono[imin], tmin = g.t[imin],
-         treg = after === nothing ? NaN : g.t[after])
+"""Total (solid) and clonogenic (dashed) cells / N0 for a set of conditions, one ion."""
+function total_panel(h, fx, ion, styles; marks = false)
+    T = maximum(h.t)
+    p = plot(xlabel = "Time after the first fraction (h)", ylabel = tex("Cells / \$N_0\$"), yscale = :log10,
+             xticks = 0:24:Int(T), xlims = (0, T), legend = :bottomright, legendtitle = ion_label(ion))
+    for (sc, lab, c) in styles
+        d = cond(h, ion, sc); isempty(d) && continue
+        for (col, ls) in ((:rel_total, :solid), (:rel_clono, :dash))
+            g = meansd(d, col); y = max.(g.m, 1e-3); lo = max.(g.m .- g.s, 1e-3)
+            plot!(p, g.t, y; ribbon = (y .- lo, g.m .+ g.s .- y), fillalpha = 0.12, color = c, ls = ls,
+                  label = col === :rel_total ? lab : "")
+        end
+        marks && sc != "control" && vline!(p, fxtimes(fx, ion, sc); color = c, ls = :dot, lw = 0.9, label = "")
     end
-    push!(summ, (ion, sc, lab, mean(per.end_), std(per.end_), mean(per.min_), std(per.min_),
-                 mean(per.tmin), (r = filter(!isnan, per.treg); isempty(r) ? NaN : mean(r))))
+    plot!(p, [NaN], [NaN]; color = :black, ls = :solid, label = "total cells")
+    plot!(p, [NaN], [NaN]; color = :black, ls = :dash, label = "clonogenic cells")
+    return p
 end
-CSV.write(joinpath(FDIR, "schedule_summary.csv"), summ)
-show(stdout, summ; allcols = true); println()
 
-labs = [l for (sc, l, _) in FX_SC if sc != "control"]
-cols = permutedims([c for (sc, _, c) in FX_SC if sc != "control"])
-M(col) = permutedims(reduce(hcat, [[summ[(summ.ion .== ion) .& (summ.label .== l), col][1] for l in labs] for ion in IONS]))
-xt = (1:length(IONS), [ion_label(i) for i in IONS])          # LaTeX ion labels as ticks
-pa = groupedbar(M(:min_mean); yerror = M(:min_sd), yscale = :log10, color = cols, label = permutedims(labs),
-                xticks = xt, ylabel = tex("Minimum clonogenic cells / \$N_0\$"), legend = :bottomleft,
-                bar_width = 0.8)
-pb = groupedbar(M(:end_mean); yerror = M(:end_sd), color = cols, label = "", xticks = xt,
-                ylabel = tex("Clonogenic cells / \$N_0\$ at $(Int(T_END)) h"), bar_width = 0.8)
-save(pa, "schedule_minimum.pdf"); save(pb, "schedule_end.pdf")
-save(plot(pa, pb; layout = (1, 2), size = (1300, 480)), "schedule_summary.pdf")
+# ── study 1: single shot ────────────────────────────────────────────────────
+dat = load("dose")
+if dat !== nothing
+    h, fx = dat
+    DS = [("control", "0 Gy", :gray40), ("1x2Gy", "2 Gy", "#3b6ea8"), ("1x4Gy", "4 Gy", "#e9a23b"), ("1x6Gy", "6 Gy", "#c0392b")]
+    pgrid = Any[]
+    for ion in IONS, (sc, lab, _) in DS
+        p = phase_panel(h, fx, ion, sc, "$(ion_label(ion)), $lab")
+        save(p, "dose_phases_$(ion)_$(replace(lab, " " => "")).pdf"); push!(pgrid, deepcopy(p))
+    end
+    letter!(pgrid)
+    save(plot(pgrid...; layout = (2, 4), size = (2500, 980), link = :y), "dose_phases.pdf")
+    tp = [total_panel(h, fx, ion, DS) for ion in IONS]
+    foreach(((ion, p),) -> save(p, "dose_total_$(ion).pdf"), zip(IONS, tp))
+    tp2 = deepcopy.(tp); letter!(tp2)
+    save(plot(tp2...; layout = (1, 2), size = (1300, 480)), "dose_total.pdf")
+end
+
+# ── study 2: fractionation ──────────────────────────────────────────────────
+dat = load("fractionation")
+if dat !== nothing
+    h, fx = dat
+    FS = [("control", "control", :gray40), ("1x6Gy", "1 × 6 Gy", "#c0392b"),
+          ("3x2Gy_24h", "3 × 2 Gy, every 24 h", "#3b6ea8"), ("2x3Gy_48h", "2 × 3 Gy, 48 h apart", "#2a9d8f")]
+    tp = [total_panel(h, fx, ion, FS; marks = true) for ion in IONS]
+    foreach(((ion, p),) -> save(p, "fx_total_$(ion).pdf"), zip(IONS, tp))
+    tp2 = deepcopy.(tp); letter!(tp2)
+    save(plot(tp2...; layout = (1, 2), size = (1300, 480)), "fx_total.pdf")
+
+    pgrid = Any[]
+    for ion in IONS, (sc, lab, _) in FS[2:end]
+        p = phase_panel(h, fx, ion, sc, "$(ion_label(ion)), $lab")
+        save(p, "fx_phases_$(ion)_$(sc).pdf"); push!(pgrid, deepcopy(p))
+    end
+    letter!(pgrid)
+    save(plot(pgrid...; layout = (2, 3), size = (1900, 980), link = :y), "fx_phases.pdf")
+
+    summ = DataFrame(ion = String[], schedule = String[], label = String[], min_mean = Float64[],
+                     min_sd = Float64[], end_mean = Float64[], end_sd = Float64[])
+    for ion in IONS, (sc, lab, _) in FS[2:end]
+        per = combine(groupby(cond(h, ion, sc), :rep)) do g
+            g = sort(g, :t); (mn = minimum(g.rel_clono), en = g.rel_clono[end])
+        end
+        push!(summ, (ion, sc, lab, mean(per.mn), std(per.mn), mean(per.en), std(per.en)))
+    end
+    CSV.write(joinpath(FDIR, "fx_summary.csv"), summ); show(stdout, summ; allcols = true); println()
+    labs = [l for (_, l, _) in FS[2:end]]; cols = permutedims([c for (_, _, c) in FS[2:end]])
+    M(col) = permutedims(reduce(hcat, [[summ[(summ.ion .== ion) .& (summ.label .== l), col][1] for l in labs] for ion in IONS]))
+    xt = (1:length(IONS), [ion_label(i) for i in IONS])
+    pa = groupedbar(M(:min_mean); yerror = M(:min_sd), yscale = :log10, color = cols, label = permutedims(labs),
+                    xticks = xt, ylabel = tex("Minimum clonogenic cells / \$N_0\$"), legend = :bottomleft, bar_width = 0.8)
+    pb = groupedbar(M(:end_mean); yerror = M(:end_sd), color = cols, label = "", xticks = xt,
+                    ylabel = tex("Clonogenic cells / \$N_0\$ at $(Int(maximum(h.t))) h"), bar_width = 0.8)
+    save(pa, "fx_minimum.pdf"); save(pb, "fx_end.pdf")
+    save(plot(pa, pb; layout = (1, 2), size = (1300, 480)), "fx_summary.pdf")
+end
 println("Figures in $FDIR")

@@ -1,23 +1,25 @@
 # ============================================================================
 # scripts/spheroid_schedules.jl
 #
-# Two studies on the same spheroid, for 1H at 100 MeV and 12C at 80 MeV/u:
-#   (1) single acute doses of 0, 2, 4 and 6 Gy
-#   (2) the same total dose of 6 Gy delivered as
-#         1 × 6 Gy,   3 × 2 Gy every 24 h,   4 × 1.5 Gy every 10.75 h
+# Two studies, for 1H at 100 MeV and 12C at 80 MeV/u (choose with STUDY, run once each):
+#   STUDY = :dose           single acute doses of 0, 2, 4 and 6 Gy (spheroid radius 250 µm)
+#   STUDY = :fractionation  the same total dose of 6 Gy delivered as
+#                           1 × 6 Gy,  3 × 2 Gy every 24 h,  2 × 3 Gy 48 h apart
+#                           on a larger spheroid (radius 350 µm, hypoxic core); the oxygen
+#                           profile is recomputed on the current spheroid before every fraction
 # Same pipeline as example/spheroid.jl and scripts/spheroid_fractionation.jl
 # (dose computed on the current spheroid at every fraction, delayed death).
 #
 # Each realisation grows the spheroid ONCE for T_PRE hours; every condition then
 # starts from a copy of that spheroid, so differences reflect the irradiation only.
-# The unirradiated control and the 1 × 6 Gy schedule are shared by the two studies.
 #
-# Outputs (scripts/output/spheroid_schedules/):
-#   hourly.csv      cell numbers per phase every hour (and right after each fraction)
+# Outputs (scripts/output/spheroid_schedules/<STUDY>/):
+#   hourly.csv      cell numbers every hour (and right after each fraction): total, clonogenic, doomed;
+#                   phases of all cells (G0_all … M_all) and of the clonogenic cells (G0 … M)
 #   fractions.csv   per-fraction dose, GSM2 survival probability and surviving fraction
 #
 # HOW TO RUN
-#   julia --threads auto scripts/spheroid_schedules.jl
+#   julia --threads auto scripts/spheroid_schedules.jl      (with STUDY = :dose, then :fractionation)
 # then: julia results/plot_spheroid_schedules.jl
 # ============================================================================
 
@@ -39,20 +41,26 @@ const N_REP  = 3             # stochastic realisations
 const IONS = [(tag = "1H_100MeV",  particle = "1H",  E = 100.0),
               (tag = "12C_80MeVu", particle = "12C", E = 80.0)]
 # schedules: fraction times (h after the first fraction) and doses (Gy)
-const SCHEDULES = [
-    (tag = "control",     label = "control",                  times = Float64[],               doses = Float64[]),
-    (tag = "1x2Gy",       label = "2 Gy",                     times = [0.0],                   doses = [2.0]),
-    (tag = "1x4Gy",       label = "4 Gy",                     times = [0.0],                   doses = [4.0]),
-    (tag = "1x6Gy",       label = "6 Gy",                     times = [0.0],                   doses = [6.0]),
-    (tag = "3x2Gy_24h",   label = "3 × 2 Gy, 24 h",           times = [0.0, 24.0, 48.0],       doses = [2.0, 2.0, 2.0]),
-    (tag = "4x1.5Gy_10.75h", label = "4 × 1.5 Gy, 10.75 h",   times = [0.0, 10.75, 21.5, 32.25], doses = fill(1.5, 4)),
+const STUDY = :dose          # :dose or :fractionation
+
+const SCHEDULES = STUDY === :dose ? [
+    (tag = "control",   label = "0 Gy",                times = Float64[],        doses = Float64[]),
+    (tag = "1x2Gy",     label = "2 Gy",                times = [0.0],            doses = [2.0]),
+    (tag = "1x4Gy",     label = "4 Gy",                times = [0.0],            doses = [4.0]),
+    (tag = "1x6Gy",     label = "6 Gy",                times = [0.0],            doses = [6.0]),
+] : [
+    (tag = "control",   label = "control",             times = Float64[],        doses = Float64[]),
+    (tag = "1x6Gy",     label = "1 × 6 Gy",            times = [0.0],            doses = [6.0]),
+    (tag = "3x2Gy_24h", label = "3 × 2 Gy, every 24 h", times = [0.0, 24.0, 48.0], doses = [2.0, 2.0, 2.0]),
+    (tag = "2x3Gy_48h", label = "2 × 3 Gy, 48 h apart", times = [0.0, 48.0],     doses = [3.0, 3.0]),
 ]
 
-# Geometry: room for 192 h of growth of the control (periodic lattice)
-TUMOR_RADIUS = 250.0
+# Geometry (box with room for 192 h of growth of the control: the lattice is periodic).
+# Fractionation: radius 350 µm > necrosis-onset radius (~206 µm), so the core is hypoxic.
+TUMOR_RADIUS = STUDY === :dose ? 250.0 : 350.0
 R_CELL       = 15.0
-X_BOX        = 550.0
-X_VOXEL      = 1100.0
+X_BOX        = STUDY === :dose ? 550.0 : 700.0
+X_VOXEL      = 2 * X_BOX
 
 RD = 0.8; RN = 7.2
 const A_G1 = 0.01287;  const B_G1 = 0.04030;  const R_G1 = 2.7805
@@ -66,10 +74,11 @@ const TARGET_GEOM = "circle"
 const CALC_TYPE   = "full"
 const NAT_APO     = 1e-10
 const FATE        = :incremental
-const OXYGEN      = :diffusion        # recomputed at every fraction
+const OXYGEN      = :diffusion        # profile of the current spheroid, recomputed before every fraction
+const O2_DENSITY  = :radial           # local cell density per shell: space freed by dead cells reoxygenates
 const O2_UNIFORM  = 21.0
 
-const OUTDIR = joinpath(@__DIR__, "output", "spheroid_schedules")
+const OUTDIR = joinpath(@__DIR__, "output", "spheroid_schedules", String(STUDY))
 mkpath(OUTDIR)
 
 # ============================================================================
@@ -97,7 +106,7 @@ end
 setup_cell_population!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide,
                        gsm2_cycle[4]; ParIrr = "false")
 setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)
-OXYGEN === :diffusion ? set_oxygen_diffusion!(cell_df; density = :mean, plot_oxygen = false) :
+OXYGEN === :diffusion ? set_oxygen_diffusion!(cell_df; density = O2_DENSITY, plot_oxygen = false) :
                         (cell_df.O .= O2_UNIFORM)
 
 # Fate model: set_fate_model! exists only in the latest utilities_abm.jl
@@ -146,10 +155,12 @@ function counts(df::DataFrame)
     alive  = df.is_cell .== 1
     doomed = alive .& isfinite.(df.death_time)
     clono  = alive .& .!isfinite.(df.death_time)
-    ph = df.cell_cycle[clono]
+    ph = df.cell_cycle[clono]; pa = df.cell_cycle[alive]
     return (total = count(alive), clonogenic = count(clono), doomed = count(doomed),
             G0 = count(==("G0"), ph), G1 = count(==("G1"), ph), S = count(==("S"), ph),
-            G2 = count(==("G2"), ph), M = count(==("M"), ph))
+            G2 = count(==("G2"), ph), M = count(==("M"), ph),
+            G0_all = count(==("G0"), pa), G1_all = count(==("G1"), pa), S_all = count(==("S"), pa),
+            G2_all = count(==("G2"), pa), M_all = count(==("M"), pa))
 end
 
 clonogenic(df) = count((df.is_cell .== 1) .& .!isfinite.(df.death_time))
@@ -178,7 +189,7 @@ function irradiate_fraction!(df::DataFrame, c, seed::UInt64)
     Rnow = current_radius(df)
     R_beam, _, _ = calculate_beam_properties(CALC_TYPE, TARGET_GEOM, X_BOX, X_VOXEL, Rnow)
     setup_irrad_conditions!(G(:ion), G(:irrad), TYPE_AT, df, TRACK_SEG)
-    OXYGEN === :diffusion && set_oxygen_diffusion!(df; density = :mean, plot_oxygen = false)
+    OXYGEN === :diffusion && set_oxygen_diffusion!(df; density = O2_DENSITY, plot_oxygen = false)  # before the dose
 
     F    = G(:irrad).dose / (1.602e-9 * G(:LET))
     Npar = round(Int, F * π * R_beam^2 * 1e-8)
@@ -277,4 +288,4 @@ for rep in 1:N_REP
         CSV.write(joinpath(OUTDIR, "fractions.csv"), fx_rows)
     end
 end
-println("\nSaved in $OUTDIR")
+println("\nSaved in $OUTDIR (study $STUDY; run again with the other STUDY for the second set)")
