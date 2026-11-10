@@ -1,0 +1,540 @@
+---
+title: "GSM²-ABM: a tour of all features"
+subtitle: "Energy loss along the path, a polyenergetic (Gaussian) beam, fractionation, and every option of the agent-based model"
+author: "Francesco G. Cordoni"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    fig-align: center
+    number-sections: true
+execute:
+  eval: true
+  echo: true
+  cache: false
+---
+
+## What this notebook shows {.unnumbered}
+
+This notebook goes through every component of the
+[GSM2_Julia](https://github.com/francescogcordoni/GSM2_Julia) framework on a
+single, small spheroid, so that it runs in a few minutes on a laptop. It
+complements the two scripts it is built on:
+
+- [`example/spheroid.jl`](https://github.com/francescogcordoni/GSM2_Julia/blob/main/example/spheroid.jl):
+  monoenergetic beam, full pipeline;
+- [`example/spheroid_poly.jl`](https://github.com/francescogcordoni/GSM2_Julia/blob/main/example/spheroid_poly.jl):
+  beam made of a few discrete energies.
+
+Here the beam is **polyenergetic**, with a **Gaussian energy spectrum**, and the
+**track-segment condition is switched off** (`track_seg = false`): every particle
+loses energy along its path, so cells at different depths see different energies
+and LET. The sections are:
+
+| Section | Feature |
+|---|---|
+| [Beam](#a-gaussian-polyenergetic-beam) | Gaussian energy spectrum, discretised into bins; fluence weights; dose-averaged LET |
+| [Energy loss](#energy-loss-along-the-path) | `track_seg = false`: energy and LET layer by layer (CSDA range) |
+| [Dose and damage](#dose-and-dna-damage) | Monte Carlo dose and lesions, per energy bin and summed |
+| [Survival and fate](#survival-and-fate) | Exact GSM² survival, incremental fate model, clonogenic survival |
+| [ABM](#agent-based-dynamics-and-a-second-fraction) | Delayed death, lineage tracking, a second fraction with re-oxygenation |
+| [Options](#biological-options) | Contact-inhibition threshold, growth plateau, migration, G2 checkpoint |
+| [Continuous irradiation](#continuous-low-dose-rate-irradiation) | Low-dose-rate exposure with concurrent cell dynamics |
+| [Engine check](#event-engine-validation) | Heap engine vs original loop |
+
+Render with `quarto render example/features_walkthrough.qmd` (Julia ≥ 1.10 with
+the packages listed in the README, and the Quarto Julia engine).
+
+---
+
+## Setup
+
+The utilities are included in `Main`, because the setup functions write their
+results (the cell table, the irradiation conditions, …) as globals of `Main`.
+The notebook then copies those globals into its own scope with `pull!`.
+
+```{julia}
+#| label: setup
+#| output: false
+
+import Pkg
+Pkg.activate(joinpath(homedir(), ".julia", "environments",
+                      "v$(VERSION.major).$(VERSION.minor)"))
+
+using Base.Threads, CSV, DataFrames, Distributions, Random, Printf
+using Plots, StatsPlots, Statistics, StatsBase
+ENV["GKSwstype"] = "100"          # headless GR
+
+@eval Main begin
+    using Base.Threads, Distributed, CSV, DataFrames, Distributions, Random
+    using Plots, StatsPlots, Statistics, StatsBase, ProgressBars, ProgressMeter
+    using GLM, Optim, LsqFit, JLD2, DelimitedFiles
+    using InlineStrings, SparseArrays, Printf, CUDA
+    using Statistics: mean
+end
+Base.include(Main, joinpath(@__DIR__, "..", "src", "load_utilities.jl"))
+
+using Main: GSM2, Ion, Irrad, AT, CellPopulation, SimulationTimeSeries
+import Main: setup_GSM2!, setup_IonIrrad!, setup_cell_lattice!, setup_cell_population!,
+             setup_irrad_conditions!, set_oxygen_diffusion!, calculate_beam_properties,
+             load_stopping_power, table_for, let_at, validate_stopping,
+             calculate_OER, calculate_kappa,
+             MC_dose_damage_poly!, domain_GSM2, survival_ci,
+             set_fate_model!, set_checkpoint!, set_quiescence_threshold!,
+             set_division_limit!, clear_division_limit!,
+             set_founder_tracking!, clear_founder_tracking!, founders,
+             compute_times_domain!, run_simulation_abm!, run_simulation_abm_migration!,
+             irradiate_continuous_abm!, compare_engines, _advance_idle!,
+             print_phase_distribution, plot_cell_cycle_distribution,
+             plot_scalar_cell, plot_scalar_cell_poly, plot_damage_poly, plot_times,
+             plot_phase_dynamics, plot_spatial_distribution
+
+sp = load_stopping_power()
+@eval Main sp = $sp
+
+"Copy globals written into Main by the setup functions into this notebook."
+function pull!(syms...)
+    for s in syms
+        isdefined(Main, s) && Core.eval(@__MODULE__, :($s = Main.$s))
+    end
+end
+
+"Radius of the current spheroid (µm), from the alive cells."
+function current_radius(df)
+    a = df.is_cell .== 1
+    cx, cy, cz = mean(df.x[a]), mean(df.y[a]), mean(df.z[a])
+    maximum(sqrt.((df.x[a] .- cx).^2 .+ (df.y[a] .- cy).^2 .+ (df.z[a] .- cz).^2)) + 15.0
+end
+
+gr(); default(framestyle = :box, grid = true, gridalpha = 0.3, lw = 2)
+println("Threads: ", nthreads())
+```
+
+---
+
+## Parameters
+
+All choices are in one place. The spheroid is small (radius 200 µm, about 1200
+cells) so that every section runs quickly; the energy is chosen low enough for
+the energy loss across the spheroid to be visible.
+
+```{julia}
+#| label: parameters
+#| output: false
+
+# Beam: Gaussian energy spectrum
+PARTICLE   = "12C"
+E_MEAN     = 20.0      # mean kinetic energy (MeV/u)
+E_SIGMA    = 1.0       # standard deviation (MeV/u)
+N_BINS     = 7         # energy bins used to discretise the spectrum
+N_SIGMA    = 2.5       # spectrum truncated at ±N_SIGMA·σ
+DOSE_GY    = 2.0       # dose per fraction, at the entrance of the target (Gy)
+
+# Geometry
+TUMOR_RADIUS = 200.0;  R_CELL = 15.0;  X_BOX = 400.0;  X_VOXEL = 800.0
+RD = 0.8;  RN = 7.2
+
+# Physics and run options
+TYPE_AT     = "KC"     # Kiefer–Chatterjee amorphous track
+TRACK_SEG   = false    # energy loss along the path
+TARGET_GEOM = "circle"; CALC_TYPE = "full"
+NAT_APO     = 1e-10
+T_BETWEEN   = 24.0     # h between the two fractions
+T_AFTER     = 72.0     # h of follow-up after the second fraction
+
+# GSM² rates (h⁻¹), calibrated on phase-specific LQ data
+gsm2_cycle = [GSM2(2.7805, 0.01287, 0.04030, RD, RN),   # G1 / G0
+              GSM2(5.8401, 0.00589, 0.05794, RD, RN),   # S
+              GSM2(1.7720, 0.02431, 5.705e-5, RD, RN),  # G2 / M
+              GSM2(2.5657, 0.01481, 0.01266, RD, RN)]   # average
+
+validate_stopping(sp, PARTICLE, parse(Int, match(r"\d+", PARTICLE).match))
+Random.seed!(2026)
+```
+
+---
+
+## A Gaussian polyenergetic beam
+
+A real beam has an energy spread. Here the kinetic energy follows a Gaussian
+distribution, $E \sim \mathcal{N}(\bar E, \sigma^2)$, truncated at
+$\pm 2.5\sigma$ and discretised into `N_BINS` bins. Each bin $i$ is a
+monoenergetic component with energy $E_i$ (the bin centre) and **fluence
+fraction** $w_i$ (the Gaussian probability of the bin).
+
+The prescribed dose fixes the total fluence. Since each particle of bin $i$
+deposits a dose proportional to its LET,
+$D = 1.602\times10^{-9} \, F_{\mathrm{tot}} \sum_i w_i \, \mathrm{LET}_i$, so
+
+$$
+F_{\mathrm{tot}} = \frac{D}{1.602\times10^{-9}\sum_i w_i\,\mathrm{LET}_i},
+\qquad N_i = w_i\,F_{\mathrm{tot}}\,\pi R_{\mathrm{beam}}^2 .
+$$
+
+```{julia}
+#| label: spectrum
+
+edges    = range(E_MEAN - N_SIGMA * E_SIGMA, E_MEAN + N_SIGMA * E_SIGMA; length = N_BINS + 1)
+ENERGIES = collect(0.5 .* (edges[1:end-1] .+ edges[2:end]))
+W        = diff(cdf.(Normal(E_MEAN, E_SIGMA), collect(edges)));  W ./= sum(W)
+PARTICLES = fill(PARTICLE, N_BINS)
+
+tab   = table_for(sp, PARTICLE)
+LET_i = [let_at(tab, E) for E in ENERGIES]
+LET_F = sum(W .* LET_i)                         # fluence-averaged LET
+LET_D = sum(W .* LET_i .^ 2) / sum(W .* LET_i)  # dose-averaged LET
+@printf("Fluence-averaged LET %.1f keV/µm, dose-averaged LET %.1f keV/µm\n", LET_F, LET_D)
+
+p1 = bar(ENERGIES, W; bar_width = step(edges), xlabel = "Kinetic energy (MeV/u)",
+         ylabel = "Fluence fraction", label = "bins", color = :steelblue, alpha = 0.7)
+Eg = range(first(edges), last(edges); length = 200)
+plot!(p1, Eg, pdf.(Normal(E_MEAN, E_SIGMA), Eg) .* step(edges); color = :black, label = "Gaussian")
+p2 = scatter(ENERGIES, LET_i; xlabel = "Kinetic energy (MeV/u)", ylabel = "LET (keV/µm)",
+             label = "", color = :firebrick)
+plot(p1, p2; layout = (1, 2), size = (900, 340))
+```
+
+---
+
+## Spheroid and irradiation conditions
+
+The spheroid is built on a cubic lattice and oxygenated with the
+reaction–diffusion profile, which is computed from the local cell density
+(`density = :radial`).
+
+```{julia}
+#| label: build
+
+setup_GSM2!(2.5657, 0.01481, 0.01266, RD, RN)
+setup_IonIrrad!(DOSE_GY, ENERGIES, PARTICLES; type_AT = TYPE_AT)   # one Ion per bin
+
+N_sideVox   = Int(floor(2 * X_BOX / X_VOXEL))
+N_CellsSide = 2 * convert(Int64, floor(X_BOX / (2 * R_CELL)))
+setup_cell_lattice!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide;
+                    ParIrr = "false", track_seg = TRACK_SEG, full_cycle = true)
+@eval Main begin
+    tumor_radius = $TUMOR_RADIUS; X_voxel = $X_VOXEL; X_box = $X_BOX
+end
+setup_cell_population!(TARGET_GEOM, X_BOX, R_CELL, N_sideVox, N_CellsSide,
+                       gsm2_cycle[4]; ParIrr = "false")
+pull!(:gsm2, :ion, :irrad, :LET, :cell_df, :df_center_x, :df_center_y, :at)
+
+setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)    # one set per bin
+pull!(:irrad_cond, :irrad_cond_original_layers, :lets, :energies, :cell_df)
+
+set_oxygen_diffusion!(cell_df; density = :radial)
+
+N_init = count(==(1), cell_df.is_cell)
+println("Spheroid: $N_init cells")
+print_phase_distribution(cell_df; label = "pre-irradiation")
+cell_df_pristine = deepcopy(cell_df)
+```
+
+```{julia}
+#| label: fig-oxygen
+#| fig-cap: "Oxygen level of each cell as a function of its distance from the centre."
+
+a  = cell_df.is_cell .== 1
+cx = mean(cell_df.x[a]); cy = mean(cell_df.y[a]); cz = mean(cell_df.z[a])
+r  = sqrt.((cell_df.x[a] .- cx).^2 .+ (cell_df.y[a] .- cy).^2 .+ (cell_df.z[a] .- cz).^2)
+scatter(r, cell_df.O[a]; ms = 2, msw = 0, alpha = 0.5, label = "",
+        xlabel = "Distance from the centre (µm)", ylabel = "O₂ (%)")
+```
+
+---
+
+## Energy loss along the path
+
+With `track_seg = false`, the target is divided into layers perpendicular to the
+beam, one per lattice plane. For each energy bin, the energy at the next layer is
+obtained by range inversion, $E_{i+1} = R^{-1}\!\left(R(E_i) - h\right)$, where
+$R(E)$ is the continuous-slowing-down range computed from the stopping-power
+table; the LET and the track parameters are then recomputed at $E_{i+1}$. Empty
+layers do not absorb, so the depth is measured from the surface of the spheroid.
+
+```{julia}
+#| label: fig-let-depth
+#| fig-cap: "Kinetic energy and LET of each energy bin as a function of depth. Dashed: LET at the entrance, i.e. the value used under the track-segment condition."
+
+zs   = sort(unique(cell_df.z))
+cols = palette(:viridis, N_BINS)
+pE = plot(xlabel = "z (µm)", ylabel = "Energy (MeV/u)", legend = false)
+pL = plot(xlabel = "z (µm)", ylabel = "LET (keV/µm)", legend = :topleft)
+for i in 1:N_BINS
+    plot!(pE, zs, energies[i]; color = cols[i])
+    plot!(pL, zs, lets[i]; color = cols[i], label = @sprintf("%.1f MeV/u", ENERGIES[i]))
+    hline!(pL, [lets[i][1]]; color = cols[i], ls = :dash, lw = 1, label = "")
+end
+plot(pE, pL; layout = (1, 2), size = (950, 360))
+```
+
+---
+
+## Dose and DNA damage
+
+The number of particles of each bin follows from the fluence weights. Dose and
+lesions are computed bin by bin and summed per cell (`MC_dose_damage_poly!`).
+
+```{julia}
+#| label: dose
+
+R_beam, _, _ = calculate_beam_properties(CALC_TYPE, TARGET_GEOM, X_BOX, X_VOXEL,
+                                         current_radius(cell_df))
+F_tot     = DOSE_GY / (1.602e-9 * sum(W .* LET))     # particles / cm²
+Npar_vect = round.(Int, W .* F_tot .* π .* R_beam^2 .* 1e-8)
+println("Particles per bin: ", Npar_vect)
+
+@time MC_dose_damage_poly!(ion, Npar_vect, R_beam, irrad_cond, cell_df,
+                           df_center_x, df_center_y, at, gsm2_cycle, TYPE_AT, TRACK_SEG)
+a = cell_df.is_cell .== 1
+@printf("Mean cell dose %.2f Gy (prescribed at the entrance: %.2f Gy)\n",
+        mean(cell_df.dose_cell[a]), DOSE_GY)
+```
+
+```{julia}
+#| label: fig-dose
+#| fig-cap: "Cell dose: distribution and 3-D map (left), and grouped by depth layer (right)."
+
+display(plot_scalar_cell_poly(cell_df, :dose_cell))
+display(plot_scalar_cell_poly(cell_df, :dose_cell; layer_plot = true))
+```
+
+```{julia}
+#| label: fig-depth-dose
+#| fig-cap: "Mean cell dose as a function of depth: the dose rises with depth as the particles slow down."
+
+g = combine(groupby(cell_df[a, :], :z), :dose_cell => mean => :d)
+sort!(g, :z)
+plot(g.z, g.d; marker = :circle, ms = 3, xlabel = "z (µm)", ylabel = "Mean cell dose (Gy)",
+     label = "", color = :firebrick)
+```
+
+```{julia}
+#| label: fig-damage
+#| fig-cap: "Sublethal (X) lesions per cell, all bins and per bin."
+
+display(plot_damage_poly(cell_df))
+display(plot_damage_poly(cell_df; pp = true, particles = PARTICLES))
+```
+
+---
+
+## Survival and fate
+
+The survival probability of each cell is the exact GSM² probability of
+completing repair. Fates are then sampled with the **incremental** model: a
+lethally damaged cell becomes *doomed*, keeps its site and is removed after a
+phase-dependent delay. The **clonogenic** surviving fraction (alive and not
+doomed) must agree with the mean survival probability.
+
+```{julia}
+#| label: survival
+
+set_fate_model!(:incremental)
+set_checkpoint!(:all)
+
+# Survival without resetting the cells' clocks (needed by the incremental model)
+for i in findall(==(1), cell_df.is_cell)
+    ph = cell_df.cell_cycle[i]
+    gs = (ph == "G1" || ph == "G0") ? gsm2_cycle[1] : ph == "S" ? gsm2_cycle[2] : gsm2_cycle[3]
+    cell_df.sp[i] = domain_GSM2(cell_df.dam_X_dom[i], cell_df.dam_Y_dom[i], gs)
+end
+SF_gsm2 = mean(cell_df.sp[cell_df.is_cell .== 1])
+
+compute_times_domain!(cell_df, gsm2_cycle; nat_apo = NAT_APO, terminal_time = Inf, summary = true)
+SF_clono = count((cell_df.is_cell .== 1) .& .!isfinite.(cell_df.death_time)) / N_init
+@printf("Mean GSM² survival %.3f   clonogenic survival %.3f\n", SF_gsm2, SF_clono)
+```
+
+```{julia}
+#| label: fig-survival
+#| fig-cap: "Survival probability of each cell (log scale) and its 3-D map."
+
+display(plot_scalar_cell(cell_df, :sp; xscale = :log10))
+```
+
+```{julia}
+#| label: fig-times
+#| fig-cap: "Times of repair completion and of radiation-induced death."
+
+display(plot_times(cell_df; show_means = true))
+```
+
+---
+
+## Agent-based dynamics and a second fraction
+
+Lineage tracking is switched on before the ABM, so that every surviving clone
+can be followed. After `T_BETWEEN` hours a second fraction is delivered to the
+**current** spheroid: the oxygen profile is recomputed, the beam covers the
+current radius, the energy loss is recomputed on the current cell configuration,
+and fates are assigned only to cells that are not already doomed.
+
+```{julia}
+#| label: fraction-1-abm
+
+set_founder_tracking!(cell_df)
+ts1, _ = run_simulation_abm!(cell_df; nat_apo = NAT_APO, terminal_time = T_BETWEEN,
+                             snapshot_times = Int[], verbose = false,
+                             return_dataframes = false, update_input = true)
+_advance_idle!(cell_df, T_BETWEEN - (isempty(ts1.time) ? 0.0 : ts1.time[end]))
+n_doomed = count((cell_df.is_cell .== 1) .& isfinite.(cell_df.death_time))
+println("At the second fraction: $(count(==(1), cell_df.is_cell)) cells, $n_doomed doomed")
+```
+
+```{julia}
+#| label: fraction-2
+
+set_oxygen_diffusion!(cell_df; density = :radial)                 # re-oxygenation
+setup_IonIrrad!(DOSE_GY, ENERGIES, PARTICLES; type_AT = TYPE_AT)
+pull!(:ion, :irrad, :LET)
+setup_irrad_conditions!(ion, irrad, TYPE_AT, cell_df, TRACK_SEG)  # on the current spheroid
+pull!(:irrad_cond, :lets, :energies, :cell_df)
+
+R_now = current_radius(cell_df)
+R_beam, _, _ = calculate_beam_properties(CALC_TYPE, TARGET_GEOM, X_BOX, X_VOXEL, R_now)
+Npar_vect = round.(Int, W .* (DOSE_GY / (1.602e-9 * sum(W .* LET))) .* π .* R_beam^2 .* 1e-8)
+MC_dose_damage_poly!(ion, Npar_vect, R_beam, irrad_cond, cell_df,
+                     df_center_x, df_center_y, at, gsm2_cycle, TYPE_AT, TRACK_SEG)
+
+before = count((cell_df.is_cell .== 1) .& .!isfinite.(cell_df.death_time))
+compute_times_domain!(cell_df, gsm2_cycle; nat_apo = NAT_APO, terminal_time = Inf)
+after  = count((cell_df.is_cell .== 1) .& .!isfinite.(cell_df.death_time))
+@printf("Spheroid radius %.0f µm; surviving fraction of the second fraction %.3f\n",
+        R_now, after / before)
+
+ts2, snaps = run_simulation_abm!(cell_df; nat_apo = NAT_APO, terminal_time = T_AFTER,
+                                 snapshot_times = [0, 24, 48, 72], verbose = false,
+                                 return_dataframes = true, update_input = true)
+```
+
+```{julia}
+#| label: fig-dynamics
+#| fig-cap: "Total cells over both fractions (dashed: the two fractions) and cell-cycle phases after the second fraction."
+
+t_all = vcat(ts1.time, ts2.time .+ T_BETWEEN)
+n_all = vcat(ts1.total_cells, ts2.total_cells)
+pT = plot(t_all, n_all; xlabel = "Time after the first fraction (h)", ylabel = "Total cells",
+          label = "", color = :black)
+vline!(pT, [0.0, T_BETWEEN]; ls = :dash, color = :gray, label = "")
+plot(pT, plot_phase_dynamics(ts2); layout = (1, 2), size = (1000, 360))
+```
+
+```{julia}
+#| label: fig-snapshot
+#| fig-cap: "The spheroid 72 h after the second fraction, coloured by cell-cycle phase."
+
+display(plot_spatial_distribution(snaps[maximum(keys(snaps))]; color_by = :cell_cycle))
+```
+
+```{julia}
+#| label: fig-clones
+#| fig-cap: "Size of the surviving clones at the end of the follow-up (lineage tracking)."
+
+F     = founders()
+alive = (cell_df.is_cell .== 1) .& .!isfinite.(cell_df.death_time)
+sizes = collect(values(countmap(F[alive .& (F .> 0)])))
+clear_founder_tracking!()
+@printf("%d surviving clones; largest %d cells\n", length(sizes), maximum(sizes))
+histogram(sizes; bins = 30, xlabel = "Clone size (cells)", ylabel = "Number of clones",
+          label = "", color = :seagreen, yscale = :log10)
+```
+
+---
+
+## Biological options
+
+Each option is global: it is set before a run and reset afterwards. All runs in
+this section start from copies of the unirradiated spheroid and last 72 h.
+
+```{julia}
+#| label: options
+
+control(df; kw...) = run_simulation_abm!(df; nat_apo = NAT_APO, terminal_time = 72.0,
+                                         snapshot_times = Int[], verbose = false,
+                                         return_dataframes = false, update_input = true, kw...)
+
+# Reference
+d0 = deepcopy(cell_df_pristine);  ts_ref, _ = control(d0)
+
+# Contact inhibition: quiescent when at most 2 of the 26 neighbours are empty
+dq = deepcopy(cell_df_pristine)
+set_quiescence_threshold!(2; cell_df = dq);  ts_q, _ = control(dq)
+set_quiescence_threshold!(0; cell_df = dq)
+
+# Growth plateau: division probability falls off beyond R50
+dl = deepcopy(cell_df_pristine)
+set_division_limit!(dl; R50 = TUMOR_RADIUS + 60.0, w = 15.0);  ts_l, _ = control(dl)
+clear_division_limit!()
+
+# Migration: random walk with motility D_m (µm²/h) on a lattice of spacing 2R_cell
+dm = deepcopy(cell_df_pristine)
+ts_m, _ = run_simulation_abm_migration!(dm, 50.0, 2R_CELL; nat_apo = NAT_APO,
+                                        terminal_time = 72.0, snapshot_times = Int[],
+                                        verbose = false, return_dataframes = false)
+
+plot(ts_ref.time, ts_ref.total_cells; label = "reference", color = :black,
+     xlabel = "Time (h)", ylabel = "Total cells (unirradiated)")
+plot!(ts_q.time, ts_q.total_cells; label = "quiescence threshold k = 2", color = :steelblue)
+plot!(ts_l.time, ts_l.total_cells; label = "growth plateau", color = :darkorange)
+plot!(ts_m.time, ts_m.total_cells; label = "migration, D = 50 µm²/h", color = :seagreen)
+```
+
+The cell-cycle checkpoint can also be changed: with `set_checkpoint!(:g2)`,
+damaged cells keep cycling through G1 and S and are held only in G2, instead of
+being arrested in every phase (`:all`, the default). The continuous irradiation
+below uses it.
+
+---
+
+## Continuous low-dose-rate irradiation
+
+`irradiate_continuous_abm!` delivers the dose as a train of short pulses, with
+repair, fate assignment and cell dynamics running between pulses, so that
+redistribution and repopulation take place during the exposure. It uses uniform
+(low-LET) damage; here, 2 Gy of 100 MeV protons at 0.5 Gy/h.
+
+```{julia}
+#| label: continuous
+
+LET_p = let_at(table_for(sp, "1H"), 100.0)
+K_tot = 9.0 * calculate_kappa("1H", LET_p, 21.0)     # X lesions per cell per Gy
+dc    = deepcopy(cell_df_pristine)
+ts_c, res = irradiate_continuous_abm!(dc, gsm2_cycle; dose = 2.0, dose_rate_gyh = 0.5,
+                                      K_tot = K_tot, L_tot = 1e-3 * K_tot,
+                                      checkpoint = :g2, seed = 1)
+set_checkpoint!(:all)
+@printf("Clonogenic fraction at the end of exposure %.3f; clonogenic cells / initial %.3f\n",
+        res.SF_plated, res.N_rel)
+display(plot_phase_dynamics(ts_c))
+```
+
+---
+
+## Event engine validation
+
+The default engine stores the next event of every cell in a binary min-heap and
+updates only the neighbours of each event. `compare_engines` runs it and the
+original loop from the same state and seed and checks that the trajectories
+coincide.
+
+```{julia}
+#| label: engines
+
+compare_engines(cell_df_pristine; seed = 1, terminal_time = 24.0)
+```
+
+---
+
+## Where to go next {.unnumbered}
+
+- Change `PARTICLE`, `E_MEAN`, `E_SIGMA` and `N_BINS` to explore other spectra;
+  `N_BINS = 1` with `E_SIGMA` small recovers a monoenergetic beam.
+- Set `TRACK_SEG = true` to compare with the track-segment condition (all layers
+  at the entrance energy).
+- The scripts in `scripts/` reproduce the figures of the paper; see the README.
