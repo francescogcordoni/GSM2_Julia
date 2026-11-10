@@ -72,7 +72,7 @@ const CALC_TYPE      = "full"
 const TERMINAL_TIME  = 72.0
 const SNAPSHOT_HOURS = [0, 6, 12, 24, 48, 72]
 const NAT_APO        = 1e-10
-const FATE           = :incremental      # :incremental (delayed death) or :legacy
+const FATE           = :delayed      # :delayed (delayed death) or :immediate
 const SEED           = 42
 
 const OUTDIR = joinpath(@__DIR__, "output", "spheroid_ions")
@@ -154,8 +154,8 @@ for c in CONDITIONS
                            gsm2_cycle, TYPE_AT, TRACK_SEG; seed = hash((SEED, c.tag)))
         Random.seed!(hash((SEED, c.tag, :damage)))
         MC_loop_damage!(G(:ion), df, G(:irrad_cond), gsm2_cycle; show_progress = false)
-        if FATE === :legacy
-            compute_cell_survival_GSM2!(df, gsm2_cycle)      # resets timers: fine for legacy
+        if FATE === :immediate
+            compute_cell_survival_GSM2!(df, gsm2_cycle)      # resets timers: fine for immediate
         else
             for i in alive                                    # GSM2 survival without resets
                 ph = df.cell_cycle[i]

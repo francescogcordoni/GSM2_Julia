@@ -64,8 +64,8 @@ The framework is made of independent utility modules in `src/`:
 | Original loops, kept for validation | `fast = false`, `compare_engines` | — |
 | Polyenergetic beams (any set of energies or a sampled spectrum, e.g. Gaussian) | vector `setup_IonIrrad!`, `MC_dose_damage_poly!` | — |
 | Energy loss along the path (CSDA range inversion layer by layer) | `track_seg = false` | `true` (constant LET) |
-| Two fate models: immediate removal, or delayed death with incremental fate assignment | `set_fate_model!(:legacy \| :incremental)` | `:legacy` |
-| Delayed radiation-induced death (doomed cells stay on the lattice) | `sample_death_delay`, `DEATH_DELAY_MEAN_CYCLES` | with `:incremental` |
+| Two fate models: immediate removal, or delayed death with delayed fate assignment | `set_fate_model!(:immediate \| :delayed)` | `:delayed` |
+| Delayed radiation-induced death (doomed cells stay on the lattice) | `sample_death_delay`, `DEATH_DELAY_MEAN_CYCLES` | with `:delayed` |
 | Checkpoint model: arrest in all phases, or at the G2/M checkpoint only | `set_checkpoint!(:all \| :g2)` | `:all` |
 | Contact-inhibition threshold | `set_quiescence_threshold!(k)` | `k = 0` |
 | Distance-limited proliferation (growth plateau) | `set_division_limit!` | off |
@@ -132,7 +132,7 @@ DOSE_GY       = 2.0           # prescribed dose (Gy)
 TUMOR_RADIUS  = 350.0         # spheroid radius (µm)
 X_BOX         = 550.0         # box half-size (µm): keep ≥ TUMOR_RADIUS + ~150 µm
 TERMINAL_TIME = 72.0          # post-irradiation ABM window (h)
-const FATE    = :incremental  # :incremental (delayed death) or :legacy
+const FATE    = :delayed  # :delayed (delayed death) or :immediate
 ```
 
 The script prints the mean cell dose, the GSM<sup>2</sup> mean survival probability and the clonogenic surviving fraction; the last two should agree.
@@ -259,7 +259,7 @@ p_hat, ci_lo, ci_hi = survival_ci(cell_df.sp[cell_df.is_cell .== 1])
 
 `cell_df.sp` is the exact GSM<sup>2</sup> probability that the cell completes repair (0 if a Y lesion is present).
 
-> **Warning.** `compute_cell_survival_GSM2!` resets the timers of **every** cell. With the `:incremental` fate model, compute `sp` without resets:
+> **Warning.** `compute_cell_survival_GSM2!` resets the timers of **every** cell. With the `:delayed` fate model, compute `sp` without resets:
 > ```julia
 > for i in findall(==(1), cell_df.is_cell)
 >     ph = cell_df.cell_cycle[i]
@@ -271,14 +271,14 @@ p_hat, ci_lo, ci_hi = survival_ci(cell_df.sp[cell_df.is_cell .== 1])
 ### 7. Fate Assignment and Repair Timers
 
 ```julia
-set_fate_model!(:incremental)            # or :legacy (default); once, before the run
+set_fate_model!(:delayed)            # or :immediate; :delayed is the default; once, before the run
 compute_times_domain!(cell_df, gsm2_cycle; nat_apo = 1e-10, terminal_time = Inf, summary = true)
 ```
 
 | Model | Behaviour |
 |---|---|
-| `:legacy` | Resets the timers of all alive cells; lethally damaged cells are removed within hours. Used by the calibration scripts. |
-| `:incremental` | Processes only alive, non-doomed, damaged cells. Lethally damaged cells become **doomed**: they keep their site, do not divide, and are removed after a delay. Required for repeated irradiation and for `set_checkpoint!(:g2)`. |
+| `:immediate` | Resets the timers of all alive cells; lethally damaged cells are removed within hours. Used by the original calibration scripts. |
+| `:delayed` | Processes only alive, non-doomed, damaged cells. Lethally damaged cells become **doomed**: they keep their site, do not divide, and are removed after a delay. Required for repeated irradiation and for `set_checkpoint!(:g2)`. |
 
 The time of death of a doomed cell is its commitment time (the first lethal event of the GSM<sup>2</sup> kinetics, 0 for a lethal lesion induced directly) plus the delay. `terminal_time` is the repair window: with `Inf` all damage is resolved; with a finite window, unrepaired cells keep their residual damage for the next call.
 
@@ -375,7 +375,7 @@ With `track_seg = true` (default), all layers keep the entrance energy. `lets` a
 | Growth plateau | Division accepted with p(r) = 1/(1 + exp((r − R50)/w)) | `set_division_limit!(cell_df; R50, w)` |
 | Arrest after damage | `:all`: clock held in G1/S/G2 until repair; `:g2`: damaged cells keep cycling through G1/S and are held only in G2 | `set_checkpoint!(:all \| :g2)` |
 | Mitotic death | A cell whose mitosis ends before repair is complete is committed to death | — |
-| Delayed death (`:incremental`) | Removal after `T ~ Gamma(3, m·Tc/3)`, with m = 1 (G2, M), 1.25 (S), 1.5 (G1), 2.5 (G0) | `DEATH_DELAY_MEAN_CYCLES` |
+| Delayed death (`:delayed`) | Removal after `T ~ Gamma(3, m·Tc/3)`, with m = 1 (G2, M), 1.25 (S), 1.5 (G1), 2.5 (G0) | `DEATH_DELAY_MEAN_CYCLES` |
 | G0 radiosensitivity | G0 cells use the G1 parameters | — |
 | Lineage tracking | Daughters inherit the founder id of their parent | `set_founder_tracking!(cell_df)`, `founders()` |
 
@@ -383,7 +383,7 @@ With `track_seg = true` (default), all layers keep the entrance energy. `lets` a
 
 ## Fractionated and Continuous Irradiation
 
-**Fractions on a growing spheroid.** With `set_fate_model!(:incremental)`, repeat the irradiation on the **current** `cell_df`:
+**Fractions on a growing spheroid.** With `set_fate_model!(:delayed)`, repeat the irradiation on the **current** `cell_df`:
 
 ```julia
 set_oxygen_diffusion!(cell_df; density = :radial)                 # oxygen of the current spheroid
@@ -447,7 +447,7 @@ The dose is delivered as short pulses with uniform (low-LET) damage; between pul
 
 | Function | Values | Default |
 |---|---|---|
-| `set_fate_model!(m; death_delay)` | `:legacy`, `:incremental` | `:legacy` |
+| `set_fate_model!(m; death_delay)` | `:immediate`, `:delayed` | `:delayed` |
 | `set_checkpoint!(m)` | `:all`, `:g2` | `:all` |
 | `set_quiescence_threshold!(k; cell_df)` | integer ≥ 0 | 0 |
 | `set_division_limit!(cell_df; R50, w, center, rmax, rq)` / `clear_division_limit!()` | — | off |
@@ -547,7 +547,7 @@ Each utility file begins with an index of its public functions. Comment conventi
 - **Do the first setup at top level** (Julia ≥ 1.12 world age); inside functions read the setup globals with `Base.invokelatest(getfield, Main, :name)`.
 - **Restart Julia after replacing a source file**; check which definition is used with `functionloc`.
 - **Surviving fraction** = clonogenic cells right after `compute_times_domain!`; the cell count at later times includes regrowth and doomed cells.
-- **Incremental model**: never call `compute_cell_survival_GSM2!` between fractions without restoring the timers.
+- **Delayed model**: never call `compute_cell_survival_GSM2!` between fractions without restoring the timers.
 - **Box size**: keep ≥ 150–200 µm of free lattice around the spheroid (periodic lattice).
 - **Beam radius**: always from the current spheroid radius.
 - **Dose rate**: do not multiply the particle arrival rate by `au`.

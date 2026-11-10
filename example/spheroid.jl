@@ -15,9 +15,9 @@
 #   7. OUTPUT           — plots + CSVs saved to example/output/spheroid/
 #
 # FATE MODEL (FATE below)
-#   :legacy       lethally damaged cells are removed within hours (direct lethal
+#   :immediate       lethally damaged cells are removed within hours (direct lethal
 #                 lesions at t = 0, the others at the time of the lethal SSA event)
-#   :incremental  lethally damaged cells are "doomed": they stay in the spheroid,
+#   :delayed  lethally damaged cells are "doomed": they stay in the spheroid,
 #                 do not divide, and are removed after a phase-dependent delay
 #                 (~1–1.5 cell cycles for cycling cells, ~2.5 for G0)
 #   The clonogenic survival (alive and not doomed) is the same in both; only the
@@ -92,7 +92,7 @@ const CALC_TYPE      = "full"       # beam radius mode: "full" (whole spheroid) 
 const TERMINAL_TIME  = 72.0         # post-irradiation ABM window (h)
 const SNAPSHOT_HOURS = [0, 6, 12, 24, 48, 72]   # save population snapshots at these times (h)
 const NAT_APO        = 1e-10        # natural apoptosis rate (h⁻¹, background only)
-const FATE           = :incremental # :incremental (delayed death) or :legacy (removal within hours)
+const FATE           = :delayed # :delayed (delayed death) or :immediate (removal within hours)
 
 # Output directory
 const OUTDIR = joinpath(@__DIR__, "output", "spheroid")
@@ -261,10 +261,10 @@ println("\n--- GSM2 survival probability ---")
 @time compute_cell_survival_GSM2!(cell_df, gsm2_cycle)
 
 # compute_cell_survival_GSM2! resets death_time, cycle_time and recover_time of
-# EVERY cell. The legacy fate model reassigns all of them in compute_times_domain!,
-# the incremental model only reassigns damaged cells: put back the pre-irradiation
+# EVERY cell. The immediate fate model reassigns all of them in compute_times_domain!,
+# the delayed model only reassigns damaged cells: put back the pre-irradiation
 # clocks so that undamaged cells keep cycling (sp is kept).
-if FATE === :incremental
+if FATE === :delayed
     for col in (:death_time, :cycle_time, :recover_time)
         cell_df[!, col] .= cell_df_pristine[!, col]
     end
@@ -324,7 +324,7 @@ ts, snap_df = @time run_simulation_abm!(cell_df;
                 update_input      = true)
 
 # Cell number at the end of the ABM window: includes regrowth and, with the
-# incremental fate model, doomed cells not yet removed. It is NOT a survival fraction.
+# delayed fate model, doomed cells not yet removed. It is NOT a survival fraction.
 N_final  = count(cell_df.is_cell .== 1)
 N_doomed = count((cell_df.is_cell .== 1) .& isfinite.(cell_df.death_time))
 SF_abm   = N_final / N_init

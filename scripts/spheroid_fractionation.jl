@@ -19,11 +19,11 @@
 #                        next fraction
 #   5. OUTPUT            CSV for every DataFrame + plots in example/output/spheroid_fractionation/
 #
-# Fates: FATE = :incremental (default) keeps the cells doomed by an earlier
+# Fates: FATE = :delayed (default) keeps the cells doomed by an earlier
 # fraction and their delayed deaths, and leaves undamaged cells' clocks running.
 # compute_cell_survival_GSM2! is NOT called in that mode because it resets the
 # timers of every cell; the GSM2 survival probability is computed without resets.
-# FATE = :legacy reproduces example/spheroid.jl (timers of all cells reassigned at
+# FATE = :immediate reproduces example/spheroid.jl (timers of all cells reassigned at
 # every fraction, direct-Y cells removed at once, no death delay).
 #
 # HOW TO RUN
@@ -94,7 +94,7 @@ const TRACK_SEG   = true
 const TARGET_GEOM = "circle"
 const CALC_TYPE   = "full"
 const NAT_APO     = 1e-10
-const FATE        = :incremental      # :incremental (delayed death) or :legacy (as example/spheroid.jl)
+const FATE        = :delayed      # :delayed (delayed death) or :immediate (as example/spheroid.jl)
 const OXYGEN      = :diffusion        # :diffusion (recomputed at each fraction) or :uniform
 const O2_UNIFORM  = 21.0
 const SNAP_DT     = 1                 # h, resolution of the saved time series
@@ -135,7 +135,7 @@ if isdefined(Main, :set_fate_model!)
     set_fate_model!(FATE)
 else
     @warn "utilities_abm.jl has no set_fate_model!: compute_times_domain! is used as it is. " *
-          "For the incremental model with delayed death use the latest utilities_abm.jl."
+          "For the delayed fate model use the latest utilities_abm.jl."
 end
 hasproperty(cell_df, :death_type)  || (cell_df.death_type  = fill(-1, nrow(cell_df)))
 hasproperty(cell_df, :dam_X_total) || (cell_df.dam_X_total = zeros(Int, nrow(cell_df)))
@@ -235,8 +235,8 @@ function irradiate_fraction!(df::DataFrame, c, seed::UInt64)
     MC_loop_damage!(G(:ion), df, G(:irrad_cond), gsm2_cycle; show_progress = false)
 
     alive = findall(==(1), df.is_cell)
-    if FATE === :legacy
-        compute_cell_survival_GSM2!(df, gsm2_cycle)     # resets timers: fine in legacy mode
+    if FATE === :immediate
+        compute_cell_survival_GSM2!(df, gsm2_cycle)     # resets timers: fine in immediate mode
     else
         for i in alive                                   # GSM2 survival without resetting timers
             ph = df.cell_cycle[i]

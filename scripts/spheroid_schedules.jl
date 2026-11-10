@@ -73,7 +73,7 @@ const TRACK_SEG   = true
 const TARGET_GEOM = "circle"
 const CALC_TYPE   = "full"
 const NAT_APO     = 1e-10
-const FATE        = :incremental
+const FATE        = :delayed
 const OXYGEN      = :diffusion        # profile of the current spheroid, recomputed before every fraction
 const O2_DENSITY  = :radial           # local cell density per shell: space freed by dead cells reoxygenates
 const O2_UNIFORM  = 21.0
@@ -114,7 +114,7 @@ if isdefined(Main, :set_fate_model!)
     set_fate_model!(FATE)
 else
     @warn "utilities_abm.jl has no set_fate_model!: compute_times_domain! is used as it is. " *
-          "For the incremental model with delayed death use the latest utilities_abm.jl."
+          "For the delayed fate model use the latest utilities_abm.jl."
 end
 hasproperty(cell_df, :death_type)  || (cell_df.death_type  = fill(-1, nrow(cell_df)))
 hasproperty(cell_df, :dam_X_total) || (cell_df.dam_X_total = zeros(Int, nrow(cell_df)))
@@ -200,8 +200,8 @@ function irradiate_fraction!(df::DataFrame, c, seed::UInt64)
     MC_loop_damage!(G(:ion), df, G(:irrad_cond), gsm2_cycle; show_progress = false)
 
     alive = findall(==(1), df.is_cell)
-    if FATE === :legacy
-        compute_cell_survival_GSM2!(df, gsm2_cycle)     # resets timers: fine in legacy mode
+    if FATE === :immediate
+        compute_cell_survival_GSM2!(df, gsm2_cycle)     # resets timers: fine in immediate mode
     else
         for i in alive                                   # GSM2 survival without resetting timers
             ph = df.cell_cycle[i]

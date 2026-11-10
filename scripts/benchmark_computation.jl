@@ -95,7 +95,7 @@ gsm2_cycle[2] = GSM2(R_S,  A_S,  B_S,  RD, RN)
 gsm2_cycle[3] = GSM2(R_G2, A_G2, B_G2, RD, RN)
 gsm2_cycle[4] = GSM2(R_AVG, A_AVG, B_AVG, RD, RN)
 setup_GSM2!(R_AVG, A_AVG, B_AVG, RD, RN)
-isdefined(Main, :set_fate_model!) && set_fate_model!(:incremental)
+isdefined(Main, :set_fate_model!) && set_fate_model!(:delayed)
 
 G(name::Symbol) = Base.invokelatest(getfield, Main, name)
 

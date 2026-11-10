@@ -9,10 +9,10 @@
 #! FUNCTIONS
 #! ---------
 #~ Radiation damage, repair and fate
-#?   set_fate_model!(:legacy | :incremental; death_delay = true)
-#       :legacy (DEFAULT) = previous behaviour used by the calibration scripts:
+#?   set_fate_model!(:immediate | :delayed; death_delay = true)
+#       :immediate = previous behaviour used by the calibration scripts:
 #       direct-Y cells removed at t = 0, lethal events at the SSA time, all
-#       timers reset at each call. :incremental = only damaged, non-doomed cells
+#       timers reset at each call. :delayed (DEFAULT) = only damaged, non-doomed cells
 #       processed, doomed cells kept with delayed death, checkpoint modes.
 #?   compute_times_domain!(cell_df, gsm2_cycle; nat_apo, terminal_time, verbose,
 #?                         print_every, summary, model = FATE_MODEL[], checkpoint = CHECKPOINT[])
@@ -22,7 +22,7 @@
 #?   sample_death_delay(phase), _doom_cell!(cell_df, i, t_commit, phase, type)
 #?   set_death_delay!(; scale, shape)
 #       Mean delay = scale × DEATH_DELAY_MEAN_CYCLES[phase] × cycle length (Gamma, shape k).
-#       Defaults scale = 1, k = 3. Used by the :incremental fate model.
+#       Defaults scale = 1, k = 3. Used by the :delayed fate model.
 #?   compute_repair_domain(X, Y, gsm2; terminal_time, rng, verbose, max_events_log, au)
 #           -> (death_time, recover_time, death_code, X_final, Y_final)
 #       death_code: 1 = direct Y, 2 = misrepair (a), 3 = interaction (b), 0 = recovered, -1 = timeout.
@@ -126,7 +126,7 @@ const DEATH_DELAY_K     = Ref(DEATH_DELAY_SHAPE)
 """
     set_death_delay!(; scale = 1.0, shape = 3.0) -> Nothing
 
-Death delay of doomed cells (:incremental fate model): Gamma with shape `shape` and mean
+Death delay of doomed cells (:delayed fate model): Gamma with shape `shape` and mean
 `scale × DEATH_DELAY_MEAN_CYCLES[phase] × cycle length` (G2/M 1, S 1.25, G1 1.5, G0 2.5
 cycles at scale 1). Global: set it before a threaded loop, never inside it.
 """
@@ -198,13 +198,13 @@ function _ensure_fate_columns!(cell_df::DataFrame)
 end
 
 """
-Legacy fate assignment (the behaviour all existing calibration scripts were built on):
+Immediate fate assignment (the behaviour all existing calibration scripts were built on):
 resets the timers of every alive cell, removes cells with direct Y lesions at t = 0
 (`is_cell = 0`), schedules other lethal events at the SSA time (no extra delay),
 gives survivors a fresh phase time with the hard-coded durations (G1 11 h, S 7 h,
 G2 5 h, M 1 h), and holds unrepaired cells (timeout) with `cycle_time = Inf`.
 """
-function _compute_times_domain_legacy!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
+function _compute_times_domain_immediate!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
                                 nat_apo::Float64 = 1e-10,
                                 terminal_time::Float64 = Inf,
                                 verbose::Bool = false, print_every::Int = 0, summary::Bool = true)
@@ -397,17 +397,17 @@ function _compute_times_domain_legacy!(cell_df::DataFrame, gsm2_cycle::Vector{GS
     return nothing
 end
 
-const FATE_MODEL = Ref(:legacy)
+const FATE_MODEL = Ref(:delayed)
 
 """
-    set_fate_model!(:legacy | :incremental; death_delay = true)
+    set_fate_model!(:immediate | :delayed; death_delay = true)
 
 Selects how `compute_times_domain!` assigns fates.
-- `:legacy` (default): previous behaviour, used by the calibration scripts
+- `:immediate`: previous behaviour, used by the calibration scripts
   (direct-Y cells removed at t = 0, lethal events at the SSA time, every alive
   cell's timers reset at each call). Delays such as tdetA/tdetB/tdetY are then
   added by the scripts themselves.
-- `:incremental`: only alive, non-doomed, damaged cells are processed; other
+- `:delayed` (default): only alive, non-doomed, damaged cells are processed; other
   cells keep their timers; lethal cells are doomed with `_doom_cell!` (delayed
   death if `death_delay = true`, otherwise death at the commitment time); the
   checkpoint mode (`set_checkpoint!`) applies. Needed for repeated calls
@@ -415,9 +415,9 @@ Selects how `compute_times_domain!` assigns fates.
 """
 const DEATH_DELAY_ON = Ref(true)
 function set_fate_model!(model::Symbol; death_delay::Bool = true)
-    model in (:legacy, :incremental) || error("fate model must be :legacy or :incremental, got $model")
+    model in (:immediate, :delayed) || error("fate model must be :immediate or :delayed, got $model")
     FATE_MODEL[] = model; DEATH_DELAY_ON[] = death_delay
-    println("[fate] model = $model", model === :incremental ? "  (death delay $(death_delay ? "on" : "off"))" : "")
+    println("[fate] model = $model", model === :delayed ? "  (death delay $(death_delay ? "on" : "off"))" : "")
     return nothing
 end
 
@@ -433,27 +433,27 @@ function compute_times_domain!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
                                nat_apo::Float64 = 1e-10, terminal_time::Float64 = Inf,
                                verbose::Bool = false, print_every::Int = 0, summary::Bool = true,
                                model::Symbol = FATE_MODEL[], checkpoint::Symbol = CHECKPOINT[])
-    if model === :legacy
-        checkpoint === :all || error("the :$checkpoint checkpoint needs set_fate_model!(:incremental)")
-        return _compute_times_domain_legacy!(cell_df, gsm2_cycle; nat_apo = nat_apo,
+    if model === :immediate
+        checkpoint === :all || error("the :$checkpoint checkpoint needs set_fate_model!(:delayed)")
+        return _compute_times_domain_immediate!(cell_df, gsm2_cycle; nat_apo = nat_apo,
                    terminal_time = terminal_time, verbose = verbose,
                    print_every = print_every, summary = summary)
     end
-    return _compute_times_domain_incremental!(cell_df, gsm2_cycle; nat_apo = nat_apo,
+    return _compute_times_domain_delayed!(cell_df, gsm2_cycle; nat_apo = nat_apo,
                terminal_time = terminal_time, verbose = verbose, print_every = print_every,
                summary = summary, checkpoint = checkpoint)
 end
 
 """
-    _compute_times_domain_incremental!(cell_df, gsm2_cycle; ..., checkpoint) -> Nothing
+    _compute_times_domain_delayed!(cell_df, gsm2_cycle; ..., checkpoint) -> Nothing
 
-Incremental fate assignment. Processes only cells that are alive, not already doomed, and carry damage.
+Delayed fate assignment. Processes only cells that are alive, not already doomed, and carry damage.
 `terminal_time` = repair window (Inf: resolve all damage). Outcomes:
 - lethal event (or direct Y) → doomed via `_doom_cell!` (delayed death);
 - repaired within the window → `recover_time`, cycle per checkpoint mode;
 - not repaired within the window (timeout) → residual damage kept, cycle per mode.
 """
-function _compute_times_domain_incremental!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
+function _compute_times_domain_delayed!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
                                nat_apo::Float64 = 1e-10,
                                terminal_time::Float64 = Inf,
                                verbose::Bool = false, print_every::Int = 0,
@@ -2471,7 +2471,7 @@ function irradiate_continuous_abm!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
     for k in 1:np
         add_uniform_damage!(cell_df, dD, K_tot, L_tot, rng)
         compute_times_domain!(cell_df, gsm2_cycle; terminal_time = Δ, summary = false,
-                              model = :incremental, checkpoint = checkpoint)
+                              model = :delayed, checkpoint = checkpoint)
         ts, _ = run_simulation_abm!(cell_df; terminal_time = Δ, snapshot_times = Int[],
                                     verbose = false, return_dataframes = false,
                                     update_input = true)
@@ -2494,7 +2494,7 @@ function irradiate_continuous_abm!(cell_df::DataFrame, gsm2_cycle::Vector{GSM2};
             G0 = count(==("G0"), phases) / nph)
 
     compute_times_domain!(cell_df, gsm2_cycle; terminal_time = Inf, summary = false,
-                          model = :incremental, checkpoint = checkpoint)   # resolve residual damage
+                          model = :delayed, checkpoint = checkpoint)   # resolve residual damage
     alive  = cell_df.is_cell .== 1
     clono  = count(alive .& .!isfinite.(cell_df.death_time))
     present = count(alive)

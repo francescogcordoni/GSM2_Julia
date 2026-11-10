@@ -80,7 +80,7 @@ const TRACK_SEG   = true
 const TARGET_GEOM = "circle"
 const CALC_TYPE   = "full"
 const NAT_APO     = 1e-10
-const FATE        = :incremental      # :incremental (delayed death) or :legacy (as example/spheroid.jl)
+const FATE        = :delayed      # :delayed (delayed death) or :immediate (as example/spheroid.jl)
 const OXYGEN      = :diffusion        # :diffusion or :uniform
 const O2_UNIFORM  = 21.0
 
@@ -194,7 +194,7 @@ function irradiated_copy(real, estep, D::Float64, seed::UInt64)
         g  = (ph == "G1" || ph == "G0") ? gsm2_cycle[1] : ph == "S" ? gsm2_cycle[2] : gsm2_cycle[3]
         domain_GSM2(df.dam_X_dom[i], df.dam_Y_dom[i], g)
     end for i in ALIVE0)
-    FATE === :legacy && compute_cell_survival_GSM2!(df, gsm2_cycle)
+    FATE === :immediate && compute_cell_survival_GSM2!(df, gsm2_cycle)
     return df, sp_mean, mean(df.dose_cell[ALIVE0])
 end
 

@@ -71,7 +71,7 @@ const TRACK_SEG   = true
 const TARGET_GEOM = "circle"
 const CALC_TYPE   = "full"
 const NAT_APO     = 1e-10
-const FATE        = :incremental
+const FATE        = :delayed
 
 const OUTDIR = joinpath(@__DIR__, "output", "spheroid_fractionation_oxygen")
 mkpath(OUTDIR)
@@ -131,7 +131,7 @@ if isdefined(Main, :set_fate_model!)
     set_fate_model!(FATE)
 else
     @warn "utilities_abm.jl has no set_fate_model!: compute_times_domain! is used as it is. " *
-          "For the incremental model with delayed death use the latest utilities_abm.jl."
+          "For the delayed fate model use the latest utilities_abm.jl."
 end
 hasproperty(cell_df, :death_type)  || (cell_df.death_type  = fill(-1, nrow(cell_df)))
 hasproperty(cell_df, :dam_X_total) || (cell_df.dam_X_total = zeros(Int, nrow(cell_df)))
