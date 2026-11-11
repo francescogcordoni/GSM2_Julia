@@ -178,8 +178,6 @@ r    = 2.5657;  a    = 0.01481;  b    = 0.01266   # average
 rd   = 0.8;     Rn   = 7.2
 ```
 
-**Time scaling.** The repair SSA multiplies every waiting time by `au` (keyword of `compute_repair_domain`; `au = 4` in the paper). Acute survival depends only on `a/r` and `b/r`, so `au` sets the absolute repair time scale: the effective repair half-time of G1 cells is `au·ln2/(r + a) ≈ 1 h`. When converting a dose rate into a particle arrival rate, do **not** multiply by `au`.
-
 ### 3. Environment Setup
 
 The setup functions write their results as globals of `Main` (`@eval Main`). In Julia ≥ 1.12, a global created during a function call is not visible to code that is already running, so **do the first setup at top level** (as in `example/spheroid.jl`); later calls inside functions only update existing globals. Inside functions, read them with `Base.invokelatest(getfield, Main, :name)`.
@@ -550,7 +548,6 @@ Each utility file begins with an index of its public functions. Comment conventi
 - **Delayed model**: never call `compute_cell_survival_GSM2!` between fractions without restoring the timers.
 - **Box size**: keep ≥ 150–200 µm of free lattice around the spheroid (periodic lattice).
 - **Beam radius**: always from the current spheroid radius.
-- **Dose rate**: do not multiply the particle arrival rate by `au`.
 - **Reproducibility**: `Random.seed!(n)` before `MC_loop_damage!`, `compute_times_domain!` and `run_simulation_abm!`, and pass `seed` to `MC_dose_CPU!`.
 - **Threads**: start Julia with `--threads auto`; set global options (`set_*!`) before threaded loops.
 - **Memory**: damage and dose vectors are allocated on every lattice site, so memory grows as `(X_box / R_cell)³`.
