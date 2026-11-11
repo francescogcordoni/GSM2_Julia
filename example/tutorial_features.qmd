@@ -117,7 +117,7 @@ N_SIGMA  = 2.5       # spectrum truncated at ±N_SIGMA·σ
 DOSE_GY  = 2.0       # dose at the entrance of the target (Gy)
 
 # Geometry
-TUMOR_RADIUS = 200.0;  R_CELL = 15.0;  X_BOX = 400.0;  X_VOXEL = 800.0
+TUMOR_RADIUS = 400.0;  R_CELL = 15.0;  X_BOX = 600.0;  X_VOXEL = 800.0
 RD = 0.8;  RN = 7.2
 
 # Physics and run options
@@ -314,7 +314,7 @@ SF_clono = count(alive0 .& .!doomed0) / N_init
 
 ```{julia}
 #| label: fig-survival
-#| fig-cap: "Left: survival probability as a function of depth. Right: as a function of the oxygen level (binned means). The hypoxic core is more resistant."
+#| fig-cap: "Left: survival probability (log scale) as a function of depth. Right: as a function of the oxygen level (binned means). The hypoxic core is more resistant."
 
 d   = cell_df[alive0, :]
 gz  = sort(combine(groupby(d, :z), :sp => mean => :sp), :z)
@@ -323,7 +323,8 @@ gO  = sort(combine(groupby(d, :Ob), :sp => mean => :sp, nrow => :n), :Ob)
 gO  = gO[gO.n .>= 5, :]
 
 p1 = plot(gz.z, gz.sp; marker = :circle, ms = 3, color = :seagreen, label = "",
-          xlabel = "z (µm)", ylabel = "Mean survival probability", ylims = (0, 1))
+          xlabel = "z (µm)", ylabel = "Mean survival probability", yscale = :log10,
+          ylims = (minimum(filter(>(0), gz.sp)) / 1.5, 1.0))
 p2 = plot(gO.Ob, gO.sp; marker = :circle, ms = 3, color = :steelblue, label = "",
           xlabel = "O₂ (%)", ylabel = "Mean survival probability", ylims = (0, 1))
 plot(p1, p2; layout = (1, 2), size = (900, 380))
@@ -398,15 +399,15 @@ plot(p1, p2; layout = (1, 2), size = (980, 380))
 
 ```{julia}
 #| label: fig-snapshots
-#| fig-cap: "Half spheroid (y ≥ 0) at 0, 24, 48 and 96 h after irradiation, coloured by cell-cycle phase; black: cells committed to death."
+#| fig-cap: "Half spheroid (y ≥ 0) at 0, 24, 48 and 96 h after irradiation, coloured by cell-cycle phase (cells committed to death are not shown)."
 
 function half3d(s, t)
     k = s.y .>= cy
     p = plot(; xlabel = "x (µm)", ylabel = "y (µm)", zlabel = "z (µm)", legend = false,
              title = "$t h", titlefontsize = 10, camera = (-30, 20), aspect_ratio = :equal,
              left_margin = 2Plots.mm, bottom_margin = 2Plots.mm)
-    for c in vcat(PHASES, "doomed")
-        sel = k .& (c == "doomed" ? s.doomed : (.!s.doomed .& (s.phase .== c)))
+    for c in PHASES                      # doomed cells are not drawn
+        sel = k .& .!s.doomed .& (s.phase .== c)
         any(sel) && scatter!(p, s.x[sel], s.y[sel], s.z[sel]; ms = 2.5, msw = 0, color = PCOL[c])
     end
     p
